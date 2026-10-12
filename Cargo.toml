@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/sma4-rom",
+    "crates/sma4-core",
+    "crates/sma4-assets",
+    "crates/sma4-extract",
+    "crates/sma4-bevy",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+sma4-rom = { path = "crates/sma4-rom" }
+sma4-core = { path = "crates/sma4-core" }
+sma4-assets = { path = "crates/sma4-assets" }
+png = "0.18"
+thiserror = "2"
+
+# Bevy is slow in debug; optimize dependencies even in dev builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

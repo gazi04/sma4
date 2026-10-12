@@ -1,0 +1,15 @@
+/target
+*.gba
+*.sav
+/tools/ghidra/project/
+/tools/ghidra/export/
+/tools/ghidra/headless.log
+/assets/extracted/
+*.lock~
+/tools/.venv/
+__pycache__/
+*.pyc
+/superMarioAdvance4.lock
+/superMarioAdvance4.rep/
+/superMarioAdvance4.gpr
+/tools/analysis/out/
