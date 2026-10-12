@@ -1,0 +1,8 @@
+[package]
+name = "sma4-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+sma4-assets.workspace = true
