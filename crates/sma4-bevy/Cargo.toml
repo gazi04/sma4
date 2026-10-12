@@ -1,0 +1,14 @@
+[package]
+name = "sma4-bevy"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sma4"
+path = "src/main.rs"
+
+[dependencies]
+sma4-assets.workspace = true
+sma4-core.workspace = true
+bevy = "0.20"

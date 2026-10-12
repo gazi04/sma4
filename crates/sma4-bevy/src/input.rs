@@ -1,0 +1,129 @@
+use std::collections::VecDeque;
+
+use bevy::{
+    prelude::*,
+    render::view::screenshot::{Screenshot, save_to_disk},
+};
+use sma4_core::Buttons;
+
+use crate::GameRes;
+
+pub struct InputPlugin;
+
+impl Plugin for InputPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(FixedUpdate, step_game).add_systems(Update, finish_script);
+    }
+}
+
+const KEYMAP: [(KeyCode, Buttons); 10] = [
+    (KeyCode::KeyX, Buttons::A),
+    (KeyCode::KeyZ, Buttons::B),
+    (KeyCode::Backspace, Buttons::SELECT),
+    (KeyCode::Enter, Buttons::START),
+    (KeyCode::ArrowRight, Buttons::RIGHT),
+    (KeyCode::ArrowLeft, Buttons::LEFT),
+    (KeyCode::ArrowUp, Buttons::UP),
+    (KeyCode::ArrowDown, Buttons::DOWN),
+    (KeyCode::KeyS, Buttons::R),
+    (KeyCode::KeyA, Buttons::L),
+];
+
+fn held_buttons(keys: &ButtonInput<KeyCode>) -> Buttons {
+    let mut b = Buttons::empty();
+    for (key, button) in KEYMAP {
+        if keys.pressed(key) {
+            b |= button;
+        }
+    }
+    b
+}
+
+/// Scripted input for automated checks: replaces the keyboard, then takes a screenshot
+/// and exits. Format: whitespace-separated `<buttons><frames>`, buttons from
+/// `R L U D A B` (or `-` for none), e.g. `-30 R120 RA20 R60`.
+#[derive(Resource)]
+pub struct Script {
+    steps: VecDeque<(Buttons, u32)>,
+    screenshot: String,
+    state: ScriptState,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ScriptState {
+    Running,
+    Captured(u32),
+}
+
+impl Script {
+    pub fn parse(spec: &str, screenshot: String) -> Option<Self> {
+        let mut steps = VecDeque::new();
+        for tok in spec.split_whitespace() {
+            let split = tok.find(|c: char| c.is_ascii_digit())?;
+            let (keys, frames) = tok.split_at(split);
+            let mut b = Buttons::empty();
+            for c in keys.chars() {
+                b |= match c {
+                    'R' => Buttons::RIGHT,
+                    'L' => Buttons::LEFT,
+                    'U' => Buttons::UP,
+                    'D' => Buttons::DOWN,
+                    'A' => Buttons::A,
+                    'B' => Buttons::B,
+                    '-' => Buttons::empty(),
+                    _ => return None,
+                };
+            }
+            steps.push_back((b, frames.parse().ok()?));
+        }
+        Some(Self { steps, screenshot, state: ScriptState::Running })
+    }
+
+    fn next(&mut self) -> Option<Buttons> {
+        let (b, n) = self.steps.front_mut()?;
+        let b = *b;
+        *n -= 1;
+        if *n == 0 {
+            self.steps.pop_front();
+        }
+        Some(b)
+    }
+}
+
+/// One core tick per fixed step; the core never sees real time.
+fn step_game(keys: Res<ButtonInput<KeyCode>>, script: Option<ResMut<Script>>, mut game: ResMut<GameRes>) {
+    let held = match script {
+        Some(mut s) => match s.next() {
+            Some(b) => b,
+            None => return, // script over: freeze so the screenshot shows the final frame
+        },
+        None => held_buttons(&keys),
+    };
+    game.0.step(held);
+}
+
+fn finish_script(mut commands: Commands, script: Option<ResMut<Script>>, game: Res<GameRes>, mut exit: MessageWriter<AppExit>) {
+    let Some(mut s) = script else { return };
+    let done = s.steps.is_empty();
+    match s.state {
+        ScriptState::Running if done => {
+            let p = &game.0.player;
+            println!(
+                "script done at frame {}: player px={:?} v=({}, {}) on_ground={}",
+                game.0.frame,
+                p.px(),
+                p.vx,
+                p.vy,
+                p.on_ground
+            );
+            commands.spawn(Screenshot::primary_window()).observe(save_to_disk(s.screenshot.clone()));
+            s.state = ScriptState::Captured(0);
+        }
+        // Give the screenshot a few frames to be written before exiting.
+        ScriptState::Captured(n) if n > 30 => {
+            exit.write(AppExit::Success);
+        }
+        ScriptState::Captured(n) => s.state = ScriptState::Captured(n + 1),
+        ScriptState::Running => {}
+    }
+}
