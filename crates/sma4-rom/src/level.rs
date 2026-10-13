@@ -120,3 +120,29 @@ mod tests {
         assert_eq!(s.kind(m(0x00)), TileKind::Empty);
     }
 }
+
+/// Enemy-list pointers, indexed by enemy-list id (from the world map or a level header).
+const ENEMY_LISTS: u32 = 0x0813_6B14;
+
+/// One enemy-list record: object type, metatile column and row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnemyRecord {
+    pub kind: u8,
+    pub col: u8,
+    pub row: u8,
+}
+
+impl Rom {
+    /// Reads an enemy list: one header byte, then 4-byte records `[00, type, col, row]`
+    /// until 0xFF. (A few lists in the ROM contain longer records; not decoded yet.)
+    pub fn enemy_list(&self, id: u16) -> Result<Vec<EnemyRecord>> {
+        let mut p = self.ptr(ENEMY_LISTS + id as u32 * 4)? + 1;
+        let mut out = Vec::new();
+        while self.u8(p)? != 0xFF {
+            let r = self.slice(p, 4)?;
+            out.push(EnemyRecord { kind: r[1], col: r[2], row: r[3] });
+            p += 4;
+        }
+        Ok(out)
+    }
+}
