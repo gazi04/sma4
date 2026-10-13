@@ -5,24 +5,27 @@
 
 mod emu;
 mod level;
+mod oam;
+mod objects;
+mod screens;
+mod worldmap;
 
 use std::path::PathBuf;
 
 use sma4_assets::{DEFAULT_DIR, Rgba, gfx_path, write_manifest};
 use sma4_rom::{Rom, gfx};
 
-const USAGE: &str = "usage: sma4-extract <rom.gba> [--out <dir>] [--level <id>:<tileset> ...]
+const USAGE: &str = "usage: sma4-extract <rom.gba> [--out <dir>] [--level <id>:<tileset>:<enemies> ...]
   --out    output directory (default assets/extracted)
-  --level  level to extract, hex id and tileset, repeatable (default 0x22:1 = World 1-1)";
+  --level  level to extract: hex level id, tileset, hex enemy-list id; repeatable
+           (default: every course level of World 1's map, 1-1 first)";
 
-/// World 1-1 (first entry of the World 1 map table at 0x08133AF4).
-const DEFAULT_LEVELS: &[(u16, u8)] = &[(0x22, 1)];
 const SHEET_COLS: usize = 32;
 
 struct Args {
     rom: String,
     out: PathBuf,
-    levels: Vec<(u16, u8)>,
+    levels: Vec<(u16, u8, u16)>,
 }
 
 fn parse_args() -> Option<Args> {
@@ -35,16 +38,16 @@ fn parse_args() -> Option<Args> {
             "--out" => out = it.next()?.into(),
             "--level" => {
                 let spec = it.next()?;
-                let (id, ts) = spec.split_once(':')?;
-                let id = u16::from_str_radix(id.trim_start_matches("0x"), 16).ok()?;
-                levels.push((id, ts.parse().ok()?));
+                let mut parts = spec.split(':');
+                let hex = |s: &str| u16::from_str_radix(s.trim_start_matches("0x"), 16).ok();
+                let id = hex(parts.next()?)?;
+                let tileset = parts.next()?.parse().ok()?;
+                let enemies = hex(parts.next()?)?;
+                levels.push((id, tileset, enemies));
             }
             "-h" | "--help" => return None,
             _ => rom = Some(a),
         }
-    }
-    if levels.is_empty() {
-        levels = DEFAULT_LEVELS.to_vec();
     }
     Some(Args { rom: rom?, out, levels })
 }
@@ -76,17 +79,50 @@ fn run(args: &Args) -> Result<(), String> {
     println!("output: {}", args.out.display());
 
     let mut m = emu::Machine::new(rom.bytes()).map_err(|e| e.to_string())?;
-    for &(id, tileset) in &args.levels {
-        let asset = level::extract(&rom, &mut m, id, tileset).map_err(|e| {
+    // By default: every course level World 1's map can enter (1-1 first).
+    let levels = if args.levels.is_empty() {
+        worldmap::course_levels(&rom, &mut m, 0).map_err(|e| e.0)?
+    } else {
+        args.levels.clone()
+    };
+    for (n, &(id, tileset, enemies)) in levels.iter().enumerate() {
+        let asset = level::extract(&rom, &mut m, id, tileset, enemies).map_err(|e| {
             format!("level {id:#x} ({:#010x}): {}", level::level_addr(&rom, id), e.0)
         })?;
         asset.write(&args.out).map_err(|e| e.to_string())?;
+        // Object graphics are loaded by the same routines; take them after the first level.
+        if n == 0 {
+            objects::extract_coin(&rom, &m, &args.out).map_err(|e| e.0)?;
+            objects::extract_walker(&rom, &m, &args.out).map_err(|e| e.0)?;
+            objects::extract_sparkle(&m, &args.out).map_err(|e| e.0)?;
+            objects::extract_hud(&rom, &m, &args.out).map_err(|e| e.0)?;
+            objects::extract_score_popups(&rom, &m, &args.out).map_err(|e| e.0)?;
+            objects::extract_koopas(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+            objects::extract_piranhas(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+            objects::extract_puff(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+            objects::extract_goal(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+            objects::extract_course_clear(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+            objects::extract_growth_item(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+            objects::extract_leaf(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+            if let Ok(d) = std::env::var("SMA4_DUMP_OBJ") {
+                std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+                objects::dump_obj_vram(&m, std::path::Path::new(&d)).map_err(|e| e.0)?;
+            }
+            // Last: it overwrites part of OBJ VRAM.
+            objects::extract_player(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+            // These reset the machine.
+            screens::extract_map(&mut m, 0, &args.out).map_err(|e| e.0)?;
+            worldmap::extract_world_map(&rom, &mut m, 0, &args.out).map_err(|e| e.0)?;
+            screens::extract_game_over(rom.bytes(), &mut m, &args.out).map_err(|e| e.0)?;
+            screens::extract_game_over_menu(&mut m, &args.out).map_err(|e| e.0)?;
+        }
     }
 
     let sheets = extract_gfx(&rom, args)?;
     println!("  {sheets} graphics sheets");
 
-    let levels: Vec<String> = args.levels.iter().map(|(id, ts)| format!("{id:#05x}:{ts}")).collect();
+    let levels: Vec<String> =
+        levels.iter().map(|(id, ts, en)| format!("{id:#05x}:{ts}:{en:#04x}")).collect();
     write_manifest(
         &args.out,
         &format!(

@@ -5,6 +5,8 @@
 //! manifest.txt              which ROM the assets came from
 //! levels/level_XXX.bin      level layout (metatile ids), solidity, backdrop (XXX = level id, hex)
 //! levels/level_XXX.png      all 512 metatiles of the level's tileset, 16x16 each, stacked
+//! objects/coin_spin.png     spin frames of a coin popping out of a block
+//! map/world1_walk.bin       world map grid, start, enterable spots; world1_meta.png / _mario.png
 //! gfx/XXXXXXXX.png          every LZ77 tile blob in the ROM (greyscale), for the viewer
 //! ```
 //! The game reads only these files; it never opens the ROM.
@@ -14,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub const METATILE: u32 = 16;
 pub const DEFAULT_DIR: &str = "assets/extracted";
 
-const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV03";
+const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV09";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssetError {
@@ -99,21 +101,37 @@ impl Rgba {
     }
 }
 
+/// Second-plane metatiles below this low byte collide like another id (0x080A06E8).
+pub const HIGH_IDS: usize = 0x26;
+
 /// SMA4/SMB3 solidity rule: within each quadrant (low byte >> 6), ids at or above
-/// `solid[q]` are solid and ids at or above `top[q]` can be stood on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// `solid[q]` are solid and ids at or above `top[q]` can be stood on. Metatiles of the
+/// second plane (id | 0x100, the 0x4000 plane of the level RAM) with a low byte below
+/// `HIGH_IDS` collide like `high[low]` (0x080A06E8: 0x0813E174[tileset]); the others run
+/// special handlers (slopes and such, 0x0817315C) not ported yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Solidity {
     pub top: [u8; 4],
     pub solid: [u8; 4],
+    pub high: [u8; HIGH_IDS],
+}
+
+impl Default for Solidity {
+    fn default() -> Self {
+        Self { top: [0; 4], solid: [0; 4], high: [0; HIGH_IDS] }
+    }
 }
 
 impl Solidity {
     pub fn kind(&self, metatile: u16) -> TileKind {
-        if metatile >= 0x100 {
-            // High-layer metatiles are decorations/specials; collision TBD.
-            return TileKind::Empty;
-        }
-        let id = metatile as u8;
+        let id = if metatile >= 0x100 {
+            match self.high.get(metatile as u8 as usize) {
+                Some(&id) => id,
+                None => return TileKind::Empty,
+            }
+        } else {
+            metatile as u8
+        };
         let q = (id >> 6) as usize;
         if id >= self.solid[q] {
             TileKind::Solid
@@ -125,8 +143,95 @@ impl Solidity {
     }
 }
 
+/// Block-hit rules of a tileset, read from the ROM by the extractor (see docs/re-notes.md,
+/// "Blocks and items"). The game logic that uses them lives in `sma4-core`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockRules {
+    /// Per low-layer metatile id: behaviour when hit by the player's head-centre probe while
+    /// moving up, or `NOT_BUMPABLE`.
+    pub bump_behaviour: [u8; 256],
+    /// Per metatile id: high nibble of the hit result (selects the final tile kind).
+    pub result_hi: [u8; 256],
+    /// Object type spawned for a hit result's low nibble (0 = none).
+    pub item_types: [u16; 16],
+    /// Final tile kind for a hit result's high nibble.
+    pub final_kind: [u8; 16],
+    /// Metatile written when a bump finishes, indexed by `kind - 1`.
+    pub final_metatile: [u16; 32],
+    /// Bump-block vertical speed (1/16 px per frame) indexed by the bump timer (10 -> 1).
+    pub bounce: [i8; 11],
+}
+
+impl BlockRules {
+    pub const NOT_BUMPABLE: u8 = 0xFF;
+    const BYTES: usize = 256 + 256 + 32 + 16 + 64 + 11;
+
+    fn write(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.bump_behaviour);
+        out.extend_from_slice(&self.result_hi);
+        self.item_types.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+        out.extend_from_slice(&self.final_kind);
+        self.final_metatile.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+        out.extend(self.bounce.iter().map(|&b| b as u8));
+    }
+
+    fn read(d: &[u8]) -> Self {
+        let u16s = |d: &[u8]| -> Vec<u16> { d.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect() };
+        let mut p = 0;
+        let mut take = |n: usize| {
+            let s = &d[p..p + n];
+            p += n;
+            s
+        };
+        Self {
+            bump_behaviour: take(256).try_into().unwrap(),
+            result_hi: take(256).try_into().unwrap(),
+            item_types: u16s(take(32)).try_into().unwrap(),
+            final_kind: take(16).try_into().unwrap(),
+            final_metatile: u16s(take(64)).try_into().unwrap(),
+            bounce: take(11).iter().map(|&b| b as i8).collect::<Vec<_>>().try_into().unwrap(),
+        }
+    }
+}
+
+impl Default for BlockRules {
+    fn default() -> Self {
+        Self {
+            bump_behaviour: [Self::NOT_BUMPABLE; 256],
+            result_hi: [0; 256],
+            item_types: [0; 16],
+            final_kind: [0; 16],
+            final_metatile: [0; 32],
+            bounce: [0; 11],
+        }
+    }
+}
+
+/// One entry of a level's enemy list (ROM table 0x08136B14): object type and the
+/// metatile column/row it stands in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnemySpawn {
+    pub kind: u16,
+    pub col: u16,
+    pub row: u8,
+}
+
 /// Metatiles per tileset: 256 ids, plus 256 more on the high layer.
 pub const METATILES: u32 = 512;
+
+/// Background tile animation frames (coins and question blocks spin): the game swaps
+/// four versions of their tiles into VRAM, one every 8 frames (0x080016DC).
+pub const ANIM_FRAMES: u32 = 4;
+
+/// Animation frame shown on game frame `frame`: (frame & 0x18) >> 3.
+pub const fn anim_frame(frame: u32) -> usize {
+    ((frame & 0x18) >> 3) as usize
+}
+
+/// Sparkle left where a coin was collected: 8x8 cells, tile 0x68 + i (smallest first).
+pub fn sparkle_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("sparkle.png")
+}
 
 /// A level ready to draw and play.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,8 +245,16 @@ pub struct LevelAsset {
     pub solidity: Solidity,
     /// Metatile per cell, row-major from the top-left: id | 0x100 for the high layer.
     pub metatiles: Vec<u16>,
-    /// All `METATILES` metatiles of the tileset rendered at 16x16, stacked vertically:
-    /// metatile `m` is rows `16*m .. 16*m+16`.
+    pub rules: BlockRules,
+    pub enemies: Vec<EnemySpawn>,
+    /// Time limit in seconds of the status-bar clock (0 = no clock): 100 x
+    /// 0x08136016[header byte 8 >> 6] (level loader 0x08014F20).
+    pub time_limit: u16,
+    /// Player start y (top of the 32 px frame, px): 0x0813789A[header byte 4 >> 5]
+    /// (0x08014F20).
+    pub start_y: u16,
+    /// All `METATILES` metatiles of the tileset rendered at 16x16, stacked vertically, once
+    /// per animation frame: metatile `m` of frame `f` is rows `16*(f*METATILES+m)` + 0..16.
     pub atlas: Rgba,
 }
 
@@ -173,6 +286,16 @@ impl LevelAsset {
         for m in &self.metatiles {
             out.extend_from_slice(&m.to_le_bytes());
         }
+        self.rules.write(&mut out);
+        out.extend_from_slice(&(self.enemies.len() as u16).to_le_bytes());
+        for e in &self.enemies {
+            out.extend_from_slice(&e.kind.to_le_bytes());
+            out.extend_from_slice(&e.col.to_le_bytes());
+            out.push(e.row);
+        }
+        out.extend_from_slice(&self.time_limit.to_le_bytes());
+        out.extend_from_slice(&self.start_y.to_le_bytes());
+        out.extend_from_slice(&self.solidity.high);
         write(&bin, &out)?;
         self.atlas.write_png(&png)
     }
@@ -188,13 +311,32 @@ impl LevelAsset {
         let u16_at = |o: usize| u16::from_le_bytes([d[o], d[o + 1]]);
         let (width, height) = (u16_at(10) as usize, u16_at(12) as usize);
         let body = &d[HEADER..];
-        if body.len() != width * height * 2 {
+        let cells = width * height * 2;
+        let enemies_at = cells + BlockRules::BYTES;
+        if body.len() < enemies_at + 2 {
             return Err(bad());
         }
-        let metatiles = body.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        let metatiles = body[..cells].chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        let rules = BlockRules::read(&body[cells..enemies_at]);
+        let count = u16::from_le_bytes([body[enemies_at], body[enemies_at + 1]]) as usize;
+        let list = &body[enemies_at + 2..];
+        if list.len() != count * 5 + 4 + HIGH_IDS {
+            return Err(bad());
+        }
+        let high_at = count * 5 + 4;
+        let time_limit = u16::from_le_bytes([list[count * 5], list[count * 5 + 1]]);
+        let start_y = u16::from_le_bytes([list[count * 5 + 2], list[count * 5 + 3]]);
+        let enemies = list[..count * 5]
+            .chunks_exact(5)
+            .map(|e| EnemySpawn {
+                kind: u16::from_le_bytes([e[0], e[1]]),
+                col: u16::from_le_bytes([e[2], e[3]]),
+                row: e[4],
+            })
+            .collect();
         let atlas = Rgba::read_png(&png)?;
-        if atlas.width != METATILE || atlas.height != METATILE * METATILES {
-            return Err(AssetError::Png { path: png, msg: "atlas must be 16 x 8192".into() });
+        if atlas.width != METATILE || atlas.height != METATILE * METATILES * ANIM_FRAMES {
+            return Err(AssetError::Png { path: png, msg: "atlas must be 16 x 32768 (re-run sma4-extract)".into() });
         }
         Ok(Self {
             level_id: u16_at(8),
@@ -205,12 +347,292 @@ impl LevelAsset {
             solidity: Solidity {
                 top: [d[18], d[19], d[20], d[21]],
                 solid: [d[22], d[23], d[24], d[25]],
+                high: list[high_at..high_at + HIGH_IDS].try_into().map_err(|_| bad())?,
             },
             metatiles,
+            rules,
+            enemies,
+            time_limit,
+            start_y,
             atlas,
         })
     }
 }
+
+/// Status bar (BG0 in levels): the template map the level loader 0x08016434 decompresses
+/// (LZ77 0x0821F788), plus the ROM tables the update routines write from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HudAsset {
+    /// `HUD_COLS` x `HUD_ROWS` BG map entries (tile | flips | palette << 12).
+    pub template: Vec<u16>,
+    /// Digit tiles 0-9 (0x08131E6C).
+    pub digits: [u16; 10],
+    /// Character icon, two tiles (0x08131E64: Mario).
+    pub icon: [u16; 2],
+}
+
+pub const HUD_COLS: usize = 32;
+pub const HUD_ROWS: usize = 20;
+/// Status-bar tiles in `hud/status_tiles.png`: 8x8 cells for tiles `HUD_TILE_BASE..+128`,
+/// first in BG palette 0, then the same tiles in palette 15.
+pub const HUD_TILE_BASE: u16 = 0x280;
+pub const HUD_TILES: usize = 128;
+
+/// Cell of a status-bar map entry in `hud/status_tiles.png`, or None for an empty cell.
+pub fn hud_cell(entry: u16) -> Option<usize> {
+    let tile = entry & 0x3FF;
+    let pal = entry >> 12;
+    if !(HUD_TILE_BASE..HUD_TILE_BASE + HUD_TILES as u16).contains(&tile) || tile == 0x2FF {
+        return None;
+    }
+    let base = match pal {
+        0 => 0,
+        15 => HUD_TILES,
+        _ => return None,
+    };
+    Some(base + (tile - HUD_TILE_BASE) as usize)
+}
+
+impl HudAsset {
+    pub fn path(dir: &Path) -> PathBuf {
+        dir.join("hud").join("status_map.bin")
+    }
+
+    pub fn tiles_path(dir: &Path) -> PathBuf {
+        dir.join("hud").join("status_tiles.png")
+    }
+
+    pub fn write(&self, dir: &Path) -> Result<()> {
+        let words = self.template.iter().chain(&self.digits).chain(&self.icon);
+        let out: Vec<u8> = words.flat_map(|w| w.to_le_bytes()).collect();
+        write(&Self::path(dir), &out)
+    }
+
+    pub fn read(dir: &Path) -> Result<Self> {
+        let path = Self::path(dir);
+        let d = read(&path)?;
+        let n = HUD_COLS * HUD_ROWS;
+        if d.len() != (n + 12) * 2 {
+            return Err(AssetError::BadLevel(path));
+        }
+        let w: Vec<u16> = d.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        Ok(Self {
+            template: w[..n].to_vec(),
+            digits: w[n..n + 10].try_into().unwrap(),
+            icon: [w[n + 10], w[n + 11]],
+        })
+    }
+}
+
+/// A spot of the world map the level tables know (0x08133A88 / AAC / AD0 / AF4 for the
+/// world): map position, tileset and the level / enemy-list ids (bit 15 set: not a level,
+/// e.g. a Toad house item or the spade game).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapNode {
+    /// Map y (row = (y - 0x10) >> 4) and x (screen << 8 | x; column = x >> 4).
+    pub y: u8,
+    pub x: u16,
+    pub tileset: u8,
+    pub level: u16,
+    pub enemies: u16,
+}
+
+/// Map tile animation frames (VBlank 0x080016DC: frame counter bits 3-4).
+pub const MAP_ANIM_FRAMES: u32 = 4;
+/// Map sprite cells of Mario in `world{n}_mario.png`: 16x32 each, (form 0 small / 1 big /
+/// 2 raccoon) x (two animation phases); the lower OBJ fills the bottom 16 rows.
+pub const MAP_MARIO_W: u32 = 16;
+pub const MAP_MARIO_H: u32 = 32;
+pub const MAP_MARIO_FORMS: u32 = 3;
+
+/// The interactive world map: the tile grid (map tile ids, one per 16x16 cell), where
+/// Mario starts, the enterable spots, and the metatile pictures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldMapAsset {
+    pub cols: usize,
+    pub rows: usize,
+    pub grid: Vec<u8>,
+    /// Start position (map y, x).
+    pub start: (u8, u16),
+    /// Enterable-tile thresholds 0x030037D6[id >> 6] (tiles at or above can be entered).
+    pub thresholds: [u8; 4],
+    pub nodes: Vec<MapNode>,
+    /// Screen position of cell (0, 0) with the map unscrolled.
+    pub origin: (i32, i32),
+    /// Metatile pictures: 256 cells of 16x16 stacked down, one column per animation frame.
+    pub atlas: Rgba,
+    /// Mario's map sprite, see `MAP_MARIO_*`.
+    pub mario: Rgba,
+    /// Frames each animation frame is shown (0x08135C5E[world * 4 + frame] + 1).
+    pub anim_ticks: [u8; 4],
+}
+
+const MAP_MAGIC: &[u8; 8] = b"SMA4WM01";
+
+impl WorldMapAsset {
+    fn stem(dir: &Path, world: u8) -> PathBuf {
+        dir.join("map").join(format!("world{}_walk", world + 1))
+    }
+
+    pub fn tile(&self, col: usize, row: usize) -> u8 {
+        if col < self.cols && row < self.rows { self.grid[row * self.cols + col] } else { 0x02 }
+    }
+
+    pub fn write(&self, dir: &Path, world: u8) -> Result<()> {
+        let stem = Self::stem(dir, world);
+        let mut out = MAP_MAGIC.to_vec();
+        for v in [self.cols as u16, self.rows as u16, self.start.0 as u16, self.start.1] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&self.thresholds);
+        out.extend_from_slice(&self.anim_ticks);
+        for v in [self.origin.0 as i16, self.origin.1 as i16] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.nodes.len() as u16).to_le_bytes());
+        for n in &self.nodes {
+            out.push(n.y);
+            out.push(n.tileset);
+            for v in [n.x, n.level, n.enemies] {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        out.extend_from_slice(&self.grid);
+        write(&stem.with_extension("bin"), &out)?;
+        self.atlas.write_png(&dir.join("map").join(format!("world{}_meta.png", world + 1)))?;
+        self.mario.write_png(&dir.join("map").join(format!("world{}_mario.png", world + 1)))
+    }
+
+    pub fn read(dir: &Path, world: u8) -> Result<Self> {
+        let stem = Self::stem(dir, world);
+        let path = stem.with_extension("bin");
+        let d = read(&path)?;
+        let bad = || AssetError::BadLevel(path.clone());
+        if d.len() < 30 || &d[..8] != MAP_MAGIC {
+            return Err(bad());
+        }
+        let u16_at = |i: usize| u16::from_le_bytes([d[i], d[i + 1]]);
+        let (cols, rows) = (u16_at(8) as usize, u16_at(10) as usize);
+        let start = (u16_at(12) as u8, u16_at(14));
+        let thresholds = [d[16], d[17], d[18], d[19]];
+        let anim_ticks = [d[20], d[21], d[22], d[23]];
+        let origin = (u16_at(24) as i16 as i32, u16_at(26) as i16 as i32);
+        let n = u16_at(28) as usize;
+        let mut at = 30;
+        let mut nodes = Vec::with_capacity(n);
+        for _ in 0..n {
+            let b = d.get(at..at + 8).ok_or_else(bad)?;
+            let w = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
+            nodes.push(MapNode { y: b[0], tileset: b[1], x: w(2), level: w(4), enemies: w(6) });
+            at += 8;
+        }
+        let grid = d.get(at..at + cols * rows).ok_or_else(bad)?.to_vec();
+        let atlas = Rgba::read_png(&dir.join("map").join(format!("world{}_meta.png", world + 1)))?;
+        let mario = Rgba::read_png(&dir.join("map").join(format!("world{}_mario.png", world + 1)))?;
+        Ok(Self { cols, rows, grid, start, thresholds, nodes, origin, atlas, mario, anim_ticks })
+    }
+}
+
+/// World map screen (see `sma4-extract` screens.rs): the 240x160 map view, the status
+/// bar (BG0) and the "WORLD n / MARIO x n" panel (BG3) as 32x32 map entries with their
+/// scroll, the tiles those entries (and the digits written into them) use, and the
+/// panel's sprites as a 240x160 overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapScreenAsset {
+    pub map: Rgba,
+    pub bar: Vec<u16>,
+    pub bar_scroll: (u16, u16),
+    pub panel: Vec<u16>,
+    pub panel_scroll: (u16, u16),
+    /// Tile cells in `tiles`: (layer 0 = bar / 3 = panel, entry without flips).
+    pub keys: Vec<(u8, u16)>,
+    pub tiles: Rgba,
+    pub sprites: Rgba,
+}
+
+impl MapScreenAsset {
+    fn stem(dir: &Path, world: u8) -> PathBuf {
+        dir.join("map").join(format!("world{}", world + 1))
+    }
+
+    /// Cell in `tiles` for a map entry of `layer`, or None for an empty cell.
+    pub fn cell(&self, layer: u8, entry: u16) -> Option<usize> {
+        self.keys.iter().position(|&k| k == (layer, entry & 0xF3FF))
+    }
+
+    pub fn write(&self, dir: &Path, world: u8) -> Result<()> {
+        let stem = Self::stem(dir, world);
+        let mut out = Vec::new();
+        for &w in self.bar.iter().chain(&self.panel) {
+            out.extend_from_slice(&w.to_le_bytes());
+        }
+        for v in [self.bar_scroll.0, self.bar_scroll.1, self.panel_scroll.0, self.panel_scroll.1] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.keys.len() as u16).to_le_bytes());
+        for &(layer, e) in &self.keys {
+            out.push(layer);
+            out.extend_from_slice(&e.to_le_bytes());
+        }
+        write(&stem.with_extension("bin"), &out)?;
+        self.map.write_png(&stem.with_extension("png"))?;
+        self.tiles.write_png(&dir.join("map").join(format!("world{}_tiles.png", world + 1)))?;
+        self.sprites.write_png(&dir.join("map").join(format!("world{}_sprites.png", world + 1)))
+    }
+
+    pub fn read(dir: &Path, world: u8) -> Result<Self> {
+        let stem = Self::stem(dir, world);
+        let bin = stem.with_extension("bin");
+        let d = read(&bin)?;
+        let bad = || AssetError::BadLevel(bin.clone());
+        let u16_at = |o: usize| d.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+        let n = 32 * 32;
+        let words: Vec<u16> = (0..2 * n + 5).map(|i| u16_at(i * 2)).collect::<Option<_>>().ok_or_else(bad)?;
+        let count = words[2 * n + 4] as usize;
+        let base = (2 * n + 5) * 2;
+        let keys = (0..count)
+            .map(|i| Some((*d.get(base + i * 3)?, u16_at(base + i * 3 + 1)?)))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(bad)?;
+        Ok(Self {
+            bar: words[..n].to_vec(),
+            panel: words[n..2 * n].to_vec(),
+            bar_scroll: (words[2 * n], words[2 * n + 1]),
+            panel_scroll: (words[2 * n + 2], words[2 * n + 3]),
+            keys,
+            map: Rgba::read_png(&stem.with_extension("png"))?,
+            tiles: Rgba::read_png(&dir.join("map").join(format!("world{}_tiles.png", world + 1)))?,
+            sprites: Rgba::read_png(&dir.join("map").join(format!("world{}_sprites.png", world + 1)))?,
+        })
+    }
+}
+
+/// Game-over screen pieces: ten 8x16 letter cells (OAM slots 1-10), then the 16x16 Mario
+/// head, in a 96x16 strip.
+pub fn game_over_path(dir: &Path) -> PathBuf {
+    dir.join("screens").join("game_over.png")
+}
+
+/// The game-over menu screen (dimmed map with the "GAME OVER / CONTINUE / QUIT" panel,
+/// 240x160, without the status bar) and its 8x8 cursor.
+pub fn game_over_menu_path(dir: &Path) -> PathBuf {
+    dir.join("screens").join("game_over_menu.png")
+}
+pub fn game_over_cursor_path(dir: &Path) -> PathBuf {
+    dir.join("screens").join("game_over_cursor.png")
+}
+
+/// Score popups (0x08093750): 16x8 cells for popup types 1-12 (10 ... 8000 points).
+pub fn score_popups_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("score_popups.png")
+}
+pub const SCORE_POPUP_TYPES: usize = 12;
+
+/// Extra-life popups (0x080938B4): 32x16 cells for types 13-15 (1UP, 2UP, 3UP).
+pub fn life_popups_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("life_popups.png")
+}
+pub const LIFE_POPUP_TYPES: usize = 3;
 
 /// Graphics sheets for the viewer, sorted by ROM address.
 pub fn gfx_sheets(dir: &Path) -> Vec<PathBuf> {
@@ -223,6 +645,132 @@ pub fn gfx_sheets(dir: &Path) -> Vec<PathBuf> {
         .collect();
     v.sort();
     v
+}
+
+/// Spin frames of a coin popping out of a block: 16x16 cells side by side.
+pub fn coin_spin_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("coin_spin.png")
+}
+
+/// Basic walking enemy (object type 0x72): 16x16 cells, see `WALKER_FRAMES`.
+pub fn walker_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("walker.png")
+}
+
+/// Walker frames in `walker.png`: two walk frames, then the squished frame.
+pub const WALKER_FRAMES: u32 = 3;
+pub const WALKER_SQUISHED: usize = 2;
+
+/// Growth item (object type 0x0D, the mushroom): one 16x16 image.
+pub fn growth_item_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("growth_item.png")
+}
+
+/// Koopa Troopa sheets (green 0x6C, red 0x6D, green Paratroopa 0x6E): cells of
+/// `KOOPA_CELL_W` x `KOOPA_CELL_H`, the object's 16x16 box top-left at `KOOPA_ORIGIN`.
+pub fn koopa_path(dir: &Path, kind: u16) -> PathBuf {
+    dir.join("objects").join(format!("koopa_{kind:02x}.png"))
+}
+pub const KOOPA_CELL_W: u32 = 32;
+pub const KOOPA_CELL_H: u32 = 48;
+pub const KOOPA_ORIGIN: (i32, i32) = (8, 24);
+/// Koopa cells: walk 0/1, shell, shell with legs out (about to wake), spinning shell 0-3.
+/// Paratroopa sheets hold four winged walk cells instead (wing flap x walk step).
+pub const KOOPA_WALK: usize = 0;
+pub const KOOPA_SHELL: usize = 2;
+pub const KOOPA_SHELL_WAKING: usize = 3;
+pub const KOOPA_SPIN: usize = 4;
+
+/// Piranha Plant sheets (green 0xA0, red 0xA2): cells of `KOOPA_CELL_W` x `KOOPA_CELL_H`
+/// (the oam renderer's cell), the object's position at `PIRANHA_ORIGIN`. Cells: mouth open,
+/// mouth closed (the chomp), then the same two while less than 17 px out of the pipe
+/// (the ROM swaps the stem tile then).
+pub fn piranha_path(dir: &Path, kind: u16) -> PathBuf {
+    dir.join("objects").join(format!("piranha_{kind:02x}.png"))
+}
+pub const PIRANHA_FRAMES: u32 = 4;
+/// The plant reaches 33 px below its position, so it sits higher in the cell than a Koopa.
+pub const PIRANHA_ORIGIN: (i32, i32) = (8, 8);
+pub const PIRANHA_LOW: usize = 2;
+
+/// Puff of smoke left by an enemy knocked out that has no body to fall (object state 8,
+/// e.g. a Piranha Plant hit by the tail): four 16x16 cells in the order they are shown.
+pub fn puff_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("puff.png")
+}
+pub const PUFF_FRAMES: u32 = 4;
+
+/// Goal roulette card (object type 0x41): `KOOPA_CELL_W` x `KOOPA_CELL_H` cells, the object's
+/// position at `KOOPA_ORIGIN`. Cells 0-2: the roulette (mushroom, flower, star); 3-5: the
+/// same cards flying up after the touch; 6: the dark box around the roulette.
+pub fn goal_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("goal.png")
+}
+pub const GOAL_FRAMES: u32 = 7;
+pub const GOAL_FLYING: usize = 3;
+pub const GOAL_BOX: usize = 6;
+
+/// The course-clear line and the card line with its frame (text 0xAF / 0xB0, drawn into
+/// the BG map at VRAM 0xA000; English: "LEVEL CLEARED!", "YOU GOT A PANEL"), rendered
+/// from the ROM's font and BG palette 0.
+pub fn course_clear_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("course_clear.png")
+}
+pub fn card_got_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("card_got.png")
+}
+/// Screen tile cells (column, row) of the two texts' top-left corners, of the card in its
+/// frame, and their sizes in tiles.
+pub const COURSE_CLEAR_AT: (u32, u32) = (9, 4);
+pub const COURSE_CLEAR_TILES: (u32, u32) = (14, 2);
+pub const CARD_GOT_AT: (u32, u32) = (6, 6);
+pub const CARD_GOT_TILES: (u32, u32) = (20, 4);
+pub const CLEAR_CARD_AT: (u32, u32) = (23, 7);
+
+/// Player frames of one power-up form (0 small, 1 big, 3 raccoon): 32x32 cells, one per
+/// pose slot below. The body fills the left 16 columns with the feet on the bottom row;
+/// the raccoon's tail reaches into the right half. The art faces left.
+pub fn player_path(dir: &Path, form: u8) -> PathBuf {
+    dir.join("objects").join(format!("player_form{form}.png"))
+}
+
+/// Player pose slots (cells of a player sheet).
+pub const PLAYER_WALK: usize = 0; // 4 walk-cycle steps
+pub const PLAYER_RUN: usize = 4; // 4 steps at P-speed
+pub const PLAYER_JUMP: usize = 8;
+pub const PLAYER_FALL: usize = 9;
+pub const PLAYER_FLY_UP: usize = 10; // 3 tail-wag steps
+pub const PLAYER_FLY_DOWN: usize = 13; // 3
+pub const PLAYER_GLIDE: usize = 16; // 3
+pub const PLAYER_WHIP: usize = 19; // 5 tail-whip steps on the ground
+pub const PLAYER_WHIP_AIR: usize = 24; // 5 in the air
+/// Death pose (0x4B, always drawn with the small form's graphics: 0x080A8FC0).
+pub const PLAYER_DEATH: usize = 29;
+pub const PLAYER_FRAMES: u32 = 30;
+pub const PLAYER_W: u32 = 32;
+pub const PLAYER_H: u32 = 32;
+/// Width of the body part of a player cell.
+pub const PLAYER_BODY_W: u32 = 16;
+
+/// Super Leaf (object type 0x1E): one 16x16 image.
+pub fn leaf_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("leaf.png")
+}
+
+impl Rgba {
+    /// Splits a sheet of equal cells laid out left to right.
+    pub fn cells(&self, w: u32, h: u32) -> Vec<Rgba> {
+        (0..self.width / w)
+            .map(|c| {
+                let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+                for y in 0..h.min(self.height) {
+                    let o = ((y * self.width + c * w) * 4) as usize;
+                    pixels.extend_from_slice(&self.pixels[o..o + (w * 4) as usize]);
+                }
+                Rgba { width: w, height: h.min(self.height), pixels }
+            })
+            .collect()
+    }
 }
 
 pub fn gfx_path(dir: &Path, rom_addr: u32) -> PathBuf {
@@ -246,12 +794,25 @@ mod tests {
             width: 2,
             height: 2,
             backdrop: [1, 2, 3],
-            solidity: Solidity { top: [0x25, 0x50, 0xA0, 0xE2], solid: [0x2D, 0x53, 0xAD, 0xF0] },
+            solidity: Solidity {
+                top: [0x25, 0x50, 0xA0, 0xE2],
+                solid: [0x2D, 0x53, 0xAD, 0xF0],
+                high: std::array::from_fn(|i| i as u8 * 3),
+            },
             metatiles: vec![0x80, 0x53, 0x150, 0x00],
+            rules: BlockRules {
+                bump_behaviour: [7; 256],
+                final_metatile: [0x5F; 32],
+                bounce: [-1, 2, -3, 4, -5, 6, -7, 8, -9, 10, -11],
+                ..BlockRules::default()
+            },
+            enemies: vec![EnemySpawn { kind: 0x72, col: 14, row: 25 }, EnemySpawn { kind: 0x6E, col: 300, row: 3 }],
+            time_limit: 300,
+            start_y: 0x140,
             atlas: Rgba {
                 width: METATILE,
-                height: METATILE * METATILES,
-                pixels: (0..(METATILE * METATILE * METATILES * 4)).map(|i| i as u8).collect(),
+                height: METATILE * METATILES * ANIM_FRAMES,
+                pixels: (0..(METATILE * METATILE * METATILES * ANIM_FRAMES * 4)).map(|i| i as u8).collect(),
             },
         };
         lvl.write(&dir).unwrap();

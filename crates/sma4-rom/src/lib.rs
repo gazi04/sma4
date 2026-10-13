@@ -3,6 +3,7 @@
 //! Nothing from the ROM is bundled with this project; every asset is read at runtime
 //! from the cartridge image the user dumped.
 
+pub mod blocks;
 pub mod decompress;
 pub mod gfx;
 pub mod level;
