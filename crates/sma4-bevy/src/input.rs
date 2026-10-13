@@ -108,13 +108,29 @@ fn finish_script(mut commands: Commands, script: Option<ResMut<Script>>, game: R
     match s.state {
         ScriptState::Running if done => {
             let p = &game.0.player;
+            let enemies: Vec<_> = game.0.enemies.iter().map(|e| (e.px(), e.state)).collect();
             println!(
-                "script done at frame {}: player px={:?} v=({}, {}) on_ground={}",
+                "script done at frame {}: player px={:?} v=({}, {}) on_ground={} form={:?} invulnerable={} enemies={:?} coins={} score={} lives={} clock={} screen={:?} dying={:?} popups={:?} sparkles={:?} items={:?} bumps={:?} goal={:?} cards={:?}",
                 game.0.frame,
                 p.px(),
                 p.vx,
                 p.vy,
-                p.on_ground
+                p.on_ground,
+                p.form,
+                game.0.invulnerable,
+                enemies,
+                game.0.status.coins,
+                game.0.status.score * 10,
+                game.0.status.lives.wrapping_add(1),
+                game.0.status.seconds(),
+                game.0.screen,
+                game.0.dying,
+                game.0.status.popups,
+                game.0.sparkles,
+                game.0.items.iter().map(|i| i.px()).collect::<Vec<_>>(),
+                game.0.bumps.iter().map(|b| (b.tx, b.ty, b.timer)).collect::<Vec<_>>(),
+                game.0.goal.map(|g| (g.px(), g.phase, g.card, g.timer)),
+                game.0.status.cards
             );
             commands.spawn(Screenshot::primary_window()).observe(save_to_disk(s.screenshot.clone()));
             s.state = ScriptState::Captured(0);
