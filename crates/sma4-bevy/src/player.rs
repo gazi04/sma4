@@ -49,14 +49,27 @@ struct Frames {
     small: Vec<Handle<Image>>,
     big: Vec<Handle<Image>>,
     raccoon: Vec<Handle<Image>>,
+    /// Grow / shrink steps (`player_grow.png`) and the smoke puff (`puff.png`).
+    grow: Vec<Handle<Image>>,
+    puff: Vec<Handle<Image>>,
 }
+
+/// Puff tiles 0x0817388C[i] = 0x83, 0x82, 0x81, 0x80 as cells of `puff.png` (which holds
+/// tiles 0x81, 0x80, 0x82, 0x83).
+const PUFF_CELLS: [usize; 4] = [3, 2, 0, 1];
 
 #[derive(Component)]
 struct PlayerSprite;
 
 fn spawn_player(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMut<Assets<Image>>) {
     let mut load = |form| load_cells(&sma4_assets::player_path(&dir.0, form), PLAYER_W, PLAYER_H, &mut images);
-    let frames = Frames { small: load(0), big: load(1), raccoon: load(3) };
+    let frames = Frames {
+        small: load(0),
+        big: load(1),
+        raccoon: load(3),
+        grow: load_cells(&sma4_assets::player_grow_path(&dir.0), PLAYER_W, PLAYER_H, &mut images),
+        puff: load_cells(&sma4_assets::puff_path(&dir.0), 16, 16, &mut images),
+    };
     commands.spawn((PlayerSprite, Sprite::default(), Transform::from_xyz(0.0, 0.0, 10.0)));
     commands.insert_resource(frames);
 }
@@ -99,6 +112,26 @@ fn sync_sprite(
     // Blink while invulnerable after a hit.
     let hidden = game.0.invulnerable > 0 && (game.0.invulnerable / 4) % 2 == 1;
     sprite.color = if hidden { Color::NONE } else { Color::WHITE };
+    match p.pose() {
+        // 0x080A90C0: only the smoke, two 8x16 halves at the frame's x, 8 px below its top.
+        sma4_core::player::Pose::Puff(i) if game.0.dying.is_none() => {
+            if let Some(image) = frames.puff.get(PUFF_CELLS[i as usize & 3]) {
+                sprite.image = image.clone();
+            }
+            sprite.flip_x = false;
+            let frame_top = feet - PLAYER_H as i32;
+            transform.translation = Vec3::new(cx as f32, -((frame_top + 8 + 8) as f32), 10.0);
+            return;
+        }
+        // 0x080A8000: a grow / shrink step with the big form's graphics.
+        sma4_core::player::Pose::Morph(i) if game.0.dying.is_none() => {
+            if let Some(image) = frames.grow.get(i as usize) {
+                sprite.image = image.clone();
+            }
+            return;
+        }
+        _ => {}
+    }
     // Dying: the death pose, drawn with the small form's graphics (0x080A8FC0).
     let (set, slot) = if game.0.dying.is_some() {
         sprite.flip_x = false;

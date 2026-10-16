@@ -25,6 +25,9 @@ const UNIT: i32 = 16;
 /// P-meter 0x08172C86.
 const WALK_MAX: i32 = 0x18;
 /// Course-clear walk (0x080A8000 sets speed byte +0x1C = 0x14).
+/// Grow / shrink animation length (+0x3B = 0x2F) and transformation puff (+0x3E = 0x17).
+pub const MORPH_FRAMES: u8 = 0x2F;
+pub const PUFF_FRAMES: u8 = 0x17;
 const GOAL_WALK: i32 = 0x14;
 const RUN_MAX: i32 = 0x28;
 const P_MAX: i32 = 0x38;
@@ -120,6 +123,11 @@ pub enum Pose {
     /// Tail whip step 0-4 (0x6A >> 2), on the ground or in the air.
     Whip(u8),
     WhipAir(u8),
+    /// Grow / shrink step 0-11: a cell of `sma4_assets::player_grow_path`.
+    Morph(u8),
+    /// Transformation smoke, tile 0x0817388C[i] (0x83, 0x82, 0x81, 0x80); the player is
+    /// not drawn.
+    Puff(u8),
 }
 
 impl Pose {
@@ -136,6 +144,8 @@ impl Pose {
             Pose::Glide(s) => a::PLAYER_GLIDE + s as usize,
             Pose::Whip(s) => a::PLAYER_WHIP + s as usize,
             Pose::WhipAir(s) => a::PLAYER_WHIP_AIR + s as usize,
+            // Drawn from their own sheets; the standing cell as a fallback.
+            Pose::Morph(_) | Pose::Puff(_) => a::PLAYER_WALK + STAND_STEP as usize,
         }
     }
 }
@@ -172,6 +182,11 @@ pub struct Player {
     /// Enemies stomped since last on the ground (+0x5A), for the score chain; cleared on
     /// landing (0x080A3A5C).
     pub stomp_chain: u16,
+    /// Grow / shrink animation timer (+0x3B): 0x2F, -1 per frame; the player is frozen.
+    pub morph: u8,
+    /// Smoke puff of a transformation (+0x3E): 0x17, -1 per frame; the player is hidden
+    /// and frozen.
+    pub puff: u8,
 }
 
 impl Player {
@@ -214,23 +229,39 @@ impl Player {
         }
     }
 
-    /// Mushroom: small -> big.
+    /// Mushroom (0x0806B158): small -> big, with the grow animation (+0x3B = 0x2F; the form
+    /// request +0x50 is applied the next frame, so the animation runs with the new form).
     pub fn grow(&mut self) {
         if self.form == Form::Small {
             self.set_form(Form::Big);
+            self.morph = MORPH_FRAMES;
         }
     }
 
-    /// Super Leaf: any form -> raccoon.
+    /// Super Leaf (0x0806B254): any other form -> raccoon behind a puff of smoke (+0x3E =
+    /// 0x17, sound 0x4B).
     pub fn leaf(&mut self) {
-        self.set_form(Form::Raccoon);
+        if self.form != Form::Raccoon {
+            self.set_form(Form::Raccoon);
+            self.puff = PUFF_FRAMES;
+        }
+    }
+
+    /// Busy with a transformation: frozen, and hits are ignored (0x0804A5F4 returns early
+    /// while +0x3B or +0x3E is set).
+    pub fn transforming(&self) -> bool {
+        self.morph != 0 || self.puff != 0
     }
 
     /// Takes a hit. Returns false if the player had no hit points left.
     pub fn hurt(&mut self) -> bool {
         match self.form {
             Form::Raccoon => self.set_form(Form::Big),
-            Form::Big => self.set_form(Form::Small),
+            Form::Big => {
+                // 0x0804A5F4: big shrinks with the same animation, played backwards.
+                self.set_form(Form::Small);
+                self.morph = MORPH_FRAMES;
+            }
             Form::Small => return false,
         }
         true
@@ -239,6 +270,16 @@ impl Player {
     /// Advances one frame. `frame` is the global frame counter. Returns the tile the
     /// head-centre probe hit while moving up, if any.
     pub fn step(&mut self, held: Buttons, pressed: Buttons, map: &Level, frame: u32) -> Option<(i32, i32)> {
+        // 0x080A8000: the puff (+0x3E) and the grow / shrink steps (+0x3B) replace the
+        // player's update while they run.
+        if self.puff != 0 {
+            self.puff -= 1;
+            return None;
+        }
+        if self.morph != 0 {
+            self.morph -= 1;
+            return None;
+        }
         // Per-frame timers of the player loop (0x08094780: bytes +0x64..+0x70).
         self.p_timer = self.p_timer.saturating_sub(1);
         self.wag = self.wag.saturating_sub(1);
@@ -423,6 +464,14 @@ impl Player {
     /// Sprite pose, following the ROM's pose routines (0x08097800, 0x08097ACC,
     /// 0x080981C4, 0x080984E8, 0x080983F8).
     pub fn pose(&self) -> Pose {
+        if self.puff != 0 {
+            return Pose::Puff((self.puff & 0xC) >> 2);
+        }
+        if self.morph != 0 {
+            // 0x080A8000: step morph >> 2 of 0x0813DE2F, reversed when the form is small.
+            let step = self.morph >> 2;
+            return Pose::Morph(if self.form == Form::Small { 11 - step } else { step });
+        }
         if self.whip != 0 && self.is_raccoon() {
             let step = (self.whip >> 2).min(4);
             return if self.on_ground { Pose::Whip(step) } else { Pose::WhipAir(step) };
@@ -756,9 +805,42 @@ mod tests {
     }
 
     #[test]
+    fn mushroom_grows_in_12_steps_and_leaf_puffs_into_a_raccoon() {
+        let mut s = Sim::new(floor(), 64);
+        s.p.grow();
+        assert_eq!(s.p.form, Form::Big);
+        let (x, y) = (s.p.x, s.p.y);
+        let mut steps = Vec::new();
+        while s.p.transforming() {
+            if let Pose::Morph(i) = s.p.pose() {
+                if steps.last() != Some(&i) {
+                    steps.push(i);
+                }
+            }
+            s.run(Buttons::RIGHT | Buttons::A, 1);
+        }
+        assert_eq!(steps, (0..12).rev().collect::<Vec<u8>>(), "growing plays 0x0813DE2F backwards");
+        assert_eq!((s.p.x, s.p.y), (x, y), "frozen meanwhile");
+        // A hit plays it forwards while small.
+        assert!(s.p.hurt());
+        assert_eq!((s.p.form, s.p.pose()), (Form::Small, Pose::Morph(0)));
+        s.run(Buttons::empty(), MORPH_FRAMES as u32);
+        assert!(!s.p.transforming());
+        s.p.leaf();
+        assert_eq!((s.p.form, s.p.pose()), (Form::Raccoon, Pose::Puff(1)));
+        let mut frames = 0;
+        while s.p.transforming() {
+            s.run(Buttons::empty(), 1);
+            frames += 1;
+        }
+        assert_eq!(frames, PUFF_FRAMES as u32);
+    }
+
+    #[test]
     fn tail_whip_hits_on_four_frames_and_turns_around() {
         let mut s = Sim::new(floor(), 64);
         s.p.leaf();
+        s.run(Buttons::empty(), PUFF_FRAMES as u32);
         s.p.facing_left = false;
         let mut boxes = 0;
         let mut blocks = 0;

@@ -765,6 +765,14 @@ pub fn player_path(dir: &Path, form: u8) -> PathBuf {
     dir.join("objects").join(format!("player_form{form}.png"))
 }
 
+/// The grow / shrink animation (0x080A8000 while player +0x3B runs down from 0x2F): 12
+/// cells of `PLAYER_W` x `PLAYER_H`, pose 0x0813DE2F[i] drawn with the big form's
+/// graphics. Each step shows for 4 frames.
+pub fn player_grow_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("player_grow.png")
+}
+pub const PLAYER_GROW_STEPS: u32 = 12;
+
 /// Player pose slots (cells of a player sheet).
 pub const PLAYER_WALK: usize = 0; // 4 walk-cycle steps
 pub const PLAYER_RUN: usize = 4; // 4 steps at P-speed

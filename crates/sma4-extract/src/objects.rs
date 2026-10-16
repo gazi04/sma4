@@ -65,6 +65,8 @@ const BIG_FALL_POSE: u8 = 0x06;
 const RACCOON: u8 = 3;
 /// Death pose (0x080A8FC0 draws 0x4B with the form forced to small).
 const DEATH_POSE: u8 = 0x4B;
+/// Grow / shrink poses (0x080A8000), one per 4 frames of player +0x3B.
+const GROW_POSES: u32 = 0x0813_DE2F;
 
 struct Sheet<'a> {
     chars: &'a [u8],
@@ -634,6 +636,25 @@ pub fn extract_player(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> 
             .map_err(|e| ExtractError(e.to_string()))?;
         println!("  player form {form}: {} poses", poses.len());
     }
+    // Grow / shrink: 0x080A8000 draws pose 0x0813DE2F[step] with the form forced to big.
+    use sma4_assets::{PLAYER_GROW_STEPS, player_grow_path};
+    let w = PLAYER_W * PLAYER_GROW_STEPS;
+    let mut px = vec![0u8; (w * PLAYER_H * 4) as usize];
+    for i in 0..PLAYER_GROW_STEPS {
+        m.w8(PLAYER_SCRATCH + 0x37, 1)?;
+        m.w8(PLAYER_SCRATCH + 0x38, rom.u8(GROW_POSES + i)?)?;
+        m.call(FN_PLAYER_POSE_GFX, &[])?;
+        m.call(FN_PLAYER_DMA, &[])?;
+        let chars = m.read(OBJ_VRAM, 4 * TILES_PER_ROW as usize * 32)?;
+        let sheet = Sheet { chars: &chars, palette: palette.clone() };
+        for ty in 0..4 {
+            for tx in 0..4 {
+                sheet.tile(&mut px, w, ty * TILES_PER_ROW + tx, i * PLAYER_W + tx * 8, ty * 8, false, PLAYER_PALETTE);
+            }
+        }
+    }
+    Rgba { width: w, height: PLAYER_H, pixels: px }.write_png(&player_grow_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
+    println!("  player grow: {PLAYER_GROW_STEPS} steps");
     Ok(())
 }
 

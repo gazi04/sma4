@@ -141,7 +141,7 @@ impl Game {
 
     /// The player takes a hit: big shrinks to small, small dies.
     pub fn hurt(&mut self) {
-        if self.invulnerable > 0 || self.dying.is_some() {
+        if self.invulnerable > 0 || self.dying.is_some() || self.player.transforming() {
             return;
         }
         if self.player.hurt() {
@@ -498,7 +498,8 @@ impl Game {
         self.step_goal();
         self.status.step_popups(self.frame);
         // Clock (0x080044B8); running out of time kills the player.
-        if self.status.tick_clock() {
+        // 0x080044B8 holds the clock while the player is busy (0x03003D08), e.g. growing.
+        if !self.player.transforming() && self.status.tick_clock() {
             self.die();
         }
         // Falling out of the level costs a life straight away.
@@ -568,6 +569,11 @@ mod tests {
         }
         assert_eq!(g.player.form, Form::Big);
         assert!(g.items.is_empty());
+        g.hurt();
+        assert_eq!(g.player.form, Form::Big, "no hits while growing");
+        for _ in 0..player::MORPH_FRAMES {
+            g.step(Buttons::empty());
+        }
 
         g.hurt();
         assert_eq!(g.player.form, Form::Small, "the extra hit point absorbs a hit");
@@ -779,6 +785,9 @@ mod tests {
         let mut g = Game::new();
         g.enter_level(block_level((20, 2)), (8 * TILE_PX, 9 * TILE_PX - 16), &[]);
         g.player.grow();
+        for _ in 0..player::MORPH_FRAMES {
+            g.step(Buttons::empty());
+        }
         let (fx, fy) = g.player.frame();
         // Just left of the player, flying right at it.
         let mut b = enemies::Fireball { x: (fx - 6) * 256, y: (fy + 10) * 256, vx: 0x0B, vy: 0, age: 0 };
