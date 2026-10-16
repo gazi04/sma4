@@ -444,6 +444,11 @@ pub const MAP_ANIM_FRAMES: u32 = 4;
 pub const MAP_MARIO_W: u32 = 16;
 pub const MAP_MARIO_H: u32 = 32;
 pub const MAP_MARIO_FORMS: u32 = 3;
+/// Mario spinning on the map after a game over (0x0800C45C while map state +0x17 is set):
+/// the lower OBJ becomes 0x0813A55F[(+0x21 & 6) >> 1] (facing left, front, facing right, back),
+/// 16x16 cells in `world{n}_mario_spin.png`, in that table's order.
+pub const MAP_SPIN_SIZE: u32 = 16;
+pub const MAP_SPIN_PHASES: u32 = 4;
 
 /// The interactive world map: the tile grid (map tile ids, one per 16x16 cell), where
 /// Mario starts, the enterable spots, and the metatile pictures.
@@ -465,9 +470,17 @@ pub struct WorldMapAsset {
     pub mario: Rgba,
     /// Frames each animation frame is shown (0x08135C5E[world * 4 + frame] + 1).
     pub anim_ticks: [u8; 4],
+    /// Completion bits a game over keeps, per column (0x08012458 ANDs 0x02001420[world *
+    /// 0x80 + column] with 0x0813C12E[world * 0x40 + column]): the levels, fortresses and
+    /// locks stay done, Toad houses and spade panels come back.
+    pub game_over_keep: Vec<u8>,
+    /// Mario spinning, see `MAP_SPIN_*` (empty when extracted by an older version).
+    pub mario_spin: Rgba,
 }
 
-const MAP_MAGIC: &[u8; 8] = b"SMA4WM01";
+/// Version 1 lacks `game_over_keep` (read as "keep everything").
+const MAP_MAGIC_V1: &[u8; 8] = b"SMA4WM01";
+const MAP_MAGIC: &[u8; 8] = b"SMA4WM02";
 
 impl WorldMapAsset {
     fn stem(dir: &Path, world: u8) -> PathBuf {
@@ -498,9 +511,11 @@ impl WorldMapAsset {
             }
         }
         out.extend_from_slice(&self.grid);
+        out.extend_from_slice(&self.game_over_keep);
         write(&stem.with_extension("bin"), &out)?;
         self.atlas.write_png(&dir.join("map").join(format!("world{}_meta.png", world + 1)))?;
-        self.mario.write_png(&dir.join("map").join(format!("world{}_mario.png", world + 1)))
+        self.mario.write_png(&dir.join("map").join(format!("world{}_mario.png", world + 1)))?;
+        self.mario_spin.write_png(&dir.join("map").join(format!("world{}_mario_spin.png", world + 1)))
     }
 
     pub fn read(dir: &Path, world: u8) -> Result<Self> {
@@ -508,7 +523,7 @@ impl WorldMapAsset {
         let path = stem.with_extension("bin");
         let d = read(&path)?;
         let bad = || AssetError::BadLevel(path.clone());
-        if d.len() < 30 || &d[..8] != MAP_MAGIC {
+        if d.len() < 30 || (&d[..8] != MAP_MAGIC && &d[..8] != MAP_MAGIC_V1) {
             return Err(bad());
         }
         let u16_at = |i: usize| u16::from_le_bytes([d[i], d[i + 1]]);
@@ -527,9 +542,14 @@ impl WorldMapAsset {
             at += 8;
         }
         let grid = d.get(at..at + cols * rows).ok_or_else(bad)?.to_vec();
+        at += cols * rows;
+        let game_over_keep =
+            if &d[..8] == MAP_MAGIC { d.get(at..at + cols).ok_or_else(bad)?.to_vec() } else { vec![0xFF; cols] };
         let atlas = Rgba::read_png(&dir.join("map").join(format!("world{}_meta.png", world + 1)))?;
         let mario = Rgba::read_png(&dir.join("map").join(format!("world{}_mario.png", world + 1)))?;
-        Ok(Self { cols, rows, grid, start, thresholds, nodes, origin, atlas, mario, anim_ticks })
+        let mario_spin = Rgba::read_png(&dir.join("map").join(format!("world{}_mario_spin.png", world + 1)))
+            .unwrap_or(Rgba { width: 0, height: 0, pixels: vec![] });
+        Ok(Self { cols, rows, grid, start, thresholds, nodes, origin, atlas, mario, anim_ticks, game_over_keep, mario_spin })
     }
 }
 

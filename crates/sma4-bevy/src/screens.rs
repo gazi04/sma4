@@ -214,14 +214,27 @@ fn sync_game_over(
 
 fn sync_menu(
     game: Res<GameRes>,
-    mut screen: Query<&mut Visibility, (With<MenuScreen>, Without<MenuCursor>)>,
-    mut cursor: Query<(&mut Transform, &mut Visibility), With<MenuCursor>>,
+    mut screen: Query<(&mut Sprite, &mut Transform, &mut Visibility), (With<MenuScreen>, Without<MenuCursor>)>,
+    mut cursor: Query<(&mut Transform, &mut Visibility), (With<MenuCursor>, Without<MenuScreen>)>,
 ) {
     let menu = match game.0.screen {
         Screen::GameOverMenu(m) => Some(m),
         _ => None,
     };
-    for mut v in &mut screen {
+    for (mut sprite, mut t, mut v) in &mut screen {
+        // With the walkable map drawn (dimmed) underneath, only the panel's window of the
+        // menu picture is shown (0x0802F718: it closes after CONTINUE).
+        if game.0.world_map.is_some() {
+            match menu.and_then(|m| m.window()) {
+                Some((x, y, w, h)) => {
+                    sprite.rect = Some(Rect::new(x as f32, y as f32, (x + w) as f32, (y + h) as f32));
+                    *t = at(x, y, w, h, Z_PANEL);
+                    *v = Visibility::Inherited;
+                }
+                None => *v = Visibility::Hidden,
+            }
+            continue;
+        }
         *v = if menu.is_some() { Visibility::Inherited } else { Visibility::Hidden };
     }
     for (mut t, mut v) in &mut cursor {

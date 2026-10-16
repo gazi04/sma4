@@ -12,6 +12,10 @@
 //!   sub-state 0x17); the iris closes (0x0802F44C) and the level loads.
 //! * Cleared spots change tile (0x08009428): panels become 0x00, Toad houses 0x40, the
 //!   spade 0xC0, the fortress 0x60 (and its lock opens).
+//! * Checkpoint (0x030037B1 / B3 / B5): START when the world begins; clearing a level
+//!   (0x080270B8, any tileset below 0x0F except Toad houses, 7) moves it to that level's
+//!   spot. After a game over Mario flies back to it (0x080131EC) and the Toad houses and
+//!   spade panels come back (0x08012458, mask 0x0813C12E).
 
 use sma4_assets::MapNode;
 
@@ -60,6 +64,13 @@ const DONE_SPADE: u8 = 0xC0;
 /// fortress becomes rubble, the bridge appears.
 const CHANGES: [(u8, u8); 8] =
     [(0x51, 0x45), (0x52, 0x46), (0x54, 0x46), (0x67, 0x60), (0xEB, 0xE3), (0xE4, 0xDA), (0x56, 0x45), (0x9D, 0xB3)];
+/// Clearing a level of a tileset below this (other than a Toad house) moves the
+/// checkpoint there (0x080270B8).
+const CHECKPOINT_TILESETS: u8 = 0x0F;
+const TOAD_HOUSE_TILESET: u8 = 7;
+/// Flight back to the checkpoint after a game over (0x080131EC): 0x20 frames, the
+/// distance / 32 each frame in 8.8 fixed point.
+pub const FLY_FRAMES: u8 = 0x20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapPhase {
@@ -80,6 +91,12 @@ pub struct WorldMap {
     thresholds: [u8; 4],
     pub nodes: Vec<MapNode>,
     start: (u8, u16),
+    /// Where a game over sends Mario back to (0x030037B1 y, B3 screen, B5 x).
+    pub checkpoint: (u8, u16),
+    /// Completion bits a game over keeps, per column (0x0813C12E).
+    game_over_keep: Vec<u8>,
+    /// Where the flight back to the checkpoint started.
+    fly_from: (u8, u16),
     /// Completion bits per column (0x02001420[world * 0x80 + column]).
     cleared: Vec<u8>,
     /// Tiles with the completions applied.
@@ -116,6 +133,9 @@ impl WorldMap {
             thresholds,
             nodes,
             start,
+            checkpoint: start,
+            game_over_keep: vec![0xFF; cols],
+            fly_from: start,
             cleared: vec![0; cols],
             grid,
             y: start.0,
@@ -134,12 +154,48 @@ impl WorldMap {
         map
     }
 
+    /// The completion bits a game over keeps, per column (`WorldMapAsset::game_over_keep`).
+    pub fn with_game_over_keep(mut self, keep: Vec<u8>) -> Self {
+        self.game_over_keep = keep;
+        self.game_over_keep.resize(self.cols, 0xFF);
+        self
+    }
+
     /// A new game: Mario back at START, nothing cleared.
     pub fn reset(&mut self) {
         self.cleared.iter_mut().for_each(|c| *c = 0);
         self.rebuild();
         (self.y, self.x) = self.start;
+        self.checkpoint = self.start;
         self.last_dir = 0;
+        self.show(true);
+    }
+
+    /// Game over (0x08012458): the Toad houses and spade panels are no longer done (their
+    /// bits go now; the tiles change when the map is set up again after CONTINUE), and the
+    /// flight back starts from where Mario entered the last level.
+    pub fn game_over(&mut self) {
+        for (c, keep) in self.cleared.iter_mut().zip(&self.game_over_keep) {
+            *c &= keep;
+        }
+        self.walk = 0;
+        self.target = None;
+        self.fly_from = (self.y, self.x);
+    }
+
+    /// Frame `k` (1 to `FLY_FRAMES`) of the flight to the checkpoint (0x080131EC): the
+    /// distance is split into 32 steps in 8.8 fixed point (+0x19/+0x1A for y, +0x1D..+0x1F
+    /// for x), added (or taken away, with borrow) once per frame.
+    pub fn fly(&mut self, k: u8) {
+        let along = |from: i32, to: i32| ((from << 8) + (to - from) * 8 * k as i32) >> 8;
+        self.y = along(self.fly_from.0 as i32, self.checkpoint.0 as i32) as u8;
+        self.x = along(self.fly_from.1 as i32, self.checkpoint.1 as i32) as u16;
+    }
+
+    /// After the flight (0x08012BA8): the map is set up again with the game-over bits.
+    pub fn continue_game(&mut self) {
+        (self.y, self.x) = self.checkpoint;
+        self.rebuild();
         self.show(true);
     }
 
@@ -218,8 +274,12 @@ impl WorldMap {
         }
     }
 
-    /// Marks the spot under Mario cleared (its bit in 0x02001420) and redraws it.
+    /// Marks the spot under Mario cleared (its bit in 0x02001420) and redraws it; a
+    /// level there becomes the checkpoint (0x080270B8).
     pub fn clear_here(&mut self) {
+        if self.node_here().is_some_and(|n| n.tileset < CHECKPOINT_TILESETS && n.tileset != TOAD_HOUSE_TILESET) {
+            self.checkpoint = (self.y, self.x);
+        }
         let (c, r) = self.cell(self.y as i32, self.x as i32);
         if c < 0 || r < 1 || c as usize >= self.cols {
             return;
@@ -368,7 +428,11 @@ pub(crate) mod tests {
         let grid = W1.iter().flat_map(|r| r.split(' ').map(|t| u8::from_str_radix(t, 16).unwrap())).collect();
         let node = |y, x, level| MapNode { y, x, tileset: 1, level, enemies: 0 };
         let nodes = vec![node(0x20, 0x40, 0x22), node(0x20, 0x80, 0x4B), node(0x40, 0xC0, 0x102)];
-        let mut m = WorldMap::new(grid, (16, 12), (0x40, 0x20), [0x03, 0x67, 0xBF, 0xE9], nodes, [17; 4]);
+        // World 1's game-over mask (0x0813C12E): levels 1-1 to 1-6, the fortress and its lock.
+        let mut keep = vec![0; 16];
+        (keep[4], keep[6], keep[8], keep[10]) = (0x91, 0x08, 0x81, 0xA0);
+        let mut m = WorldMap::new(grid, (16, 12), (0x40, 0x20), [0x03, 0x67, 0xBF, 0xE9], nodes, [17; 4])
+            .with_game_over_keep(keep);
         m.show(false);
         m
     }
@@ -491,5 +555,46 @@ pub(crate) mod tests {
         assert_eq!(seen[15], 0);
         assert_eq!(seen[16], 1);
         assert_eq!(seen[33], 2);
+    }
+
+    #[test]
+    fn clearing_a_level_moves_the_checkpoint_and_game_over_flies_back_to_it() {
+        let mut m = world1();
+        assert_eq!(m.checkpoint, (0x40, 0x20), "START");
+        (m.y, m.x) = (0x20, 0x40);
+        m.clear_here();
+        assert_eq!(m.checkpoint, (0x20, 0x40), "1-1 cleared");
+        m.clear_cell(12, 3);
+        m.clear_cell(8, 5);
+        (m.y, m.x) = (0x20, 0x80);
+        m.game_over();
+        assert_eq!(m.tile(12, 3), 0x40, "the old tiles stay until the map is set up again");
+        let path: Vec<(u8, u16)> = (1..=FLY_FRAMES).map(|k| {
+            m.fly(k);
+            (m.y, m.x)
+        }).collect();
+        assert_eq!(path[0], (0x20, 0x7E), "64 px in 32 steps of 2");
+        assert_eq!(path[31], (0x20, 0x40));
+        m.continue_game();
+        assert_eq!((m.y, m.x), (0x20, 0x40));
+        assert_eq!(m.tile(4, 1), 0x00, "1-1 stays cleared");
+        assert_eq!((m.tile(12, 3), m.tile(8, 5)), (0x50, 0xE8), "Toad house and spade come back");
+        m.reset();
+        assert_eq!(m.checkpoint, (0x40, 0x20));
+    }
+
+    #[test]
+    fn the_flight_rounds_like_the_rom() {
+        let mut m = world1();
+        (m.y, m.x) = (0xA0, 0xC0);
+        m.game_over();
+        m.fly(1);
+        // y 0xA0 -> 0x40: -0x60 = 3 px a frame; x 0xC0 -> 0x20: -0xA0 = 5 px a frame.
+        assert_eq!((m.y, m.x), (0x9D, 0xBB));
+        m.checkpoint = (0x40, 0x23);
+        m.fly(1);
+        assert_eq!(m.x, 0xBB, "-0x9D / 32 = -4.9: the borrow rounds down");
+        m.fly(FLY_FRAMES);
+        assert_eq!((m.y, m.x), (0x40, 0x23));
     }
 }

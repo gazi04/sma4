@@ -1,14 +1,17 @@
 //! The walkable world map, from `map/world1_walk.bin`, `_meta.png` (map metatiles, one
 //! column per animation frame) and `_mario.png`, all extracted from the user's own ROM.
 //! Walking, entering and clearing spots run in `sma4_core::world_map`; this draws the
-//! tiles, Mario and the iris that closes on him before a level.
+//! tiles, Mario and the iris that closes on him before a level. The game-over menu sits on
+//! this map too: dimmed while its panel is up, then with Mario spinning as he flies
+//! back to the checkpoint (`_mario_spin.png`).
 
 use bevy::{
     asset::RenderAssetUsages,
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
-use sma4_assets::{MAP_ANIM_FRAMES, MAP_MARIO_H, MAP_MARIO_W, WorldMapAsset};
+use sma4_assets::{MAP_ANIM_FRAMES, MAP_SPIN_SIZE, MAP_MARIO_H, MAP_MARIO_W, WorldMapAsset};
+use sma4_core::screens::MenuMario;
 use sma4_core::{Form, MapPhase, SCREEN_H, SCREEN_W, Screen, WorldMap};
 
 use crate::GameRes;
@@ -37,6 +40,8 @@ struct MapArt {
     tiles: Vec<Vec<Handle<Image>>>,
     /// [form cell * 2 + phase]
     mario: Vec<Handle<Image>>,
+    /// Mario spinning after a game over, [phase].
+    spin: Vec<Handle<Image>>,
     origin: (i32, i32),
     iris: Handle<Image>,
 }
@@ -86,6 +91,12 @@ fn spawn_map(
     };
     let tiles = (0..MAP_ANIM_FRAMES).map(|f| (0..256).map(|id| images.add(sprite_image(cell(f, id)))).collect()).collect();
     let mario = asset.mario.cells(MAP_MARIO_W, MAP_MARIO_H).into_iter().map(|c| images.add(sprite_image(c))).collect();
+    let spin = if asset.mario_spin.width == 0 {
+        warn!("no map/world1_mario_spin.png; re-run sma4-extract");
+        vec![]
+    } else {
+        asset.mario_spin.cells(MAP_SPIN_SIZE, MAP_SPIN_SIZE).into_iter().map(|c| images.add(sprite_image(c))).collect()
+    };
     let iris = images.add(Image::new(
         Extent3d { width: SCREEN_W, height: SCREEN_H, depth_or_array_layers: 1 },
         TextureDimension::D2,
@@ -114,12 +125,13 @@ fn spawn_map(
         cam.spawn((Iris, Sprite::from_image(iris.clone()), at(0, 0, 240, 160, Z_IRIS), Visibility::Hidden));
     });
     let mut map =
-        WorldMap::new(asset.grid, (asset.cols, asset.rows), asset.start, asset.thresholds, asset.nodes, asset.anim_ticks);
+        WorldMap::new(asset.grid, (asset.cols, asset.rows), asset.start, asset.thresholds, asset.nodes, asset.anim_ticks)
+            .with_game_over_keep(asset.game_over_keep);
     for &(c, r) in cleared.iter().flat_map(|c| c.0.iter()) {
         map.clear_cell(c, r);
     }
     game.0.world_map = Some(map);
-    commands.insert_resource(MapArt { tiles, mario, origin, iris });
+    commands.insert_resource(MapArt { tiles, mario, spin, origin, iris });
 }
 
 /// Iris (0x0802F44C): everything outside a circle of `r` px round (cx, cy) is black.
@@ -143,12 +155,20 @@ fn sync_map(
     mut iris: Query<&mut Visibility, (With<Iris>, Without<MapTile>, Without<MapMario>)>,
 ) {
     let (Some(art), Some(map)) = (art, &game.0.world_map) else { return };
-    let shown = game.0.screen == Screen::Map;
+    let menu = match game.0.screen {
+        Screen::GameOverMenu(m) => Some(m),
+        _ => None,
+    };
+    let shown = game.0.screen == Screen::Map || menu.is_some();
     let vis = |on: bool| if on { Visibility::Inherited } else { Visibility::Hidden };
     let frame = map.anim_frame as usize;
+    // 0x08012458 halves the palette under the menu (BLDY); the dimming goes once the
+    // panel's window has closed.
+    let tint = if menu.is_some_and(|m| m.dimmed()) { Color::srgb(0.5, 0.5, 0.5) } else { Color::WHITE };
     for (tile, mut sprite, mut v) in &mut tiles {
         *v = vis(shown);
         if shown {
+            sprite.color = tint;
             let (c, r) = ((tile.0 % map.cols) as i32, (tile.0 / map.cols) as i32);
             let image = &art.tiles[frame][map.tile(c, r) as usize];
             if sprite.image != *image {
@@ -160,6 +180,24 @@ fn sync_map(
     // poses alternate on frame-counter bit 3.
     let (sx, sy) = (map.x as i32 + art.origin.0, map.y as i32 - 0x10 + art.origin.1);
     for (mut sprite, mut t, mut v) in &mut mario {
+        match menu.map(|m| m.mario()) {
+            None => {}
+            Some(None) => {
+                *v = Visibility::Hidden;
+                continue;
+            }
+            // Lower OBJ only: the spin replaces it (the small form has no upper half).
+            Some(Some(MenuMario::Spin(phase))) => {
+                *v = Visibility::Inherited;
+                if let Some(image) = art.spin.get(phase as usize) {
+                    sprite.image = image.clone();
+                }
+                let size = MAP_SPIN_SIZE as i32;
+                *t = at(sx, sy, size, size, Z_MARIO);
+                continue;
+            }
+            Some(Some(MenuMario::Normal)) => {}
+        }
         *v = vis(shown);
         let form = match game.0.player.form {
             Form::Small => 0,

@@ -3,7 +3,9 @@
 //! enterable spots, the metatile pictures (with the BG tile animation) and Mario's map
 //! sprite.
 
-use sma4_assets::{MAP_ANIM_FRAMES, MAP_MARIO_FORMS, MAP_MARIO_H, MAP_MARIO_W, MapNode, Rgba, WorldMapAsset};
+use sma4_assets::{
+    MAP_ANIM_FRAMES, MAP_SPIN_PHASES, MAP_SPIN_SIZE, MAP_MARIO_FORMS, MAP_MARIO_H, MAP_MARIO_W, MapNode, Rgba, WorldMapAsset,
+};
 use sma4_rom::{Rom, gfx::parse_palette};
 
 use crate::emu::Machine;
@@ -63,6 +65,13 @@ const FRAME_COUNTER: u32 = 0x0300_3AE8;
 const MAP_SUB_STATE: u32 = 0x0300_385D;
 const IDLE: u8 = 0x0E;
 const MARIO_SLOTS: std::ops::Range<u32> = 68..70;
+/// After a game over (0x080270B8 sets map state +0x17), 0x0800C45C decrements +0x21 and
+/// draws the lower OBJ (slot 69) as small Mario turning round, 0x0813A55F[(+0x21 & 6) >> 1].
+const GAME_OVER_LOOK: u32 = MAP_STATE + 0x17;
+const SPIN_TIMER: u32 = MAP_STATE + 0x21;
+const LOWER_SLOT: std::ops::Range<u32> = 69..70;
+/// Completion bits a game over keeps (0x08012458): 0x0813C12E[world * 0x40 + column].
+const GAME_OVER_KEEP: u32 = 0x0813_C12E;
 
 fn setup(m: &mut Machine, world: u8) -> Result<(), ExtractError> {
     m.clear_ram()?;
@@ -242,6 +251,38 @@ pub fn extract_world_map(rom: &Rom, m: &mut Machine, world: u8, out_dir: &std::p
         }
     }
 
+    // Mario spinning after a game over, one cell per phase of +0x21 (the draw decrements it first).
+    let hs = MAP_SPIN_SIZE;
+    let mut mario_spin =
+        Rgba { width: hs * MAP_SPIN_PHASES, height: hs, pixels: vec![0; (hs * MAP_SPIN_PHASES * hs * 4) as usize] };
+    m.w8(MAP_FORM, 0)?;
+    m.w8(GAME_OVER_LOOK, 1)?;
+    for phase in 0..MAP_SPIN_PHASES {
+        for s in 0..128 {
+            m.w16(OAM_BUF + s * 8, 0xA0)?;
+        }
+        m.w8(SPIN_TIMER, (phase * 2 + 1) as u8)?;
+        m.call(FN_DRAW_MARIO, &[])?;
+        let lower = m.read(OAM_BUF + 69 * 8, 4)?;
+        let (ly, lx) = (lower[0] as i32, (u16::from_le_bytes([lower[2], lower[3]]) & 0x1FF) as i32);
+        let mut canvas = Rgba { width: 240, height: 160, pixels: vec![0; 240 * 160 * 4] };
+        draw_oam(m, &mut canvas, LOWER_SLOT)?;
+        for y in 0..hs as i32 {
+            for x in 0..hs as i32 {
+                let (sx, sy) = (lx + x, ly + y);
+                if !(0..240).contains(&sx) || !(0..160).contains(&sy) {
+                    continue;
+                }
+                let s = ((sy * 240 + sx) * 4) as usize;
+                let d = ((y as u32 * mario_spin.width + phase * hs + x as u32) * 4) as usize;
+                mario_spin.pixels[d..d + 4].copy_from_slice(&canvas.pixels[s..s + 4]);
+            }
+        }
+    }
+    m.w8(GAME_OVER_LOOK, 0)?;
+    let game_over_keep =
+        (0..cols as u32).map(|c| rom.u8(GAME_OVER_KEEP + world as u32 * 0x40 + c)).collect::<Result<Vec<u8>, _>>()?;
+
     let anim_ticks: Vec<u8> =
         (0..MAP_ANIM_FRAMES).map(|f| rom.u8(ANIM_TIMES + world as u32 * 4 + f).map(|t| t + 1)).collect::<Result<_, _>>()?;
     WorldMapAsset {
@@ -255,6 +296,8 @@ pub fn extract_world_map(rom: &Rom, m: &mut Machine, world: u8, out_dir: &std::p
         origin,
         atlas: Rgba { width: aw, height: ah, pixels: atlas },
         mario,
+        game_over_keep,
+        mario_spin,
     }
     .write(out_dir, world)
     .map_err(|e| ExtractError(e.to_string()))

@@ -256,6 +256,9 @@ impl Game {
         // Lives go below zero (0xFFFF: the bars show 0) on game over.
         self.status.lives = self.status.lives.wrapping_sub(1);
         if self.status.lives == status::NO_LIVES {
+            if let Some(map) = &mut self.world_map {
+                map.game_over();
+            }
             self.screen = Screen::GameOver(GameOver::new());
         } else {
             self.to_map(true);
@@ -324,10 +327,20 @@ impl Game {
                 return;
             }
             Screen::GameOverMenu(menu) => {
-                match menu.step(self.input.pressed) {
+                let choice = menu.step(self.input.pressed);
+                // 0x080131EC: Mario flies back to the checkpoint.
+                if let (Some(k), Some(map)) = (menu.flight(), &mut self.world_map) {
+                    map.fly(k);
+                }
+                match choice {
+                    // The window closes and Mario flies back (menu handlers 2-8).
+                    Some(MenuChoice::Continue) if self.world_map.is_some() => {}
                     // 0x08012BA8: lives back to 4, on to the map.
-                    Some(MenuChoice::Continue) => {
+                    Some(MenuChoice::Continue | MenuChoice::Continued) => {
                         self.status.lives = status::START_LIVES;
+                        if let Some(map) = &mut self.world_map {
+                            map.continue_game();
+                        }
                         self.to_map(true);
                     }
                     // Quit goes to the title screen in the ROM; there is none here yet, so
@@ -990,5 +1003,73 @@ mod tests {
         g.step(Buttons::A);
         assert_eq!(g.screen, Screen::Map);
         assert_eq!((g.status.lives, g.status.score), (status::START_LIVES, 500), "continue keeps the score");
+    }
+
+    #[test]
+    fn continue_closes_the_panel_and_flies_mario_back_to_the_world_start() {
+        use crate::screens::{MenuMario, MenuStage};
+        let mut g = Game::new();
+        let mut map = world_map::tests::world1();
+        // Mario entered 1-2 (cleared 1-1 is behind him, but the Toad house spot is done too).
+        map.clear_cell(12, 3);
+        (map.y, map.x) = (0x20, 0x80);
+        let start = map.checkpoint;
+        g.world_map = Some(map);
+        g.enter_level(block_level((20, 2)), (8 * TILE_PX, 9 * TILE_PX - 16), &[]);
+        g.status.lives = 0;
+        g.die();
+        while !matches!(g.screen, Screen::GameOverMenu(_)) {
+            g.step(Buttons::empty());
+        }
+        for _ in 0..0x10 {
+            g.step(Buttons::empty());
+        }
+        g.step(Buttons::A);
+        let menu = |g: &Game| match g.screen {
+            Screen::GameOverMenu(m) => m,
+            _ => panic!("left the menu early: {:?}", g.screen),
+        };
+        // The window shrinks 8 px a side per frame; it is gone once its 0x28 half height is
+        // (the frame A was pressed on, then 5 frames).
+        let mut widths = Vec::new();
+        while let Some((_, _, w, _)) = menu(&g).window() {
+            widths.push(w);
+            g.step(Buttons::empty());
+        }
+        assert_eq!(widths, [0x78, 0x78, 0x68, 0x58, 0x48, 0x38]);
+        // The map stays dim until the half width is 0 too (0x3C: 8 frames in all).
+        let mut dim = 0;
+        while menu(&g).dimmed() {
+            g.step(Buttons::empty());
+            dim += 1;
+        }
+        assert_eq!(dim, 2);
+        let mut frames = 0;
+        let mut phases = Vec::new();
+        let mut path = Vec::new();
+        while matches!(menu(&g).stage, MenuStage::Close | MenuStage::Wait(_) | MenuStage::Fly(_)) {
+            if let Some(MenuMario::Spin(p)) = menu(&g).mario() {
+                phases.push(p);
+            }
+            let m = g.world_map.as_ref().unwrap();
+            path.push((m.y, m.x));
+            g.step(Buttons::empty());
+            frames += 1;
+        }
+        assert_eq!(&phases[..8], [3, 3, 2, 2, 1, 1, 0, 0], "Mario spins, 2 frames a side");
+        assert_eq!(path.first(), Some(&(0x20, 0x80)), "from where he entered the level");
+        let m = g.world_map.as_ref().unwrap();
+        assert_eq!((m.y, m.x), start, "...straight back to START");
+        assert!(frames >= 0x10 + 0x20);
+        assert_eq!(menu(&g).mario(), Some(MenuMario::Normal));
+        assert_eq!(g.status.lives, status::NO_LIVES, "4 lives only once back on the map");
+        for _ in 0..0x11 {
+            g.step(Buttons::empty());
+        }
+        assert_eq!(g.screen, Screen::Map);
+        assert_eq!(g.status.lives, status::START_LIVES);
+        let m = g.world_map.as_ref().unwrap();
+        assert!(matches!(m.phase, MapPhase::Intro(_)), "with the WORLD 1 panel");
+        assert_eq!(m.tile(12, 3), 0x50, "the Toad house is back");
     }
 }
