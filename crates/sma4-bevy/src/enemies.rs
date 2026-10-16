@@ -1,14 +1,15 @@
 //! Enemy sprites, extracted from the user's own ROM by `sma4-extract`: the Goomba
 //! (`objects/walker.png`), the Paragoomba (`objects/paragoomba.png`), the Koopa Troopas (`objects/koopa_*.png`), the Piranha Plants
-//! (`objects/piranha_*.png`) and the puff of smoke (`objects/puff.png`). Behaviour and the
+//! (`objects/piranha_*.png`, the Venus Fire Trap included), its fireballs
+//! (`objects/fireball.png`) and the puff of smoke (`objects/puff.png`). Behaviour and the
 //! frame to show come from `sma4-core`.
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 use sma4_assets::{
-    KOOPA_CELL_H, KOOPA_CELL_W, KOOPA_ORIGIN, PARAGOOMBA_GOOMBA, PARAGOOMBA_SQUISHED, PIRANHA_ORIGIN, WALKER_SQUISHED,
-    koopa_path, paragoomba_path, piranha_path, puff_path, walker_path,
+    FIREBALL_FRAMES, KOOPA_CELL_H, KOOPA_CELL_W, KOOPA_ORIGIN, PARAGOOMBA_GOOMBA, PARAGOOMBA_SQUISHED, PIRANHA_ORIGIN,
+    WALKER_SQUISHED, fireball_path, koopa_path, paragoomba_path, piranha_path, puff_path, walker_path,
 };
 use sma4_core::{EnemyState, enemies};
 
@@ -25,9 +26,9 @@ impl Plugin for EnemyPlugin {
 
 const Z_ENEMY: f32 = 8.0;
 
-/// Sprite cells per enemy type, and the puff of smoke.
+/// Sprite cells per enemy type, the puff of smoke and the fireball.
 #[derive(Resource)]
-struct Art(HashMap<u16, Vec<Handle<Image>>>, Vec<Handle<Image>>);
+struct Art(HashMap<u16, Vec<Handle<Image>>>, Vec<Handle<Image>>, Vec<Handle<Image>>);
 
 #[derive(Component)]
 struct EnemySprite;
@@ -39,16 +40,30 @@ fn load_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMu
         art.insert(kind, load_cells(&koopa_path(&dir.0, kind), KOOPA_CELL_W, KOOPA_CELL_H, &mut images));
     }
     art.insert(enemies::PARAGOOMBA, load_cells(&paragoomba_path(&dir.0), KOOPA_CELL_W, KOOPA_CELL_H, &mut images));
-    for kind in [enemies::PIRANHA, enemies::RED_PIRANHA] {
+    for kind in enemies::PIRANHA_TYPES {
         art.insert(kind, load_cells(&piranha_path(&dir.0, kind), KOOPA_CELL_W, KOOPA_CELL_H, &mut images));
     }
     let puff = load_cells(&puff_path(&dir.0), 16, 16, &mut images);
-    commands.insert_resource(Art(art, puff));
+    let fireball = load_cells(&fireball_path(&dir.0), KOOPA_CELL_W, KOOPA_CELL_H, &mut images);
+    if fireball.is_empty() {
+        warn!("no objects/fireball.png; re-run sma4-extract");
+    }
+    commands.insert_resource(Art(art, puff, fireball));
 }
 
 fn sync_enemies(mut commands: Commands, game: Res<GameRes>, art: Res<Art>, old: Query<Entity, With<EnemySprite>>) {
     for e in &old {
         commands.entity(e).despawn();
+    }
+    // Fireballs: cells 0-3 fly right, 4-7 left; the slot position sits at KOOPA_ORIGIN.
+    for f in &game.0.fireballs {
+        let cell = f.frame() + if f.vx < 0 { FIREBALL_FRAMES as usize } else { 0 };
+        if let Some(image) = art.2.get(cell) {
+            let (x, y) = f.px();
+            let (w, h) = (KOOPA_CELL_W as i32, KOOPA_CELL_H as i32);
+            let (cx, cy) = (x - KOOPA_ORIGIN.0 + w / 2, y - KOOPA_ORIGIN.1 + h / 2);
+            commands.spawn((EnemySprite, Sprite::from_image(image.clone()), Transform::from_xyz(cx as f32, -(cy as f32), Z_ENEMY + 0.5)));
+        }
     }
     for e in &game.0.enemies {
         let (x, y) = e.px();

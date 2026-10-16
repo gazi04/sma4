@@ -49,6 +49,8 @@ pub struct Game {
     /// World, lives, clock, coins, score and score popups.
     pub status: Status,
     pub enemies: Vec<Enemy>,
+    /// Fireballs from Venus Fire Traps (projectile slots 0x03007848 + 0x8EC).
+    pub fireballs: Vec<enemies::Fireball>,
     pub spawner: Spawner,
     /// Frames of invulnerability left after taking a hit.
     pub invulnerable: u16,
@@ -112,6 +114,7 @@ impl Game {
         self.level = level;
         self.spawner = Spawner::new(enemies);
         self.enemies.clear();
+        self.fireballs.clear();
         self.invulnerable = 0;
         self.spawn = spawn;
         self.player = Player::spawn(spawn.0, spawn.1);
@@ -422,8 +425,23 @@ impl Game {
 
         self.invulnerable = self.invulnerable.saturating_sub(1);
         self.spawner.spawn_near(&self.player, &mut self.enemies);
+        // 0x08055B34: past World 1, fire plants spit twice per appearance.
+        let twice = self.status.world != 0;
         let (level, player, frame) = (&self.level, &self.player, self.frame);
-        self.enemies.retain_mut(|e| e.step(level, player, frame));
+        self.enemies.retain_mut(|e| {
+            e.spits_twice = twice;
+            e.step(level, player, frame)
+        });
+        // 0x08055938 takes a free slot among the first four, or does not spit.
+        for e in &mut self.enemies {
+            if let Some(f) = e.spit.take()
+                && self.fireballs.len() < enemies::FIREBALL_SLOTS
+            {
+                self.fireballs.push(f);
+            }
+        }
+        let camera = self.camera();
+        self.fireballs.retain_mut(|f| f.step(camera));
         for ((x, y), chain) in enemies::shell_hits(&mut self.enemies, frame) {
             self.status.chain_popup(x, y, chain);
         }
@@ -468,6 +486,10 @@ impl Game {
                 Contact::HurtPlayer => hurt = true,
                 Contact::Kicked | Contact::None => {}
             }
+        }
+        // 0x0808CC9C -> 0x0808CAEC: a fireball hurts like an enemy (0x0804A5F4) and flies on.
+        if self.fireballs.iter().any(|f| f.touches(&self.player)) {
+            hurt = true;
         }
         if hurt {
             self.hurt();
@@ -750,6 +772,21 @@ mod tests {
         e.state = EnemyState::Plant { phase: 2, timer: 0x30 };
         e.y = (y - 0x19) * player::SUB;
         e
+    }
+
+    #[test]
+    fn a_fireball_hurts_the_player_and_flies_on() {
+        let mut g = Game::new();
+        g.enter_level(block_level((20, 2)), (8 * TILE_PX, 9 * TILE_PX - 16), &[]);
+        g.player.grow();
+        let (fx, fy) = g.player.frame();
+        // Just left of the player, flying right at it.
+        let mut b = enemies::Fireball { x: (fx - 6) * 256, y: (fy + 10) * 256, vx: 0x0B, vy: 0, age: 0 };
+        b.x -= 0x0B * 16;
+        g.fireballs = vec![b];
+        g.step(Buttons::empty());
+        assert_eq!(g.player.form, Form::Small, "big shrinks");
+        assert_eq!(g.fireballs.len(), 1, "the fireball is not used up");
     }
 
     #[test]

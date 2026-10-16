@@ -707,6 +707,22 @@ pub const PIRANHA_FRAMES: u32 = 4;
 /// The plant reaches 33 px below its position, so it sits higher in the cell than a Koopa.
 pub const PIRANHA_ORIGIN: (i32, i32) = (8, 8);
 pub const PIRANHA_LOW: usize = 2;
+/// The Venus Fire Trap 0xA4 (`piranha_path(dir, 0xA4)`) has the four cells for each way it
+/// looks (0x0805564C: h-flip from +0x1A bit 6, v-flip while the player is above), in the
+/// order `fire_piranha_cell` gives.
+pub const FIRE_PIRANHA_LOOKS: u32 = 4;
+pub fn fire_piranha_cell(right: bool, up: bool, frame: usize) -> usize {
+    (up as usize * 2 + right as usize) * PIRANHA_FRAMES as usize + frame
+}
+
+/// Venus Fire Trap fireball (projectile type 5, draw 0x0808D5F0): `KOOPA_CELL_W` x
+/// `KOOPA_CELL_H` cells, the projectile's position at `KOOPA_ORIGIN`. Spin frames 0-3
+/// (tile 0x08170AEA[(counter >> 2) & 3], frames 2 and 3 flipped both ways) flying right,
+/// then the same flying left.
+pub fn fireball_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("fireball.png")
+}
+pub const FIREBALL_FRAMES: u32 = 4;
 
 /// Puff of smoke left by an enemy knocked out that has no body to fall (object state 8,
 /// e.g. a Piranha Plant hit by the tail): four 16x16 cells in the order they are shown.

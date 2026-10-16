@@ -16,6 +16,9 @@
 //! * Piranha Plants 0xA0 (green) / 0xA2 (red) share main 0x08055C88: a 4-phase cycle
 //!   (hidden, rising, out, sinking) on timer +0x23; they only hurt (+0x64 bit 0x1000) and
 //!   vanish in a puff of smoke (state 8) when the tail or a shell hits them.
+//! * The Venus Fire Trap 0xA4 (flags 0x0816E56E bit 7) uses the same main: it waits 0x60
+//!   frames per phase, turns its head toward the player and, out of the pipe with its
+//!   mouth shut, spits a fireball (projectile type 5, 0x08055938) at timer 0x28.
 
 use sma4_assets::{
     EnemySpawn, KOOPA_SHELL, KOOPA_SHELL_WAKING, KOOPA_SPIN, PIRANHA_LOW, PUFF_FRAMES, TileKind, WALKER_SQUISHED,
@@ -38,11 +41,13 @@ pub const PARAGOOMBA: u16 = 0x73;
 pub const PIRANHA: u16 = 0xA0;
 /// Red Piranha Plant: comes 0x21 px out.
 pub const RED_PIRANHA: u16 = 0xA2;
-/// Types that live in a pipe and are listed at its top row (fire-spitting and ceiling
-/// variants 0xA1, 0xA3-0xA7 are not ported yet).
-pub const PIRANHA_TYPES: [u16; 2] = [PIRANHA, RED_PIRANHA];
+/// Green Venus Fire Trap (SMB3's 0xA4, flags 0x80): comes 0x19 px out and spits fire.
+pub const FIRE_PIRANHA: u16 = 0xA4;
+/// Types that live in a pipe and are listed at its top row (ceiling variants 0xA1 / 0xA3 /
+/// 0xA5 / 0xA7 and the red Venus Fire Trap 0xA6 are not ported yet).
+pub const PIRANHA_TYPES: [u16; 3] = [PIRANHA, RED_PIRANHA, FIRE_PIRANHA];
 /// Enemy types implemented so far.
-pub const SUPPORTED: [u16; 7] = [WALKER, KOOPA, RED_KOOPA, PARATROOPA, PARAGOOMBA, PIRANHA, RED_PIRANHA];
+pub const SUPPORTED: [u16; 8] = [WALKER, KOOPA, RED_KOOPA, PARATROOPA, PARAGOOMBA, PIRANHA, RED_PIRANHA, FIRE_PIRANHA];
 
 /// 8/16 px per frame.
 const WALK_SPEED: i32 = 8 * 16;
@@ -101,6 +106,11 @@ const RED_PLANT_REACH: i32 = 0x21;
 /// Each phase change (0x08055914) sets timer +0x23 to 0x30 (types below 0xA4; the
 /// fire-spitting ones wait 0x60). The object loop counts it down every frame.
 const PLANT_WAIT: u8 = 0x30;
+const FIRE_PLANT_WAIT: u8 = 0x60;
+/// Out of its pipe (0x08055B34), a fire plant spits when its timer is 0x28 (World 1, where
+/// +0x3D | world is 0), or at 0x40 and 0x10 (later worlds).
+const SPIT_AT: u8 = 0x28;
+const SPIT_TWICE_AT: [u8; 2] = [0x40, 0x10];
 /// Rising and sinking move 1 px per frame (speed byte -0x10 / 0x10, 0x08055AF0).
 const PLANT_STEP: i32 = SUB;
 /// A hidden plant stays in its pipe while the player is within 27 px horizontally
@@ -166,6 +176,14 @@ pub struct Enemy {
     reach: i32,
     /// Piranha Plant: chomp counter +0x3C, +1 per frame.
     chomp: u8,
+    /// Venus Fire Trap: looks right (+0x1A bit 6 from 0x0816E62C[side], main 0x08055C88)
+    /// and up (the draw 0x0805564C v-flips the head while the player is above it).
+    pub looks_right: bool,
+    pub looks_up: bool,
+    /// Venus Fire Trap: spits twice per appearance (0x08055B34: outside World 1).
+    pub spits_twice: bool,
+    /// Fireball spat this frame; the game puts it in a free projectile slot.
+    pub spit: Option<Fireball>,
     /// Paragoomba: hops so far (+0x3B), the rest timer (+0x23) and the wing counter
     /// (+0x3C: +1 a frame, +3 while rising from the high hop, 0 on the ground before it).
     hops: u8,
@@ -225,6 +243,10 @@ impl Enemy {
             home_y: 0,
             reach: 0,
             chomp: 0,
+            looks_right: false,
+            looks_up: false,
+            spits_twice: false,
+            spit: None,
             hops: 0,
             hop_timer: 0,
             wings: 0,
@@ -251,6 +273,10 @@ impl Enemy {
             home_y: y,
             reach: if kind == RED_PIRANHA { RED_PLANT_REACH } else { PLANT_REACH },
             chomp: 0,
+            looks_right: false,
+            looks_up: false,
+            spits_twice: false,
+            spit: None,
             hops: 0,
             hop_timer: 0,
             wings: 0,
@@ -270,6 +296,11 @@ impl Enemy {
         matches!(self.state, EnemyState::Plant { phase: 1..=3, .. })
     }
 
+    /// Spits fire (flags 0x0816E56E bit 7).
+    pub fn is_fire_plant(&self) -> bool {
+        self.kind == FIRE_PIRANHA
+    }
+
     pub fn is_koopa(&self) -> bool {
         matches!(self.kind, KOOPA | RED_KOOPA | PARATROOPA)
     }
@@ -284,6 +315,7 @@ impl Enemy {
         self.age = self.age.wrapping_add(1);
         self.grace = self.grace.saturating_sub(1);
         self.wall_hit = None;
+        self.spit = None;
         match self.state {
             EnemyState::Squished(t) => {
                 self.state = EnemyState::Squished(t - 1);
@@ -327,7 +359,15 @@ impl Enemy {
     /// Piranha Plant main 0x08055C88, phase handlers 0x0816E61C. `timer` has already been
     /// counted down for this frame (object loop 0x08044AF0).
     fn step_plant(&mut self, player: &Player, phase: u8, timer: u8) {
-        let y = self.px().1;
+        let (x, y) = self.px();
+        let (fx, fy) = player.frame();
+        let fire = self.is_fire_plant();
+        if fire && phase != 0 {
+            // Main: face the player (side test 0x08049F48); the draw looks up while the
+            // player is above (0x08049FDC).
+            self.looks_right = fx - x >= 0;
+            self.looks_up = fy - y < 0;
+        }
         let advance = match phase {
             // 0x08055A24: once the timer runs out, come out unless the player is close.
             0 => {
@@ -344,19 +384,28 @@ impl Enemy {
                 self.y += PLANT_STEP;
                 false
             }
-            // 0x08055B34: wait out of the pipe.
-            2 => timer == 0,
+            // 0x08055B34: wait out of the pipe; a fire plant spits on the way.
+            2 => {
+                let spits = if self.spits_twice { SPIT_TWICE_AT.contains(&timer) } else { timer == SPIT_AT };
+                if fire && spits {
+                    self.spit = Some(Fireball::spat(x, y, fx, fy));
+                }
+                timer == 0
+            }
             _ => true,
         };
-        // 0x08055914: next phase, timer 0x30.
+        // 0x08055914: next phase, timer 0x30 (0x60 for the fire plants).
+        let wait = if self.kind < FIRE_PIRANHA { PLANT_WAIT } else { FIRE_PLANT_WAIT };
         self.state = if advance {
-            EnemyState::Plant { phase: (phase + 1) & 3, timer: PLANT_WAIT }
+            EnemyState::Plant { phase: (phase + 1) & 3, timer: wait }
         } else {
             EnemyState::Plant { phase, timer }
         };
-        // 0x08055C3C: the chomp counter runs every frame.
-        self.chomp = self.chomp.wrapping_add(1);
+        // 0x08055C3C: the chomp counter runs every frame; out of the pipe, 0x08055B34 keeps
+        // a fire plant's mouth shut (+0x3C = 0).
+        self.chomp = if fire && phase == 2 { 0 } else { self.chomp.wrapping_add(1) };
     }
+
 
     /// Paragoomba main 0x08053E9C. `self.age` is its counter +0x3A after this frame's +1.
     fn step_paragoomba(&mut self, level: &Level, player: &Player) {
@@ -629,7 +678,12 @@ impl Enemy {
             // 0x0805564C: frame (+0x3C >> 3) & 1, +2 (no stem) while less than 0x11 px out.
             (EnemyState::Plant { .. }, _) => {
                 let low = if self.home_y - self.px().1 < PLANT_LOW { PIRANHA_LOW } else { 0 };
-                ((self.chomp >> 3) & 1) as usize + low
+                let frame = ((self.chomp >> 3) & 1) as usize + low;
+                if self.is_fire_plant() {
+                    sma4_assets::fire_piranha_cell(self.looks_right, self.looks_up, frame)
+                } else {
+                    frame
+                }
             }
             (EnemyState::Puff(t), _) => (PUFF_FRAMES as usize - 1).saturating_sub((t >> 3) as usize),
             (EnemyState::Squished(_), _) => WALKER_SQUISHED,
@@ -705,6 +759,89 @@ impl Spawner {
                 true
             }
         });
+    }
+}
+
+/// A fireball spat by a Venus Fire Trap: projectile slot type 5 (0x03007848 + 0x8EC +
+/// i * 0x18), handler 0x0808D774 in table 0x08170BB4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fireball {
+    /// Top-left, 1/256 px (+0 / +4).
+    pub x: i32,
+    pub y: i32,
+    /// Speeds in 1/16 px per frame (+0x0A / +0x08).
+    pub vx: i32,
+    pub vy: i32,
+    /// Frame counter +0x13, +1 per frame: the spin is (counter >> 2) & 3.
+    pub age: u8,
+}
+
+/// Fireball speeds 0x0816E618 (y) / 0x0816E61A (x): [near, far]; far when the player is
+/// 0x50 px or more away ((u8)(dx + 0x50) > 0x9F).
+const FIRE_VY: [i32; 2] = [0x0B, 0x05];
+const FIRE_VX: [i32; 2] = [0x0B, 0x0E];
+const FIRE_FAR: u8 = 0x50;
+/// Spawn point (0x08055938): plant x + 3 px, plant y (+16 for ceiling plants).
+const FIRE_DX: i32 = 3;
+/// Projectiles a fire plant can use: 0x0808C950 searches slots 3 down to 0.
+pub const FIREBALL_SLOTS: usize = 4;
+/// Player contact (0x0808CC9C): (fy - player y - 0x08170A9C[big] + 8) as u16 below
+/// 0x08170A9E[big], and (fx - player x + 6) as u16 below 0x10; big = not small.
+const FIRE_TOP: [i32; 2] = [0x12, 0x0A];
+const FIRE_H: [i32; 2] = [0x10, 0x16];
+const FIRE_W: i32 = 0x10;
+
+impl Fireball {
+    /// 0x08055938: aimed at the player whose 16x32 frame is at (fx, fy) from a plant at
+    /// (x, y), all in px.
+    fn spat(x: i32, y: i32, fx: i32, fy: i32) -> Self {
+        let far = ((fx - x) as u8).wrapping_add(FIRE_FAR) > 0x9F;
+        let far = far as usize;
+        let up = (fy - y) < 0;
+        let left = (fx - x) < 0;
+        Self {
+            x: (x + FIRE_DX) * SUB,
+            y: y * SUB,
+            vx: if left { -FIRE_VX[far] } else { FIRE_VX[far] },
+            vy: if up { -FIRE_VY[far] } else { FIRE_VY[far] },
+            age: 0,
+        }
+    }
+
+    pub fn px(&self) -> (i32, i32) {
+        (self.x >> 8, self.y >> 8)
+    }
+
+    /// One frame (0x0808FB08 -> 0x0808D774). Returns false once it has left the screen
+    /// (x more than 8 px left of the view or past 0xF8, y outside -0x14..0xEC), which the
+    /// dispatcher tests before moving it.
+    pub fn step(&mut self, camera: (i32, i32)) -> bool {
+        let (x, y) = self.px();
+        let (sx, sy) = (x - camera.0, y - camera.1);
+        if !(-8..0xF8).contains(&sx) || !(-0x14..0xEC).contains(&sy) {
+            return false;
+        }
+        self.age = self.age.wrapping_add(1);
+        // 0x0808D0C4 / 0x0808D0D4: a straight line.
+        self.x += self.vx * 16;
+        self.y += self.vy * 16;
+        true
+    }
+
+    /// Spin frame 0-3, a cell of `sma4_assets::fireball_path` (h-flipped cells follow for
+    /// fireballs flying left).
+    pub fn frame(&self) -> usize {
+        ((self.age >> 2) & 3) as usize
+    }
+
+    /// 0x0808CC9C: touches the player.
+    pub fn touches(&self, player: &Player) -> bool {
+        let (x, y) = self.px();
+        let (fx, fy) = player.frame();
+        let big = (player.form != crate::player::Form::Small) as usize;
+        let dy = (y - fy - FIRE_TOP[big] + 8) as u16;
+        let dx = (x - fx + 6) as u16;
+        dy < FIRE_H[big] as u16 && dx < FIRE_W as u16
     }
 }
 
@@ -963,6 +1100,90 @@ mod tests {
         player.vy = 2 * SUB;
         assert_eq!(e.contact(&player), Contact::Stomped, "a second stomp flattens the Goomba");
         assert!(matches!(e.state, EnemyState::Squished(_)));
+    }
+
+    #[test]
+    fn fire_plant_waits_0x60_and_spits_once_with_its_mouth_shut() {
+        let lvl = level();
+        let p = far_player();
+        let mut e = Enemy::spawn(&EnemySpawn { kind: FIRE_PIRANHA, col: 10, row: 6 }, &p);
+        let mut f = 0;
+        while phase(&e) != 2 {
+            e.step(&lvl, &p, f);
+            f += 1;
+        }
+        assert_eq!(e.px().1, e.home_y - PLANT_REACH);
+        let mut spits = Vec::new();
+        let mut frames = 0;
+        while phase(&e) == 2 {
+            e.step(&lvl, &p, f);
+            assert_eq!(e.chomp, 0, "mouth shut while out");
+            if let Some(b) = e.spit {
+                spits.push((frames, b));
+            }
+            f += 1;
+            frames += 1;
+        }
+        assert_eq!(frames, FIRE_PLANT_WAIT as u32);
+        assert_eq!(spits.len(), 1);
+        let (at, b) = spits[0];
+        assert_eq!(at, (FIRE_PLANT_WAIT - SPIT_AT - 1) as u32, "at timer 0x28");
+        assert!(!e.looks_right && e.looks_up, "the player is up on the left");
+        // Far away (|dx| >= 0x50): flat and fast, toward the player.
+        assert_eq!((b.vx, b.vy), (-0x0E, -0x05));
+        assert_eq!(b.px(), (e.px().0 + 3, e.px().1));
+        // Hidden for 0x60 frames too.
+        let mut hidden = 0;
+        while phase(&e) != 0 {
+            e.step(&lvl, &p, f);
+            f += 1;
+        }
+        while phase(&e) == 0 {
+            e.step(&lvl, &p, f);
+            f += 1;
+            hidden += 1;
+        }
+        assert_eq!(hidden, FIRE_PLANT_WAIT as u32);
+    }
+
+    #[test]
+    fn fire_plant_spits_twice_after_world_1() {
+        let lvl = level();
+        let p = far_player();
+        let mut e = Enemy::spawn(&EnemySpawn { kind: FIRE_PIRANHA, col: 10, row: 6 }, &p);
+        e.spits_twice = true;
+        let mut spits = 0;
+        for f in 0..0x100 {
+            e.step(&lvl, &p, f);
+            spits += e.spit.is_some() as u32;
+        }
+        assert_eq!(spits, 2);
+    }
+
+    #[test]
+    fn fireballs_aim_steeply_up_close_and_hurt_on_touch() {
+        // Plant at (100, 80); player frame 32 px to the right, below it: near shot.
+        let p = Player::spawn(132 - 6 + 8, 96);
+        let (fx, fy) = p.frame();
+        let mut b = Fireball::spat(100, 80, fx, fy);
+        assert_eq!((b.vx, b.vy), (0x0B, 0x0B), "near: 11/16 px a frame each way");
+        assert_eq!(b.px(), (103, 80));
+        let camera = (0, 0);
+        for _ in 0..16 {
+            assert!(b.step(camera));
+        }
+        assert_eq!(b.px(), (103 + 11, 80 + 11), "16 frames x 11/16 px");
+        assert_eq!(b.frame(), 0);
+        b.step(camera);
+        // Touch box: (fx - x + 6) < 16 and small: y - fy in 10..26.
+        b.x = (fx + 2) * SUB;
+        b.y = (fy + 12) * SUB;
+        assert!(b.touches(&p));
+        b.y = (fy + 30) * SUB;
+        assert!(!b.touches(&p));
+        // Off screen: gone before it moves.
+        b.x = 0xF8 * SUB;
+        assert!(!b.step(camera));
     }
 
     #[test]

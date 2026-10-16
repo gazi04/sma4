@@ -332,6 +332,78 @@ pub fn extract_piranhas(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -
             .map_err(|e| ExtractError(e.to_string()))?;
         println!("  piranha {kind:#x}: {} frames", poses.len());
     }
+    extract_fire_piranha(rom, m, out_dir)?;
+    extract_fireball(rom, m, out_dir)
+}
+
+/// Venus Fire Trap 0xA4: the same draw routine, which for fire plants (0x0816E56E bit 7)
+/// v-flips the head while the player is above (0x08049FDC: player y +4 - object y < 0).
+/// Main sets +0x1A bit 6 (0x0816E62C[side]) when the player is to the right.
+const FIRE_PIRANHA: u16 = 0xA4;
+/// Scratch player y (+4, 32-bit, 8 fraction bits): above or below the plant.
+const PLAYER_Y_BYTE: u32 = PLAYER_SCRATCH + 5;
+const ABOVE: u8 = 0;
+const BELOW: u8 = 0xA0;
+
+fn extract_fire_piranha(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{FIRE_PIRANHA_LOOKS, PIRANHA_FRAMES, fire_piranha_cell, piranha_path};
+    let mut bytes = Vec::new();
+    let mut globals = Vec::new();
+    for look in 0..FIRE_PIRANHA_LOOKS as usize {
+        let (right, up) = (look & 1 != 0, look & 2 != 0);
+        for (home, chomp) in [(PIRANHA_OUT, 0), (PIRANHA_OUT, 8), (PIRANHA_LOW, 0), (PIRANHA_LOW, 8)] {
+            debug_assert_eq!(fire_piranha_cell(right, up, bytes.len() % PIRANHA_FRAMES as usize), bytes.len());
+            bytes.push([(0x09, PIRANHA_Y), (0x3A, home), (0x1C, 0x11), (0x3C, chomp), (0x1A, if right { 0x40 } else { 0 })]);
+            let y = if up { ABOVE } else { BELOW };
+            globals.push([(PLAYER_Y_BYTE - 1, 0), (PLAYER_Y_BYTE, y), (PLAYER_Y_BYTE + 1, 0), (PLAYER_Y_BYTE + 2, 0)]);
+        }
+    }
+    let poses: Vec<Pose> = bytes
+        .iter()
+        .zip(&globals)
+        .map(|(b, g)| Pose { kind: FIRE_PIRANHA, state: 2, draw: FN_DRAW_PIRANHA, bytes: b, globals: g })
+        .collect();
+    oam::render(m, rom.bytes(), &poses)?
+        .write_png(&piranha_path(out_dir, FIRE_PIRANHA))
+        .map_err(|e| ExtractError(e.to_string()))?;
+    println!("  piranha {FIRE_PIRANHA:#x}: {} frames", poses.len());
+    Ok(())
+}
+
+/// Fireball, projectile slot type 5 (draw 0x0808D5F0 on the slot: +0 x, +4 y, +8 / +0x0A
+/// y / x speed, +0x0E type, +0x13 counter). 0x08088EAC sets its OAM index to 0x46 +
+/// 0x03007848[0xCCD] + [0xCD2]; 0xCCD = 0x20 puts it at entry 102, which the renderer reads.
+const FN_DRAW_FIREBALL: u32 = 0x0808_D5F0;
+const FIREBALL_TYPE: u8 = 5;
+const FIREBALL_OAM: u8 = 0x20;
+/// 0x03003AE1 makes 0x08088EAC report "paused" and skip the draw.
+const PAUSED: u32 = 0x0300_3AE1;
+
+fn extract_fireball(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{FIREBALL_FRAMES, fireball_path};
+    let mut bytes = Vec::new();
+    for vx in [0x000Bu16, 0xFFF5] {
+        for f in 0..FIREBALL_FRAMES as u8 {
+            let [lo, hi] = vx.to_le_bytes();
+            bytes.push([
+                (0x05, oam::AT as u8),
+                (0x08, 0),
+                (0x09, 0),
+                (0x0A, lo),
+                (0x0B, hi),
+                (0x0E, FIREBALL_TYPE),
+                (0x13, f * 4),
+                (0xCCD, FIREBALL_OAM),
+                (0xCD2, 0),
+            ]);
+        }
+    }
+    // The draw also runs the player touch test (0x0808CC9C): keep the player far away.
+    let globals = [(PAUSED, 0), (PLAYER_SCRATCH + 1, 0), (PLAYER_SCRATCH + 2, 0x08)];
+    let poses: Vec<Pose> =
+        bytes.iter().map(|b| Pose { kind: 0, state: 0, draw: FN_DRAW_FIREBALL, bytes: b, globals: &globals }).collect();
+    oam::render(m, rom.bytes(), &poses)?.write_png(&fireball_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
+    println!("  fireball: {} frames", poses.len());
     Ok(())
 }
 

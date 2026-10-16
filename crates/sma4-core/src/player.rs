@@ -195,7 +195,7 @@ impl Player {
     }
 
     /// Top-left of the ROM's 16x32 player frame, in pixels.
-    fn frame(&self) -> (i32, i32) {
+    pub fn frame(&self) -> (i32, i32) {
         let (px, py) = self.px();
         (px + HITBOX_W / 2 - FRAME_W / 2, py + self.height() - FRAME_H)
     }
