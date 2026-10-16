@@ -269,6 +269,41 @@ pub fn extract_koopas(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> 
     Ok(())
 }
 
+/// Paragoomba 0x73: draw 0x08053D88 = the Goomba body (0x080484C4: frame +0x17, OBJ
+/// palette +0x21) and two wings (tile 0x108, or 0x107 while +0x3C bit 3 is set) 10 px up.
+/// Stomped, it becomes 0x72 with its palette (+0x21 = 0x0816A770[0x73] & 7) kept, drawn
+/// by 0x080484C4 alone (frame 3 = flattened, state 7).
+const PARAGOOMBA: u16 = 0x73;
+const FN_DRAW_PARAGOOMBA: u32 = 0x0805_3D88;
+const FN_DRAW_GOOMBA_BODY: u32 = 0x0804_84C4;
+
+pub fn extract_paragoomba(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{PARAGOOMBA_CELLS, paragoomba_cell, paragoomba_path};
+    let pal = rom.u8(OBJ_PALETTES + PARAGOOMBA as u32)? & 7;
+    let mut bytes = Vec::new();
+    for body in 0..2u8 {
+        for wings_up in [false, true] {
+            debug_assert_eq!(paragoomba_cell(body as usize, wings_up), bytes.len());
+            bytes.push(vec![(0x17, body), (0x3C, if wings_up { 8 } else { 0 })]);
+        }
+    }
+    for frame in [0u8, 1, 3] {
+        bytes.push(vec![(0x17, frame), (0x21, pal)]);
+    }
+    let poses: Vec<Pose> = bytes
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let (kind, draw) = if i < 4 { (PARAGOOMBA, FN_DRAW_PARAGOOMBA) } else { (WALKER as u16, FN_DRAW_GOOMBA_BODY) };
+            Pose { kind, state: 2, draw, bytes: b, globals: &[] }
+        })
+        .collect();
+    debug_assert_eq!(poses.len(), PARAGOOMBA_CELLS as usize);
+    oam::render(m, rom.bytes(), &poses)?.write_png(&paragoomba_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
+    println!("  paragoomba 0x73: {} frames", poses.len());
+    Ok(())
+}
+
 /// Piranha Plants (green 0xA0, red 0xA2; main 0x08055C88, draw 0x0805564C): a 16x16 head
 /// at y + 1 (tiles 0x0816B4A0[type], palette 0x0816A770[type]) over a 16x16 stem at y + 17
 /// (palette 2). The draw routine picks frame (+0x3C >> 3) & 1, +2 while the plant is less

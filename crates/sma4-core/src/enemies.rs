@@ -4,6 +4,9 @@
 //! * Goomba 0x72, green Koopa Troopa 0x6C and green Paratroopa 0x6E share main 0x08053704:
 //!   speed byte 0x0816E586 = +/-8 (1/16 px per frame), turn at walls, walk off ledges;
 //!   the Paratroopa hops. Red Koopa Troopa 0x6D (main 0x080538FC) turns at ledges.
+//! * Paragoomba 0x73 (main 0x08053E9C): walks like a Goomba, hops three times (speed byte
+//!   0xF0), then high (0xD0) and rests 0x50 frames on the ground; stomped, it becomes a
+//!   Goomba 0x72 that keeps its own palette.
 //! * Init 0x080533A0: faces the player (direction table 0x0816E568, side test 0x08049F48).
 //! * Contact 0x080493AC -> 0x08048F80: stomp if the player is high enough, else 0x08048E8C.
 //! * Stomp 0x08048B3C: player bounces (0x0809D7C8). Goomba -> squished (state 7, 16
@@ -29,6 +32,8 @@ pub const KOOPA: u16 = 0x6C;
 pub const RED_KOOPA: u16 = 0x6D;
 /// Green Koopa Paratroopa: hops; loses its wings when stomped.
 pub const PARATROOPA: u16 = 0x6E;
+/// Paragoomba: hops and flutters; loses its wings when stomped.
+pub const PARAGOOMBA: u16 = 0x73;
 /// Green Piranha Plant: comes 0x19 px out of its pipe.
 pub const PIRANHA: u16 = 0xA0;
 /// Red Piranha Plant: comes 0x21 px out.
@@ -37,7 +42,7 @@ pub const RED_PIRANHA: u16 = 0xA2;
 /// variants 0xA1, 0xA3-0xA7 are not ported yet).
 pub const PIRANHA_TYPES: [u16; 2] = [PIRANHA, RED_PIRANHA];
 /// Enemy types implemented so far.
-pub const SUPPORTED: [u16; 6] = [WALKER, KOOPA, RED_KOOPA, PARATROOPA, PIRANHA, RED_PIRANHA];
+pub const SUPPORTED: [u16; 7] = [WALKER, KOOPA, RED_KOOPA, PARATROOPA, PARAGOOMBA, PIRANHA, RED_PIRANHA];
 
 /// 8/16 px per frame.
 const WALK_SPEED: i32 = 8 * 16;
@@ -49,6 +54,15 @@ const MAX_FALL: i32 = 64 * 16;
 /// frame in the air it is lowered by one more (gravity 2 instead of 3).
 const HOP_SPEED: i32 = -48 * 16;
 const HOP_LIFT: i32 = 16;
+/// Paragoomba (0x08053E9C): on the ground with timer +0x23 at 0, it hops (speed byte
+/// 0xF0) and counts the hop in +0x3B; the fourth is high (0xD0), resets the count and
+/// sets the timer to 0x50. Gravity is the Paratroopa's (+3 - 1).
+const PARA_HOP: i32 = -16 * 16;
+const PARA_HIGH_HOP: i32 = -48 * 16;
+const PARA_HOPS: u8 = 4;
+const PARA_REST: u8 = 0x50;
+/// On the ground it turns toward the player when its counter +0x3A is a multiple of 0x40.
+const PARA_TURN_MASK: u32 = 0x3F;
 const SIZE: i32 = 16;
 /// Stomp check in 0x08048F80: the enemy counts as stomped when the player's 32 px frame is
 /// at least 19 px above it, i.e. the player's feet are within its top 13 px.
@@ -69,6 +83,9 @@ const SHELL_LEG_MASKS: [u8; 5] = [2, 2, 4, 8, 0x10];
 const KICK_SPEED: i32 = 48;
 /// Contact is ignored for 16 frames after a kick (+0x24).
 const KICK_GRACE: u8 = 0x10;
+/// ...and for 8 frames after a stomp (0x08048B3C sets +0x24 = 8; 0x080493AC skips the
+/// contact test while it runs), so the bounce does not stomp a Paragoomba twice.
+const STOMP_GRACE: u8 = 8;
 /// Knocked out (0x08042BA4): state 6, speed byte 0xD0 up, +/-0x10 sideways.
 const KNOCKOUT_SPEED: i32 = -48 * 16;
 const KNOCKOUT_DRIFT: i32 = 16 * 16;
@@ -149,6 +166,15 @@ pub struct Enemy {
     reach: i32,
     /// Piranha Plant: chomp counter +0x3C, +1 per frame.
     chomp: u8,
+    /// Paragoomba: hops so far (+0x3B), the rest timer (+0x23) and the wing counter
+    /// (+0x3C: +1 a frame, +3 while rising from the high hop, 0 on the ground before it).
+    hops: u8,
+    hop_timer: u8,
+    wings: u8,
+    /// Wing counter as this frame's draw saw it (0x08053D88 runs before the update).
+    wings_drawn: u8,
+    /// A Goomba that was a Paragoomba: it keeps the Paragoomba's palette (+0x21).
+    pub was_para: bool,
 }
 
 /// What touching an enemy did this frame.
@@ -199,6 +225,11 @@ impl Enemy {
             home_y: 0,
             reach: 0,
             chomp: 0,
+            hops: 0,
+            hop_timer: 0,
+            wings: 0,
+            wings_drawn: 0,
+            was_para: false,
         }
     }
 
@@ -220,6 +251,11 @@ impl Enemy {
             home_y: y,
             reach: if kind == RED_PIRANHA { RED_PLANT_REACH } else { PLANT_REACH },
             chomp: 0,
+            hops: 0,
+            hop_timer: 0,
+            wings: 0,
+            wings_drawn: 0,
+            was_para: false,
         }
     }
 
@@ -254,6 +290,7 @@ impl Enemy {
                 return t > 1;
             }
             EnemyState::Walking if self.kind == RED_KOOPA => self.walk_red(level),
+            EnemyState::Walking if self.kind == PARAGOOMBA => self.step_paragoomba(level, player),
             EnemyState::Walking => {
                 if self.move_x(level) {
                     self.vx = -self.vx;
@@ -319,6 +356,44 @@ impl Enemy {
         };
         // 0x08055C3C: the chomp counter runs every frame.
         self.chomp = self.chomp.wrapping_add(1);
+    }
+
+    /// Paragoomba main 0x08053E9C. `self.age` is its counter +0x3A after this frame's +1.
+    fn step_paragoomba(&mut self, level: &Level, player: &Player) {
+        // The object loop counts the timer down; the draw comes before the counters move.
+        self.hop_timer = self.hop_timer.saturating_sub(1);
+        self.wings_drawn = self.wings;
+        // 0x08049EC0 gravity, then one less (+0x12 - 1).
+        self.vy = (self.vy + GRAVITY).min(MAX_FALL) - HOP_LIFT;
+        let wall = self.move_x(level);
+        let landed = self.drop(level);
+        // Wings beat faster while it rises from the high hop.
+        if self.hops == 0 && self.vy < 0 {
+            self.wings = self.wings.wrapping_add(2);
+        }
+        self.wings = self.wings.wrapping_add(1);
+        if landed {
+            if self.age & PARA_TURN_MASK == 0 {
+                self.vx = toward(player, self.px().0) * WALK_SPEED;
+            }
+            if self.hops == 0 {
+                self.wings = 0;
+            }
+            if self.hop_timer == 0 {
+                self.hops += 1;
+                if self.hops == PARA_HOPS {
+                    self.hops = 0;
+                    self.hop_timer = PARA_REST;
+                    self.vy = PARA_HIGH_HOP;
+                } else {
+                    self.vy = PARA_HOP;
+                }
+            }
+        }
+        // 0x0804A01C: walls turn it around.
+        if wall {
+            self.vx = -self.vx;
+        }
     }
 
     /// Course clear (0x0806833C): a live enemy turns into a puff of smoke (its coin is
@@ -404,8 +479,13 @@ impl Enemy {
 
     /// Gravity and landing; returns true if standing on ground after the move.
     fn fall(&mut self, level: &Level) -> bool {
-        let old_bottom = self.px().1 + SIZE;
         self.vy = (self.vy + GRAVITY).min(MAX_FALL);
+        self.drop(level)
+    }
+
+    /// Moves by `vy` and lands on the ground below.
+    fn drop(&mut self, level: &Level) -> bool {
+        let old_bottom = self.px().1 + SIZE;
         self.y += self.vy;
         let (px, py) = self.px();
         let ty = (py + SIZE).div_euclid(TILE_PX);
@@ -450,6 +530,7 @@ impl Enemy {
             // +0x64 bit 0x1000: 0x08048F80 sends even a landing to 0x08048D88, which hurts.
             EnemyState::Plant { .. } => Contact::HurtPlayer,
             EnemyState::Walking if stomp => {
+                self.grace = STOMP_GRACE;
                 match self.kind {
                     WALKER => {
                         self.state = EnemyState::Squished(SQUISH_FRAMES);
@@ -458,6 +539,12 @@ impl Enemy {
                     PARATROOPA => {
                         self.kind = KOOPA;
                         self.vy = 0;
+                    }
+                    // 0x08048B3C: 0x0816966C[0x73] = 0x72, speed byte 0; the palette stays.
+                    PARAGOOMBA => {
+                        self.kind = WALKER;
+                        self.vy = 0;
+                        self.was_para = true;
                     }
                     _ => self.state = EnemyState::Shell(SHELL_TIMER),
                 }
@@ -547,6 +634,11 @@ impl Enemy {
             (EnemyState::Puff(t), _) => (PUFF_FRAMES as usize - 1).saturating_sub((t >> 3) as usize),
             (EnemyState::Squished(_), _) => WALKER_SQUISHED,
             (EnemyState::Walking, PARATROOPA) => ((self.age >> 2) & 3) as usize,
+            // 0x08053E9C: body frame (frame counter >> 3) & 1; 0x08053D88 wings 0x107 while
+            // +0x3C bit 3 is set, else 0x108.
+            (EnemyState::Walking, PARAGOOMBA) => {
+                sma4_assets::paragoomba_cell(((frame >> 3) & 1) as usize, self.wings_drawn & 8 != 0)
+            }
             (EnemyState::Walking, _) => (self.age / 8 % 2) as usize,
             (EnemyState::Shell(t), _) => {
                 let legs = t < SHELL_LEGS_BELOW && t & SHELL_LEG_MASKS[(t >> 4) as usize] != 0;
@@ -818,6 +910,59 @@ mod tests {
             f += 1;
         }
         assert_eq!(f - hidden, PLANT_WAIT as u32);
+    }
+
+    #[test]
+    fn paragoomba_hops_three_times_low_then_high_then_rests() {
+        let lvl = level();
+        let p = far_player();
+        let mut e = Enemy::spawn(&enemy(PARAGOOMBA, 8), &p);
+        let ground = 6 * TILE_PX;
+        // Record the take-off speeds and the frames spent on the ground in between.
+        let mut hops = Vec::new();
+        let mut grounded = 0;
+        let mut rests = Vec::new();
+        for f in 0..600 {
+            let was = e.vy;
+            e.step(&lvl, &p, f);
+            if e.vy < 0 && was >= 0 {
+                hops.push(e.vy);
+                rests.push(grounded);
+                grounded = 0;
+            } else if e.px().1 == ground && e.vy == 0 {
+                grounded += 1;
+            }
+        }
+        assert_eq!(&hops[..5], [PARA_HOP, PARA_HOP, PARA_HOP, PARA_HIGH_HOP, PARA_HOP]);
+        // After the high hop it waits out the 0x50 timer (minus its air time) on the ground.
+        assert!(rests[4] > 20, "rests after the high hop: {rests:?}");
+        assert!(rests[1..4].iter().all(|&r| r == 0), "low hops chain straight away: {rests:?}");
+    }
+
+    #[test]
+    fn paragoomba_wings_beat_and_a_stomp_leaves_a_goomba() {
+        let lvl = level();
+        let p = far_player();
+        let mut e = Enemy::spawn(&enemy(PARAGOOMBA, 8), &p);
+        let mut ups = 0;
+        for f in 0..200 {
+            e.step(&lvl, &p, f);
+            ups += (e.sprite_cell(f) & 1) as u32;
+        }
+        assert!(ups > 0, "the wings flap");
+        // Stomp from above.
+        let (x, y) = e.px();
+        let mut player = Player::spawn(x + 2, y - 12);
+        player.vy = 2 * SUB;
+        assert_eq!(e.contact(&player), Contact::Stomped);
+        assert_eq!((e.kind, e.state, e.was_para), (WALKER, EnemyState::Walking, true));
+        assert_eq!(e.contact(&player), Contact::None, "not twice in one bounce (+0x24 = 8)");
+        run(&mut e, &lvl, &p, STOMP_GRACE as u32);
+        let (x, y) = e.px();
+        let mut player = Player::spawn(x + 2, y - 12);
+        player.vy = 2 * SUB;
+        assert_eq!(e.contact(&player), Contact::Stomped, "a second stomp flattens the Goomba");
+        assert!(matches!(e.state, EnemyState::Squished(_)));
     }
 
     #[test]

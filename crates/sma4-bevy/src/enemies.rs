@@ -1,12 +1,15 @@
 //! Enemy sprites, extracted from the user's own ROM by `sma4-extract`: the Goomba
-//! (`objects/walker.png`), the Koopa Troopas (`objects/koopa_*.png`), the Piranha Plants
+//! (`objects/walker.png`), the Paragoomba (`objects/paragoomba.png`), the Koopa Troopas (`objects/koopa_*.png`), the Piranha Plants
 //! (`objects/piranha_*.png`) and the puff of smoke (`objects/puff.png`). Behaviour and the
 //! frame to show come from `sma4-core`.
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use sma4_assets::{KOOPA_CELL_H, KOOPA_CELL_W, KOOPA_ORIGIN, PIRANHA_ORIGIN, koopa_path, piranha_path, puff_path, walker_path};
+use sma4_assets::{
+    KOOPA_CELL_H, KOOPA_CELL_W, KOOPA_ORIGIN, PARAGOOMBA_GOOMBA, PARAGOOMBA_SQUISHED, PIRANHA_ORIGIN, WALKER_SQUISHED,
+    koopa_path, paragoomba_path, piranha_path, puff_path, walker_path,
+};
 use sma4_core::{EnemyState, enemies};
 
 use crate::GameRes;
@@ -35,6 +38,7 @@ fn load_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMu
     for kind in [enemies::KOOPA, enemies::RED_KOOPA, enemies::PARATROOPA] {
         art.insert(kind, load_cells(&koopa_path(&dir.0, kind), KOOPA_CELL_W, KOOPA_CELL_H, &mut images));
     }
+    art.insert(enemies::PARAGOOMBA, load_cells(&paragoomba_path(&dir.0), KOOPA_CELL_W, KOOPA_CELL_H, &mut images));
     for kind in [enemies::PIRANHA, enemies::RED_PIRANHA] {
         art.insert(kind, load_cells(&piranha_path(&dir.0, kind), KOOPA_CELL_W, KOOPA_CELL_H, &mut images));
     }
@@ -64,7 +68,15 @@ fn sync_enemies(mut commands: Commands, game: Res<GameRes>, art: Res<Art>, old: 
             }
             continue;
         }
-        let Some(image) = art.0.get(&e.kind).and_then(|cells| cells.get(e.sprite_cell(game.0.frame))) else {
+        // A stomped Paragoomba is a Goomba in the Paragoomba's palette: its sheet's last cells.
+        let (kind, cell) = if e.was_para {
+            let cell = e.sprite_cell(game.0.frame);
+            let cell = if cell == WALKER_SQUISHED { PARAGOOMBA_SQUISHED } else { PARAGOOMBA_GOOMBA + cell };
+            (enemies::PARAGOOMBA, cell)
+        } else {
+            (e.kind, e.sprite_cell(game.0.frame))
+        };
+        let Some(image) = art.0.get(&kind).and_then(|cells| cells.get(cell)) else {
             continue;
         };
         let dead = e.state == EnemyState::Dead || e.flipped;
@@ -72,11 +84,11 @@ fn sync_enemies(mut commands: Commands, game: Res<GameRes>, art: Res<Art>, old: 
         sprite.flip_y = dead;
         // Cell centre in level pixels. Koopa cells put the 16x16 box at KOOPA_ORIGIN; flipped
         // upside down, the shell must stay over the box, so the centre moves down 16 px.
-        let (cx, cy) = if e.kind == enemies::WALKER {
+        let (cx, cy) = if kind == enemies::WALKER {
             (x + 8, y + 8)
         } else {
             // Koopa art faces left; walking right mirrors it (0x080539E8 shifts the head).
-            sprite.flip_x = e.state == EnemyState::Walking && e.vx > 0;
+            sprite.flip_x = e.is_koopa() && e.state == EnemyState::Walking && e.vx > 0;
             let (w, h) = (KOOPA_CELL_W as i32, KOOPA_CELL_H as i32);
             (x - KOOPA_ORIGIN.0 + w / 2, y - KOOPA_ORIGIN.1 + h / 2 + if dead { 16 } else { 0 })
         };

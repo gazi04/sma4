@@ -681,6 +681,21 @@ pub const KOOPA_SHELL: usize = 2;
 pub const KOOPA_SHELL_WAKING: usize = 3;
 pub const KOOPA_SPIN: usize = 4;
 
+/// Paragoomba (type 0x73, draw 0x08053D88): `KOOPA_CELL_W` x `KOOPA_CELL_H` cells, the
+/// 16x16 box top-left at `KOOPA_ORIGIN`. Cells 0-3: `paragoomba_cell` (body walk frame x
+/// wings 0x108 / 0x107, two 8x16 OBJs 10 px up, at x - 2 and x + 10, the right one
+/// h-flipped); then the Goomba it turns into when stomped, which keeps its palette
+/// (+0x21): walk frames 0/1 (`PARAGOOMBA_GOOMBA`) and flattened (`PARAGOOMBA_SQUISHED`).
+pub fn paragoomba_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("paragoomba.png")
+}
+pub fn paragoomba_cell(body: usize, wings_up: bool) -> usize {
+    body * 2 + wings_up as usize
+}
+pub const PARAGOOMBA_GOOMBA: usize = 4;
+pub const PARAGOOMBA_SQUISHED: usize = 6;
+pub const PARAGOOMBA_CELLS: u32 = 7;
+
 /// Piranha Plant sheets (green 0xA0, red 0xA2): cells of `KOOPA_CELL_W` x `KOOPA_CELL_H`
 /// (the oam renderer's cell), the object's position at `PIRANHA_ORIGIN`. Cells: mouth open,
 /// mouth closed (the chomp), then the same two while less than 17 px out of the pipe

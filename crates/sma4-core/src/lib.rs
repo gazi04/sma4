@@ -874,6 +874,34 @@ mod tests {
     }
 
     #[test]
+    fn first_jump_on_a_paragoomba_takes_its_wings_the_second_flattens_it() {
+        let mut g = Game::new();
+        let ground = 9 * TILE_PX - 16;
+        g.enter_level(block_level((20, 2)), (8 * TILE_PX, ground - 64), &[]);
+        let x = g.player.px().0;
+        let mut e = enemies::Enemy::spawn_at(enemies::PARAGOOMBA, x, ground, &g.player);
+        e.vx = 0;
+        g.enemies = vec![e];
+        // Falls onto it: the wings come off and it lives on as a Goomba.
+        while g.player.stomp_chain == 0 {
+            g.step(Buttons::empty());
+        }
+        let e = g.enemies[0];
+        assert_eq!((e.kind, e.state, e.was_para), (enemies::WALKER, EnemyState::Walking, true));
+        // The bounce does not stomp it again (8 frames of contact grace, 0x08048B3C).
+        for _ in 0..12 {
+            g.step(Buttons::empty());
+        }
+        assert_eq!((g.player.stomp_chain, g.enemies[0].state), (1, EnemyState::Walking));
+        // Coming down on it a second time flattens it.
+        while g.player.stomp_chain == 1 {
+            g.step(Buttons::empty());
+        }
+        assert!(matches!(g.enemies[0].state, EnemyState::Squished(_)));
+        assert_eq!(g.dying, None);
+    }
+
+    #[test]
     fn running_out_of_time_kills_and_returns_to_the_map() {
         let mut g = Game::new();
         g.enter_level(block_level((20, 2)), (8 * TILE_PX, 9 * TILE_PX - 16), &[]);

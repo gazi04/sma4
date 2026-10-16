@@ -98,6 +98,7 @@ fn run(args: &Args) -> Result<(), String> {
             objects::extract_hud(&rom, &m, &args.out).map_err(|e| e.0)?;
             objects::extract_score_popups(&rom, &m, &args.out).map_err(|e| e.0)?;
             objects::extract_koopas(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+            objects::extract_paragoomba(&rom, &mut m, &args.out).map_err(|e| e.0)?;
             objects::extract_piranhas(&rom, &mut m, &args.out).map_err(|e| e.0)?;
             objects::extract_puff(&rom, &mut m, &args.out).map_err(|e| e.0)?;
             objects::extract_goal(&rom, &mut m, &args.out).map_err(|e| e.0)?;
