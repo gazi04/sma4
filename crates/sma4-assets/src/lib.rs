@@ -977,11 +977,20 @@ pub const PLAYER_WHIP: usize = 19; // 5 tail-whip steps on the ground
 pub const PLAYER_WHIP_AIR: usize = 24; // 5 in the air
 /// Death pose (0x4B, always drawn with the small form's graphics: 0x080A8FC0).
 pub const PLAYER_DEATH: usize = 29;
-pub const PLAYER_FRAMES: u32 = 30;
+/// Skidding: on the ground, holding against the motion (0x08097800: 0x0813DE41[form != 0]).
+pub const PLAYER_SKID: usize = 30;
+pub const PLAYER_FRAMES: u32 = 31;
 pub const PLAYER_W: u32 = 32;
 pub const PLAYER_H: u32 = 32;
 /// Width of the body part of a player cell.
 pub const PLAYER_BODY_W: u32 = 16;
+
+/// Skid dust (0x0808C270): 8x8 cells, OBJ tiles 0x08170A88[i] (0x21D, 0x21E, 0x23D,
+/// 0x23E), palette 0.
+pub fn skid_dust_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("skid_dust.png")
+}
+pub const SKID_DUST_FRAMES: u32 = 4;
 
 /// Super Leaf (object type 0x1E): one 16x16 image.
 pub fn leaf_path(dir: &Path) -> PathBuf {

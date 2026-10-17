@@ -29,6 +29,10 @@ const SPARKLE_TILE: u32 = 0x68;
 const SPARKLE_TILES: u32 = 5;
 const SPARKLE_PALETTE: u32 = 1;
 
+/// Skid dust (0x0808C270): one 8x8 OBJ per age step, tiles u16 0x08170A88[age >> 1],
+/// palette 0.
+const SKID_DUST_TILES: u32 = 0x0817_0A88;
+
 /// Basic walking enemy, object type 0x72. Its draw routine 0x08053664 -> 0x0804821C puts
 /// two 8x16 sprites side by side: tiles from 0x0816B4A0[type] + frame * 4 (left, right),
 /// OBJ palette 0x0816A770[type] & 7. In this level type (0x0816E598 bit 0x10, mirror mode
@@ -63,6 +67,8 @@ const RACCOON_AIR_POSES: u32 = 0x0813_DEB4;
 const WHIP_POSES: u32 = 0x0813_DE6E;
 const BIG_FALL_POSE: u8 = 0x06;
 const RACCOON: u8 = 3;
+/// Skid pose 0x0813DE41[form != 0] (0x08097800).
+const SKID_POSES: u32 = 0x0813_DE41;
 /// Death pose (0x080A8FC0 draws 0x4B with the form forced to small).
 const DEATH_POSE: u8 = 0x4B;
 /// Grow / shrink poses (0x080A8000), one per 4 frames of player +0x3B.
@@ -224,6 +230,24 @@ pub fn extract_sparkle(m: &Machine, out_dir: &std::path::Path) -> Result<(), Ext
         .write_png(&sparkle_path(out_dir))
         .map_err(|e| ExtractError(e.to_string()))?;
     println!("  sparkle: {SPARKLE_TILES} frames");
+    Ok(())
+}
+
+/// Skid dust frames side by side in 8x8 cells.
+pub fn extract_skid_dust(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{SKID_DUST_FRAMES, skid_dust_path};
+    let chars = m.read(OBJ_VRAM, 0x8000)?;
+    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?) };
+    let w = 8 * SKID_DUST_FRAMES;
+    let mut px = vec![0u8; (w * 8 * 4) as usize];
+    for i in 0..SKID_DUST_FRAMES {
+        let tile = (rom.u16(SKID_DUST_TILES + i * 2)? & 0x3FF) as u32;
+        sheet.tile(&mut px, w, tile, i * 8, 0, false, 0);
+    }
+    Rgba { width: w, height: 8, pixels: px }
+        .write_png(&skid_dust_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))?;
+    println!("  skid dust: {SKID_DUST_FRAMES} frames");
     Ok(())
 }
 
@@ -602,6 +626,7 @@ fn player_poses(rom: &Rom, form: u8) -> Result<Vec<u8>, ExtractError> {
         poses.extend([walk[2]; 10]);
     }
     poses.push(DEATH_POSE);
+    poses.push(rom.u8(SKID_POSES + (form != 0) as u32)?);
     debug_assert_eq!(poses.len(), PLAYER_FRAMES as usize);
     Ok(poses)
 }

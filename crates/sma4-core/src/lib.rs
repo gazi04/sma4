@@ -3,6 +3,7 @@
 
 pub mod blocks;
 pub mod coins;
+pub mod dust;
 pub mod enemies;
 pub mod goal;
 pub mod input;
@@ -46,6 +47,8 @@ pub struct Game {
     pub coin_pops: Vec<CoinPop>,
     /// Effects left by collected level coins.
     pub sparkles: Vec<Sparkle>,
+    /// Puffs behind a skidding player.
+    pub skid_dust: dust::SkidDust,
     /// World, lives, clock, coins, score and score popups.
     pub status: Status,
     pub enemies: Vec<Enemy>,
@@ -122,6 +125,7 @@ impl Game {
         self.items.clear();
         self.coin_pops.clear();
         self.sparkles.clear();
+        self.skid_dust = dust::SkidDust::default();
         self.goal_spawn = enemies.iter().find(|e| e.kind == goal::GOAL).map(|e| goal::spawn_px(e.col, e.row));
         self.goal = None;
         self.goal_camera = None;
@@ -198,6 +202,7 @@ impl Game {
     fn step_course_clear(&mut self, camera: (i32, i32)) {
         let stop = Goal::player_stopped(&self.player, camera);
         self.player.goal_walk(&self.level, self.frame, stop);
+        self.skid_dust.step(&self.player);
         let (level, player, frame) = (&mut self.level, &self.player, self.frame);
         self.bumps.retain_mut(|b| !b.step(level, player).1);
         let level = &*level;
@@ -377,6 +382,7 @@ impl Game {
         }
 
         let head_hit = self.player.step(held, self.input.pressed, &self.level, self.frame);
+        self.skid_dust.step(&self.player);
         if self.player.p_meter & 0x40 != 0 {
             self.p_blink = self.p_blink.wrapping_sub(1);
         }

@@ -62,9 +62,9 @@ pub struct LevelPlugin;
 
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_level, load_item_art, load_coin_frames, load_sparkle_frames))
+        app.add_systems(Startup, (spawn_level, load_item_art, load_coin_frames, load_sparkle_frames, load_skid_dust_frames))
             .add_systems(Update, (debug_popup, load_pending_level))
-            .add_systems(Update, (sync_tiles, animate_tiles, sync_bumps, sync_items, sync_coins, sync_sparkles));
+            .add_systems(Update, (sync_tiles, animate_tiles, sync_bumps, sync_items, sync_coins, sync_sparkles, sync_skid_dust));
     }
 }
 
@@ -109,6 +109,15 @@ struct SparkleFrames(Vec<Handle<Image>>);
 struct SparkleSprite;
 /// Above the player (z 10), so the sparkle is never hidden behind it.
 const Z_SPARKLE: f32 = 11.0;
+
+/// Skid dust frames, 8x8 (`objects/skid_dust.png`).
+#[derive(Resource, Default)]
+struct SkidDustFrames(Vec<Handle<Image>>);
+
+#[derive(Component)]
+struct SkidDustSprite;
+/// Just behind the player.
+const Z_SKID_DUST: f32 = 9.5;
 
 fn tile(m: u16) -> Option<TileData> {
     (m != SKY && m != BUMP_PLACEHOLDER).then(|| TileData::from_tileset_index(m))
@@ -413,6 +422,33 @@ fn sync_sparkles(
                 Transform::from_xyz((x + 4) as f32, -((y + 4) as f32), Z_SPARKLE),
             ));
         }
+    }
+}
+
+fn load_skid_dust_frames(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMut<Assets<Image>>) {
+    let frames = crate::player::load_cells(&sma4_assets::skid_dust_path(&dir.0), 8, 8, &mut images);
+    commands.insert_resource(SkidDustFrames(frames));
+}
+
+/// Puffs behind a skidding player (top-left anchored). The ROM draws the player 1 px lower
+/// than its y (0x080A6E0C) and the dust at y + 0x1A; here the player is drawn at its y, so
+/// the dust moves up with it.
+fn sync_skid_dust(
+    mut commands: Commands,
+    game: Res<GameRes>,
+    frames: Res<SkidDustFrames>,
+    old: Query<Entity, With<SkidDustSprite>>,
+) {
+    for e in &old {
+        commands.entity(e).despawn();
+    }
+    for (x, y, cell) in game.0.skid_dust.puffs() {
+        let Some(image) = frames.0.get(cell) else { continue };
+        commands.spawn((
+            SkidDustSprite,
+            Sprite::from_image(image.clone()),
+            Transform::from_xyz((x + 4) as f32, -((y - 1 + 4) as f32), Z_SKID_DUST),
+        ));
     }
 }
 

@@ -140,6 +140,8 @@ pub enum Pose {
     WhipAir(u8),
     /// Grow / shrink step 0-11: a cell of `sma4_assets::player_grow_path`.
     Morph(u8),
+    /// Skidding: holding against the motion on the ground (0x08097800).
+    Skid,
     /// Transformation smoke, tile 0x0817388C[i] (0x83, 0x82, 0x81, 0x80); the player is
     /// not drawn.
     Puff(u8),
@@ -159,6 +161,7 @@ impl Pose {
             Pose::Glide(s) => a::PLAYER_GLIDE + s as usize,
             Pose::Whip(s) => a::PLAYER_WHIP + s as usize,
             Pose::WhipAir(s) => a::PLAYER_WHIP_AIR + s as usize,
+            Pose::Skid => a::PLAYER_SKID,
             // Drawn from their own sheets; the standing cell as a fallback.
             Pose::Morph(_) | Pose::Puff(_) => a::PLAYER_WALK + STAND_STEP as usize,
         }
@@ -204,6 +207,8 @@ pub struct Player {
     pub puff: u8,
     /// Standing on a slope that pushes against the motion (0x03003CE4).
     uphill: bool,
+    /// Skidding this frame: the skid pose, and the skid dust follows (0x08097800).
+    pub skidding: bool,
 }
 
 impl Player {
@@ -289,6 +294,7 @@ impl Player {
     pub fn step(&mut self, held: Buttons, pressed: Buttons, map: &Level, frame: u32) -> Option<(i32, i32)> {
         // 0x080A8000: the puff (+0x3E) and the grow / shrink steps (+0x3B) replace the
         // player's update while they run.
+        self.skidding = false;
         if self.puff != 0 {
             self.puff -= 1;
             return None;
@@ -313,6 +319,7 @@ impl Player {
         let head_hit = self.move_y(map);
         if self.on_ground {
             self.animate_walk(held);
+            self.skidding = self.skids(held);
         }
         head_hit
     }
@@ -499,6 +506,9 @@ impl Player {
             return if self.on_ground { Pose::Whip(step) } else { Pose::WhipAir(step) };
         }
         if self.on_ground {
+            if self.skidding {
+                return Pose::Skid;
+            }
             let speed = (self.vx / UNIT).abs();
             return if speed >= P_MAX - 1 { Pose::Run(self.walk_step) } else { Pose::Walk(self.walk_step) };
         }
@@ -522,6 +532,7 @@ impl Player {
     /// the speed and the player just falls. `stop` freezes it (+0x40 = 0xFF once it is 0x120
     /// px into the screen).
     pub fn goal_walk(&mut self, map: &Level, frame: u32, stop: bool) {
+        self.skidding = false;
         self.whip = 0;
         self.flight = 0;
         self.flutter = 0;
@@ -545,6 +556,14 @@ impl Player {
             self.move_x(map);
         }
         self.move_y(map);
+    }
+
+    /// 0x08097800: on the ground, moving (speed byte not -1..1) and holding the other way
+    /// (+0x63 = the direction of the motion, compared shifted into the pad's left / right
+    /// bits).
+    fn skids(&self, held: Buttons) -> bool {
+        let speed = self.vx / UNIT;
+        speed.abs() > 1 && held.contains(if speed > 0 { Buttons::LEFT } else { Buttons::RIGHT })
     }
 
     /// 0x08097800: advance the walk cycle at a speed-dependent rate; standing still with
@@ -1016,5 +1035,28 @@ mod tests {
         s.run(Buttons::empty(), 80);
         assert!(s.p.on_ground);
         assert_eq!(s.p.px().1 + s.p.height(), 5 * TILE_PX + 15 - cx % TILE_PX, "back on the slope");
+    }
+
+    #[test]
+    fn turning_around_at_speed_skids_until_the_motion_reverses() {
+        let mut s = Sim::new(floor(), 16);
+        s.run(Buttons::RIGHT | Buttons::B, 40);
+        assert!(!s.p.skidding);
+        let v0 = s.p.vx / UNIT;
+        let mut skid = 0;
+        for _ in 0..40 {
+            s.run(Buttons::LEFT, 1);
+            if s.p.skidding {
+                skid += 1;
+                assert_eq!(s.p.pose(), Pose::Skid);
+                assert!(s.p.vx > 0 && s.p.facing_left, "slides on, facing the new way");
+            }
+        }
+        // Down to 1 at the skid deceleration (0x200 / 256 = 2 per frame).
+        assert_eq!(skid, (v0 - 2) / 2, "skid frames from speed {v0:#x}");
+        assert!(!s.p.skidding && s.p.vx < 0);
+        // Letting go is no skid, nor is a jump.
+        s.run(Buttons::empty(), 1);
+        assert!(!s.p.skidding);
     }
 }
