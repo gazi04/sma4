@@ -64,7 +64,8 @@ impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, (spawn_level, load_item_art, load_coin_frames, load_sparkle_frames, load_skid_dust_frames))
             .add_systems(Update, (debug_popup, load_pending_level))
-            .add_systems(Update, (sync_tiles, animate_tiles, sync_bumps, sync_items, sync_coins, sync_sparkles, sync_skid_dust));
+            .add_systems(Update, (sync_tiles, animate_tiles, sync_bumps, sync_items, sync_coins, sync_sparkles, sync_skid_dust))
+            .add_systems(Update, sync_background.after(crate::player::CameraMoved));
     }
 }
 
@@ -119,6 +120,18 @@ struct SkidDustSprite;
 /// Just behind the player.
 const Z_SKID_DUST: f32 = 9.5;
 
+/// The level's background scene (BG2), when it has one.
+#[derive(Resource, Default)]
+struct BackgroundArt {
+    image: Option<Handle<Image>>,
+    follow_y: bool,
+}
+
+#[derive(Component)]
+struct BackgroundSprite;
+/// Behind the level and the items coming out of blocks.
+const Z_BACKGROUND: f32 = -10.0;
+
 fn tile(m: u16) -> Option<TileData> {
     (m != SKY && m != BUMP_PLACEHOLDER).then(|| TileData::from_tileset_index(m))
 }
@@ -144,6 +157,20 @@ fn spawn_tilemaps(commands: &mut Commands, images: &mut Assets<Image>, level: &L
         })
         .collect();
     info!("level {:#x}: {}x{} metatiles", level.level_id, level.width, level.height);
+
+    let background = level.background.as_ref().map(|b| {
+        images.add(Image::new(
+            Extent3d { width: b.image.width, height: b.image.height, depth_or_array_layers: 1 },
+            TextureDimension::D2,
+            b.image.pixels.clone(),
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        ))
+    });
+    commands.insert_resource(BackgroundArt {
+        image: background,
+        follow_y: level.background.as_ref().is_some_and(|b| b.follow_y),
+    });
 
     let size = UVec2::new(level.width as u32, level.height as u32);
     let tiles = level.metatiles.iter().map(|&m| tile(m)).collect();
@@ -452,6 +479,54 @@ fn sync_skid_dust(
     }
 }
 
+/// BG2 scroll from the camera (the player loop 0x0809869C, written by VBlank 0x0800092C):
+/// x = camera x / 2; y = camera y * 3/4 + 8, or the camera y when the scene follows it.
+fn background_scroll(camera: (i32, i32), follow_y: bool) -> (i32, i32) {
+    let (x, y) = camera;
+    (x >> 1, if follow_y { y } else { y - (y >> 2) + 8 })
+}
+
+/// The background, repeated every 512 px (the BG wraps) to cover the view.
+fn sync_background(
+    mut commands: Commands,
+    game: Res<GameRes>,
+    art: Option<Res<BackgroundArt>>,
+    cam: Single<(&Transform, &Projection), With<Camera2d>>,
+    old: Query<Entity, With<BackgroundSprite>>,
+) {
+    for e in &old {
+        commands.entity(e).despawn();
+    }
+    let Some(image) = art.as_ref().and_then(|a| a.image.clone()) else { return };
+    if game.0.screen != sma4_core::Screen::Level {
+        return;
+    }
+    let (transform, projection) = *cam;
+    let view = match projection {
+        Projection::Orthographic(o) => o.area.size(),
+        _ => Vec2::new(sma4_core::SCREEN_W as f32, sma4_core::SCREEN_H as f32),
+    };
+    // Top-left of the view in level pixels.
+    let left = (transform.translation.x - view.x / 2.0).round() as i32;
+    let top = (-transform.translation.y - view.y / 2.0).round() as i32;
+    let (hofs, vofs) = background_scroll((left, top), art.as_ref().is_some_and(|a| a.follow_y));
+    let size = sma4_assets::BACKGROUND_PX as i32;
+    // The background pixel at the view's top-left is (hofs, vofs), modulo the BG size.
+    let x0 = left - hofs.rem_euclid(size);
+    let y0 = top - vofs.rem_euclid(size);
+    let (nx, ny) = ((view.x as i32) / size + 2, (view.y as i32) / size + 2);
+    for i in 0..nx {
+        for j in 0..ny {
+            let (x, y) = (x0 + i * size, y0 + j * size);
+            commands.spawn((
+                BackgroundSprite,
+                Sprite::from_image(image.clone()),
+                Transform::from_xyz((x + size / 2) as f32, -((y + size / 2) as f32), Z_BACKGROUND),
+            ));
+        }
+    }
+}
+
 /// The growth item (mushroom), extracted from the ROM (`objects/growth_item.png`).
 fn load_item_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMut<Assets<Image>>) {
     let mut load = |path: std::path::PathBuf| crate::player::load_cells(&path, 16, 16, &mut images).into_iter().next();
@@ -476,4 +551,15 @@ fn spawn_point(map: &Level, tx: i32) -> (i32, i32) {
         .find(|&ty| map.at(tx, ty) != TileKind::Empty && map.at(tx, ty - 1) == TileKind::Empty)
         .unwrap_or(0);
     (tx * TILE_PX + 2, ty * TILE_PX - 16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::background_scroll;
+
+    #[test]
+    fn background_scrolls_at_half_speed_across_and_three_quarters_down() {
+        assert_eq!(background_scroll((0x200, 0x110), false), (0x100, 0x110 - 0x44 + 8));
+        assert_eq!(background_scroll((0x201, 0x110), true), (0x100, 0x110));
+    }
 }

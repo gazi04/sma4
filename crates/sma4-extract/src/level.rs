@@ -3,7 +3,7 @@
 //! Addresses are for the European ROM (AX4P rev 0).
 
 use sma4_assets::{
-    ANIM_FRAMES, BlockRules, EnemySpawn, Junction, LevelAsset, METATILE, METATILES, PipeExit, Rgba, SLOPE_SHAPES, Slopes,
+    ANIM_FRAMES, BACKGROUND_PX, Background, BlockRules, EnemySpawn, Junction, LevelAsset, METATILE, METATILES, PipeExit, Rgba, SLOPE_SHAPES, Slopes,
     Solidity,
 };
 use sma4_rom::{
@@ -30,6 +30,11 @@ const V_LEVEL_STATE: u32 = 0x0300_7818;
 const V_GFX_SET: u32 = 0x0300_37DF;
 const V_BG_SCENE: u32 = 0x0300_3BBF;
 const V_LEVEL_ID: u32 = 0x0300_3B0A;
+const V_PAL_VARIANT: u32 = 0x0300_3869;
+const V_SKY_COLOUR: u32 = 0x0300_386A;
+const V_EXTRA_PALETTE: u32 = 0x0300_3B99;
+const V_SCENE_MODE: u32 = 0x0300_3B9A;
+const V_SCENE_PALETTE: u32 = 0x0300_3BA4;
 /// BGxCNT shadows: each layer gets its own char/screen base so the loaders don't
 /// overwrite each other. Level layer (BG1) uses char block 0.
 const BG_CNT_SHADOWS: [(u32, u16); 4] =
@@ -167,6 +172,14 @@ pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_lis
     m.w8(V_TILESET, tileset)?;
     m.w8(V_GFX_SET, gfx_set)?;
     m.w8(V_BG_SCENE, hdr[10])?;
+    // Header fields the palette loader reads (0x08014F20): byte 5 bits 1-0 / 4-2, byte 9
+    // high / low nibble, and the scene's palette (0x08025460: 0x08139A2C[scene][0], used by
+    // 0x08007D2C for BG palettes 1-2).
+    m.w8(V_PAL_VARIANT, hdr[5] & 3)?;
+    m.w8(V_SKY_COLOUR, (hdr[5] & 0x1C) >> 2)?;
+    m.w8(V_EXTRA_PALETTE, hdr[9] >> 4)?;
+    m.w8(V_SCENE_MODE, hdr[9] & 0xF)?;
+    m.w8(V_SCENE_PALETTE, rom.u8(rom.ptr(SCENE_DATA + hdr[10] as u32 * 4)?)?)?;
     for (addr, v) in BG_CNT_SHADOWS {
         m.w16(addr, v)?;
     }
@@ -174,6 +187,7 @@ pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_lis
     m.call(FN_LOAD_BG_GFX, &[])?;
     m.call(FN_LOAD_PALETTES, &[])?;
 
+    let background = background(rom, m, hdr[10])?;
     let pages = m.read(PAGE_BUFFERS, 0x4000)?;
     let high = m.read(HIGH_LAYER, 0x4000)?;
     let palette = parse_palette(&m.read(PAL_BUFFER, 0x200)?);
@@ -247,6 +261,7 @@ pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_lis
         junction: junction(rom, &hdr, &pointers)?,
         camera_x: (data == BONUS_ROOM_1_1).then_some(BONUS_ROOM_CAMERA),
         slopes: slopes(rom, tileset, solidity.top)?,
+        background,
         atlas: Rgba { width: METATILE, height: METATILE * METATILES * ANIM_FRAMES, pixels: atlas },
     })
 }
@@ -338,4 +353,56 @@ fn slopes(rom: &Rom, tileset: u8, top: [u8; 4]) -> Result<Option<Slopes>> {
         s.push[k] = rom.u8(SLOPE_PUSH + k as u32)? as i8;
     }
     Ok(Some(s))
+}
+
+/// Background scenes (0x08025460): data 0x08139A2C[scene] (byte 1 -> 0x03003BBD), loader
+/// 0x08139C90[scene], which unpacks the 64x64 BG2 map into 0x0201C000 (scene 5: LZ77
+/// 0x08221738, scene 10: 0x0822246C). Its tiles come with the graphics set, in BG char
+/// block 0.
+const SCENE_DATA: u32 = 0x0813_9A2C;
+const SCENE_LOADERS: u32 = 0x0813_9C90;
+const SCENE_MAP: u32 = 0x0201_C000;
+const V_SCENE_FOLLOW_Y: u32 = 0x0300_3BBD;
+/// Vertical offset of the scene (0x0801A3E8, an object of the level): the map is copied
+/// that many rows lower (0x08025460).
+const V_SCENE_DY: u32 = 0x0300_3DC6;
+
+fn background(rom: &Rom, m: &mut Machine, scene: u8) -> Result<Option<Background>> {
+    let data = rom.ptr(SCENE_DATA + scene as u32 * 4)?;
+    m.w8(V_SCENE_FOLLOW_Y, rom.u8(data + 1)?)?;
+    m.call(rom.u32(SCENE_LOADERS + scene as u32 * 4)?, &[])?;
+    let dy = m.read(V_SCENE_DY, 2)?;
+    if dy != [0, 0] {
+        // TODO(re): the shifted copy of 0x08025460 (not needed in World 1).
+        println!("  background scene {scene}: offset {dy:02x?} not ported, left out");
+        return Ok(None);
+    }
+    let follow_y = m.read(V_SCENE_FOLLOW_Y, 1)?[0] != 0;
+    let map = m.read(SCENE_MAP, 0x2000)?;
+    let chars = m.read(0x0600_0000, 0x8000)?;
+    let palette = parse_palette(&m.read(PAL_BUFFER, 0x200)?);
+    // 512x512 text BG: four 32x32 screen blocks, top-left, top-right, bottom-left,
+    // bottom-right.
+    let w = BACKGROUND_PX as usize;
+    let mut px = vec![0u8; w * w * 4];
+    for (i, e) in map.chunks_exact(2).enumerate() {
+        let e = sma4_rom::gfx::MapEntry::from(u16::from_le_bytes([e[0], e[1]]));
+        let (block, cell) = (i / 0x400, i % 0x400);
+        let tx = (block % 2) * 32 + cell % 32;
+        let ty = (block / 2) * 32 + cell / 32;
+        let tile = &chars[(e.tile as usize * 32).min(chars.len() - 32)..][..32];
+        for y in 0..8 {
+            for x in 0..8 {
+                let sx = if e.hflip { 7 - x } else { x };
+                let sy = if e.vflip { 7 - y } else { y };
+                let b = tile[sy * 4 + sx / 2];
+                let ci = if sx & 1 == 1 { b >> 4 } else { b & 0xF };
+                if ci != 0 {
+                    let o = ((ty * 8 + y) * w + tx * 8 + x) * 4;
+                    px[o..o + 4].copy_from_slice(&palette[e.palette as usize * 16 + ci as usize].to_rgba(255));
+                }
+            }
+        }
+    }
+    Ok(Some(Background { scene, follow_y, image: Rgba { width: BACKGROUND_PX, height: BACKGROUND_PX, pixels: px } }))
 }

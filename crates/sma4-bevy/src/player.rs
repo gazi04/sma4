@@ -16,7 +16,7 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_player)
-            .add_systems(Update, (debug_hurt, sync_sprite, follow_camera).chain());
+            .add_systems(Update, (debug_hurt, sync_sprite, follow_camera.in_set(CameraMoved)).chain());
     }
 }
 
@@ -33,6 +33,10 @@ pub fn sprite_image(cell: Rgba) -> Image {
 }
 
 /// Loads a sheet of `w` x `h` cells; empty (with a warning) if it is missing.
+/// The camera has followed the player this frame.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CameraMoved;
+
 pub fn load_cells(path: &std::path::Path, w: u32, h: u32, images: &mut Assets<Image>) -> Vec<Handle<Image>> {
     match Rgba::read_png(path) {
         Ok(sheet) => sheet.cells(w, h).into_iter().map(|c| images.add(sprite_image(c))).collect(),

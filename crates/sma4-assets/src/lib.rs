@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub const METATILE: u32 = 16;
 pub const DEFAULT_DIR: &str = "assets/extracted";
 
-const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV11";
+const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV12";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssetError {
@@ -206,6 +206,20 @@ impl Slopes {
     }
 }
 
+/// Size of a level background (BG2, 64x64 tiles: 0xDC02 in the level's BG CNT setup).
+pub const BACKGROUND_PX: u32 = 512;
+
+/// The level's background scene (header byte 10, loader 0x08025460): a 512x512 image drawn
+/// on BG2 behind the level, colour 0 transparent (the backdrop shows through).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Background {
+    pub scene: u8,
+    /// The scene's flag 0x08139A2C[scene][1] (0x03003BBD): the background scrolls with the
+    /// camera vertically instead of at 3/4 speed.
+    pub follow_y: bool,
+    pub image: Rgba,
+}
+
 /// Block-hit rules of a tileset, read from the ROM by the extractor (see docs/re-notes.md,
 /// "Blocks and items"). The game logic that uses them lives in `sma4-core`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,12 +363,17 @@ pub struct LevelAsset {
     pub camera_x: Option<(u16, u16)>,
     /// Slope collision, for tilesets with slopes.
     pub slopes: Option<Slopes>,
+    pub background: Option<Background>,
     /// All `METATILES` metatiles of the tileset rendered at 16x16, stacked vertically, once
     /// per animation frame: metatile `m` of frame `f` is rows `16*(f*METATILES+m)` + 0..16.
     pub atlas: Rgba,
 }
 
 impl LevelAsset {
+    pub fn background_path(dir: &Path, level_id: u16) -> PathBuf {
+        dir.join("levels").join(format!("level_{level_id:03x}_bg.png"))
+    }
+
     pub fn paths(dir: &Path, level_id: u16) -> (PathBuf, PathBuf) {
         let stem = dir.join("levels").join(format!("level_{level_id:03x}"));
         (stem.with_extension("bin"), stem.with_extension("png"))
@@ -424,6 +443,13 @@ impl LevelAsset {
                 s.write(&mut out);
             }
         }
+        match &self.background {
+            None => out.push(0),
+            Some(b) => {
+                out.extend_from_slice(&[1, b.scene, b.follow_y as u8]);
+                b.image.write_png(&Self::background_path(dir, self.level_id))?;
+            }
+        }
         write(&bin, &out)?;
         self.atlas.write_png(&png)
     }
@@ -462,7 +488,13 @@ impl LevelAsset {
                 row: e[4],
             })
             .collect();
-        let (junction, camera_x, slopes) = read_area(&list[high_at + HIGH_IDS..]).ok_or_else(bad)?;
+        let (junction, camera_x, slopes, scene) = read_area(&list[high_at + HIGH_IDS..]).ok_or_else(bad)?;
+        let background = match scene {
+            None => None,
+            Some((scene, follow_y)) => {
+                Some(Background { scene, follow_y, image: Rgba::read_png(&Self::background_path(dir, level_id))? })
+            }
+        };
         let atlas = Rgba::read_png(&png)?;
         if atlas.width != METATILE || atlas.height != METATILE * METATILES * ANIM_FRAMES {
             return Err(AssetError::Png { path: png, msg: "atlas must be 16 x 32768 (re-run sma4-extract)".into() });
@@ -486,6 +518,7 @@ impl LevelAsset {
             junction,
             camera_x,
             slopes,
+            background,
             atlas,
         })
     }
@@ -493,8 +526,9 @@ impl LevelAsset {
 
 const EXIT_BYTES: usize = 8;
 
-/// The level file's tail: the junction, the camera limits and the slopes.
-type Area = (Option<Junction>, Option<(u16, u16)>, Option<Slopes>);
+/// The level file's tail: the junction, the camera limits, the slopes and the background
+/// scene (id, follows y).
+type Area = (Option<Junction>, Option<(u16, u16)>, Option<Slopes>, Option<(u8, bool)>);
 
 fn read_area(d: &[u8]) -> Option<Area> {
     let u16_at = |o: usize| Some(u16::from_le_bytes([*d.get(o)?, *d.get(o + 1)?]));
@@ -528,7 +562,12 @@ fn read_area(d: &[u8]) -> Option<Area> {
         0 => None,
         _ => Some(Slopes::read(d.get(p + 1..)?)?),
     };
-    Some((junction, camera_x, slopes))
+    p += if slopes.is_some() { 1 + Slopes::BYTES } else { 1 };
+    let scene = match *d.get(p)? {
+        0 => None,
+        _ => Some((*d.get(p + 1)?, *d.get(p + 2)? != 0)),
+    };
+    Some((junction, camera_x, slopes, scene))
 }
 
 /// Status bar (BG0 in levels): the template map the level loader 0x08016434 decompresses
@@ -1065,6 +1104,11 @@ mod tests {
                 no_floor: std::array::from_fn(|i| i % 3 == 0),
                 push: std::array::from_fn(|i| i as i8 - 3),
             }),
+            background: Some(Background {
+                scene: 5,
+                follow_y: true,
+                image: Rgba { width: 2, height: 1, pixels: vec![1, 2, 3, 255, 0, 0, 0, 0] },
+            }),
             atlas: Rgba {
                 width: METATILE,
                 height: METATILE * METATILES * ANIM_FRAMES,
@@ -1075,7 +1119,7 @@ mod tests {
         assert_eq!(LevelAsset::read(&dir, 0x22).unwrap(), lvl);
         assert_eq!(lvl.kind(1, 0), TileKind::Solid);
         assert_eq!(lvl.kind(0, 1), TileKind::Empty);
-        let plain = LevelAsset { junction: None, camera_x: None, slopes: None, ..lvl };
+        let plain = LevelAsset { junction: None, camera_x: None, slopes: None, background: None, ..lvl };
         plain.write(&dir).unwrap();
         assert_eq!(LevelAsset::read(&dir, 0x22).unwrap(), plain);
         std::fs::remove_dir_all(dir).ok();
