@@ -31,6 +31,8 @@ const USAGE: &str = "usage: sma4 [--assets <dir>] [--level <hex id>] [--viewer]
   --level   level to play, hex id (default 22 = World 1-1)
   --viewer  browse the extracted graphics sheets instead of playing
   --spawn-col <n>  debug: start the player at metatile column n
+  --spawn-row <n>  debug: with --spawn-col, stand on metatile row n (not the lowest surface),
+                   centred on the column's right edge (the middle of a pipe starting there)
   --place <hex type>@<col>  debug: add an enemy standing on the ground at a column
             (a Piranha Plant goes in the pipe there: column = the pipe's left column)
   --hit <col>,<row>  debug: hit the block at a cell from below when the level starts
@@ -60,6 +62,7 @@ struct Args {
     script: Option<String>,
     screenshot: String,
     spawn_col: Option<i32>,
+    spawn_row: Option<i32>,
     place: Vec<(u16, u16)>,
     hit: Option<(i32, i32)>,
     form: u8,
@@ -78,6 +81,7 @@ fn parse_args() -> Option<Args> {
         script: None,
         screenshot: "screenshot.png".into(),
         spawn_col: None,
+        spawn_row: None,
         place: Vec::new(),
         hit: None,
         form: 0,
@@ -96,6 +100,7 @@ fn parse_args() -> Option<Args> {
             "--script" => args.script = Some(it.next()?),
             "--screenshot" => args.screenshot = it.next()?,
             "--spawn-col" => args.spawn_col = Some(it.next()?.parse().ok()?),
+            "--spawn-row" => args.spawn_row = Some(it.next()?.parse().ok()?),
             "--no-enemies" => args.no_enemies = true,
             "--map" => args.map = true,
             "--lives" => args.lives = Some(it.next()?.parse().ok()?),
@@ -140,6 +145,12 @@ fn main() -> AppExit {
                 primary_window: Some(Window {
                     title: "SMA4 port".into(),
                     resolution: (SCREEN_W * SCALE, SCREEN_H * SCALE).into(),
+                    // Scripted runs must not wait on vsync: a hidden window never gets it.
+                    present_mode: if args.script.is_some() {
+                        bevy::window::PresentMode::AutoNoVsync
+                    } else {
+                        bevy::window::PresentMode::default()
+                    },
                     ..default()
                 }),
                 ..default()
@@ -182,9 +193,10 @@ fn main() -> AppExit {
                 eprintln!("bad --script {spec:?}\n{USAGE}");
                 return AppExit::error();
             };
-            app.insert_resource(script);
+            // Keep stepping when the window is not focused (Bevy slows unfocused windows).
+            app.insert_resource(script).insert_resource(bevy::winit::WinitSettings::continuous());
         }
-        app.insert_resource(level::SpawnColumn(args.spawn_col))
+        app.insert_resource(level::SpawnColumn(args.spawn_col, args.spawn_row))
             .insert_resource(level::DebugPopup(args.popup))
             // A game starts on the world map; scripted and debug runs go straight in.
             .insert_resource(level::StartOptions {
