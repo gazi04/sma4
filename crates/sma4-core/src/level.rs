@@ -1,7 +1,7 @@
 //! The live level grid: metatiles that can change during play (hit blocks), with
 //! collision derived from the tileset's solidity thresholds.
 
-use sma4_assets::{BlockRules, Solidity, TileKind};
+use sma4_assets::{BlockRules, SLOPE_SHAPES, Slopes, Solidity, TileKind};
 
 pub const TILE_PX: i32 = 16;
 
@@ -17,12 +17,19 @@ pub struct Level {
     pub rules: BlockRules,
     /// Cells changed since the renderer last drained this list.
     pub changed: Vec<(usize, usize)>,
+    /// Slope collision, in tilesets with slopes.
+    pub slopes: Option<Slopes>,
 }
 
 impl Level {
     pub fn new(width: usize, height: usize, metatiles: Vec<u16>, solidity: Solidity, rules: BlockRules) -> Self {
         assert_eq!(metatiles.len(), width * height);
-        Self { width, height, metatiles, solidity, rules, changed: Vec::new() }
+        Self { width, height, metatiles, solidity, rules, changed: Vec::new(), slopes: None }
+    }
+
+    pub fn with_slopes(mut self, slopes: Option<Slopes>) -> Self {
+        self.slopes = slopes;
+        self
     }
 
     fn index(&self, tx: i32, ty: i32) -> Option<usize> {
@@ -50,6 +57,27 @@ impl Level {
             Some(m) => self.solidity.kind(m),
             None => TileKind::Empty,
         }
+    }
+
+    /// Slope shape of a cell (0 = none, or no slopes in this tileset).
+    pub fn slope(&self, tx: i32, ty: i32) -> u8 {
+        match (&self.slopes, self.metatile(tx, ty)) {
+            (Some(s), Some(m)) => s.shape_of(&self.solidity, m).min(SLOPE_SHAPES as u8 - 1),
+            _ => 0,
+        }
+    }
+
+    /// The floor of a slope shape at pixel column `x` of its cell: y offset 0-15 from the
+    /// top of the cell, or `None` for shapes without a floor (0x0809A7E8).
+    pub fn slope_floor(&self, shape: u8, x: i32) -> Option<i32> {
+        let s = self.slopes.as_ref()?;
+        let k = shape as usize;
+        (!s.no_floor[k]).then(|| (s.height[k][x.rem_euclid(TILE_PX) as usize] & 0xF) as i32)
+    }
+
+    /// Push down the slope of a shape (signed speed units), 0 on flat ground.
+    pub fn slope_push(&self, shape: u8) -> i32 {
+        self.slopes.as_ref().map_or(0, |s| s.push[shape as usize] as i32)
     }
 
     pub fn pixel_width(&self) -> i32 {

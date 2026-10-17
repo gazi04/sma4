@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub const METATILE: u32 = 16;
 pub const DEFAULT_DIR: &str = "assets/extracted";
 
-const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV09";
+const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV11";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssetError {
@@ -143,6 +143,69 @@ impl Solidity {
     }
 }
 
+/// Number of slope shapes (0x00-0x14).
+pub const SLOPE_SHAPES: usize = 0x15;
+
+/// Slope collision of tilesets with slopes (hills 3, underground 14: 0x080A1CEC sets
+/// 0x03003CF4), read from the ROM by the extractor (see docs/re-notes.md, "Slopes").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Slopes {
+    /// Shape per collision id: 0x08169E68[id >> 6][id - top threshold] (0x080A3760), 0 below
+    /// the threshold.
+    pub shape: [u8; 256],
+    /// Per shape, 16 columns (0x0816A029): low nibble = floor offset in the tile (0x10 =
+    /// none), high nibble = ceiling.
+    pub height: [[u8; 16]; SLOPE_SHAPES],
+    /// Shapes without a floor (0x08172DE3 nonzero: empty and ceiling slopes).
+    pub no_floor: [bool; SLOPE_SHAPES],
+    /// Push down the slope per shape (0x0816A179), in speed units.
+    pub push: [i8; SLOPE_SHAPES],
+}
+
+impl Default for Slopes {
+    fn default() -> Self {
+        Self { shape: [0; 256], height: [[0x10; 16]; SLOPE_SHAPES], no_floor: [true; SLOPE_SHAPES], push: [0; SLOPE_SHAPES] }
+    }
+}
+
+impl Slopes {
+    const BYTES: usize = 256 + SLOPE_SHAPES * 16 + SLOPE_SHAPES * 2;
+
+    /// Shape of a metatile; second-plane ids collide like `Solidity::high` (no slope for
+    /// the special handlers).
+    pub fn shape_of(&self, solidity: &Solidity, metatile: u16) -> u8 {
+        let id = if metatile >= 0x100 {
+            match solidity.high.get(metatile as u8 as usize) {
+                Some(&id) => id,
+                None => return 0,
+            }
+        } else {
+            metatile as u8
+        };
+        self.shape[id as usize]
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.shape);
+        self.height.iter().for_each(|h| out.extend_from_slice(h));
+        out.extend(self.no_floor.iter().map(|&b| b as u8));
+        out.extend(self.push.iter().map(|&b| b as u8));
+    }
+
+    fn read(d: &[u8]) -> Option<Self> {
+        let d = d.get(..Self::BYTES)?;
+        let (shape, rest) = d.split_at(256);
+        let (height, rest) = rest.split_at(SLOPE_SHAPES * 16);
+        let (no_floor, push) = rest.split_at(SLOPE_SHAPES);
+        Some(Self {
+            shape: shape.try_into().ok()?,
+            height: std::array::from_fn(|i| height[i * 16..i * 16 + 16].try_into().unwrap()),
+            no_floor: std::array::from_fn(|i| no_floor[i] != 0),
+            push: std::array::from_fn(|i| push[i] as i8),
+        })
+    }
+}
+
 /// Block-hit rules of a tileset, read from the ROM by the extractor (see docs/re-notes.md,
 /// "Blocks and items"). The game logic that uses them lives in `sma4-core`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,6 +279,32 @@ pub struct EnemySpawn {
     pub row: u8,
 }
 
+/// Where a pipe of this area leads (level header bytes 0-3 and 6, loader 0x08014F20; the
+/// switch itself is 0x08005690 -> 0x0800515C): the other area of the level, and the
+/// player's position there by the screen page the pipe was entered on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Junction {
+    pub level: u16,
+    pub enemies: u16,
+    pub tileset: u8,
+    pub exits: Vec<PipeExit>,
+}
+
+/// One pointer record (object stream kind 0x80, stored by 0x08014CE0 at 0x0300381E /
+/// 0x0300382E indexed by the record's row byte = the page), decoded by 0x08005290.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipeExit {
+    /// Screen page (x >> 8) the player enters the pipe on.
+    pub page: u8,
+    /// Top-left of the player's 16x32 frame in the other area, px.
+    pub x: u16,
+    pub y: u16,
+    /// How the player comes out (0x03003BF1): 1 up out of a pipe, 2 down, 3 right, 4 left.
+    pub dir: u8,
+    /// Camera y set on arrival (0x03003754).
+    pub camera_y: u16,
+}
+
 /// Metatiles per tileset: 256 ids, plus 256 more on the high layer.
 pub const METATILES: u32 = 512;
 
@@ -253,6 +342,13 @@ pub struct LevelAsset {
     /// Player start y (top of the 32 px frame, px): 0x0813789A[header byte 4 >> 5]
     /// (0x08014F20).
     pub start_y: u16,
+    /// The pipe destination area, if the header names one.
+    pub junction: Option<Junction>,
+    /// Horizontal camera limits (min, max x of the view), when the ROM sets them for this
+    /// area (0x080A4D4C, by object-stream address); otherwise the level's width.
+    pub camera_x: Option<(u16, u16)>,
+    /// Slope collision, for tilesets with slopes.
+    pub slopes: Option<Slopes>,
     /// All `METATILES` metatiles of the tileset rendered at 16x16, stacked vertically, once
     /// per animation frame: metatile `m` of frame `f` is rows `16*(f*METATILES+m)` + 0..16.
     pub atlas: Rgba,
@@ -296,6 +392,38 @@ impl LevelAsset {
         out.extend_from_slice(&self.time_limit.to_le_bytes());
         out.extend_from_slice(&self.start_y.to_le_bytes());
         out.extend_from_slice(&self.solidity.high);
+        match &self.junction {
+            None => out.push(0),
+            Some(j) => {
+                out.push(1);
+                out.extend_from_slice(&j.level.to_le_bytes());
+                out.extend_from_slice(&j.enemies.to_le_bytes());
+                out.push(j.tileset);
+                out.push(j.exits.len() as u8);
+                for e in &j.exits {
+                    out.push(e.page);
+                    out.extend_from_slice(&e.x.to_le_bytes());
+                    out.extend_from_slice(&e.y.to_le_bytes());
+                    out.push(e.dir);
+                    out.extend_from_slice(&e.camera_y.to_le_bytes());
+                }
+            }
+        }
+        match self.camera_x {
+            None => out.push(0),
+            Some((min, max)) => {
+                out.push(1);
+                out.extend_from_slice(&min.to_le_bytes());
+                out.extend_from_slice(&max.to_le_bytes());
+            }
+        }
+        match &self.slopes {
+            None => out.push(0),
+            Some(s) => {
+                out.push(1);
+                s.write(&mut out);
+            }
+        }
         write(&bin, &out)?;
         self.atlas.write_png(&png)
     }
@@ -320,7 +448,7 @@ impl LevelAsset {
         let rules = BlockRules::read(&body[cells..enemies_at]);
         let count = u16::from_le_bytes([body[enemies_at], body[enemies_at + 1]]) as usize;
         let list = &body[enemies_at + 2..];
-        if list.len() != count * 5 + 4 + HIGH_IDS {
+        if list.len() < count * 5 + 4 + HIGH_IDS + 2 {
             return Err(bad());
         }
         let high_at = count * 5 + 4;
@@ -334,6 +462,7 @@ impl LevelAsset {
                 row: e[4],
             })
             .collect();
+        let (junction, camera_x, slopes) = read_area(&list[high_at + HIGH_IDS..]).ok_or_else(bad)?;
         let atlas = Rgba::read_png(&png)?;
         if atlas.width != METATILE || atlas.height != METATILE * METATILES * ANIM_FRAMES {
             return Err(AssetError::Png { path: png, msg: "atlas must be 16 x 32768 (re-run sma4-extract)".into() });
@@ -354,9 +483,52 @@ impl LevelAsset {
             enemies,
             time_limit,
             start_y,
+            junction,
+            camera_x,
+            slopes,
             atlas,
         })
     }
+}
+
+const EXIT_BYTES: usize = 8;
+
+/// The level file's tail: the junction, the camera limits and the slopes.
+type Area = (Option<Junction>, Option<(u16, u16)>, Option<Slopes>);
+
+fn read_area(d: &[u8]) -> Option<Area> {
+    let u16_at = |o: usize| Some(u16::from_le_bytes([*d.get(o)?, *d.get(o + 1)?]));
+    let mut p = 1;
+    let junction = match *d.first()? {
+        0 => None,
+        _ => {
+            let n = *d.get(6)? as usize;
+            let exits = (0..n)
+                .map(|i| {
+                    let o = 7 + i * EXIT_BYTES;
+                    Some(PipeExit {
+                        page: *d.get(o)?,
+                        x: u16_at(o + 1)?,
+                        y: u16_at(o + 3)?,
+                        dir: *d.get(o + 5)?,
+                        camera_y: u16_at(o + 6)?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            p = 7 + n * EXIT_BYTES;
+            Some(Junction { level: u16_at(1)?, enemies: u16_at(3)?, tileset: *d.get(5)?, exits })
+        }
+    };
+    let camera_x = match *d.get(p)? {
+        0 => None,
+        _ => Some((u16_at(p + 1)?, u16_at(p + 3)?)),
+    };
+    p += if camera_x.is_some() { 5 } else { 1 };
+    let slopes = match *d.get(p)? {
+        0 => None,
+        _ => Some(Slopes::read(d.get(p + 1..)?)?),
+    };
+    Some((junction, camera_x, slopes))
 }
 
 /// Status bar (BG0 in levels): the template map the level loader 0x08016434 decompresses
@@ -868,6 +1040,22 @@ mod tests {
             enemies: vec![EnemySpawn { kind: 0x72, col: 14, row: 25 }, EnemySpawn { kind: 0x6E, col: 300, row: 3 }],
             time_limit: 300,
             start_y: 0x140,
+            junction: Some(Junction {
+                level: 0x23,
+                enemies: 2,
+                tileset: 1,
+                exits: vec![
+                    PipeExit { page: 8, x: 0x88, y: 0xF0, dir: 2, camera_y: 0xF0 },
+                    PipeExit { page: 9, x: 0x918, y: 0x180, dir: 1, camera_y: 0x110 },
+                ],
+            }),
+            camera_x: Some((0x70, 0xA0)),
+            slopes: Some(Slopes {
+                shape: std::array::from_fn(|i| (i % SLOPE_SHAPES) as u8),
+                height: std::array::from_fn(|i| [i as u8; 16]),
+                no_floor: std::array::from_fn(|i| i % 3 == 0),
+                push: std::array::from_fn(|i| i as i8 - 3),
+            }),
             atlas: Rgba {
                 width: METATILE,
                 height: METATILE * METATILES * ANIM_FRAMES,
@@ -878,6 +1066,9 @@ mod tests {
         assert_eq!(LevelAsset::read(&dir, 0x22).unwrap(), lvl);
         assert_eq!(lvl.kind(1, 0), TileKind::Solid);
         assert_eq!(lvl.kind(0, 1), TileKind::Empty);
+        let plain = LevelAsset { junction: None, camera_x: None, slopes: None, ..lvl };
+        plain.write(&dir).unwrap();
+        assert_eq!(LevelAsset::read(&dir, 0x22).unwrap(), plain);
         std::fs::remove_dir_all(dir).ok();
     }
 }

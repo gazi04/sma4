@@ -157,6 +157,7 @@ fn spawn_tilemaps(commands: &mut Commands, images: &mut Assets<Image>, level: &L
 
 fn core_level(level: &LevelAsset) -> Level {
     Level::new(level.width, level.height, level.metatiles.clone(), level.solidity, level.rules.clone())
+        .with_slopes(level.slopes.clone())
 }
 
 fn spawn_level(

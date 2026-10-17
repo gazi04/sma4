@@ -2,7 +2,10 @@
 //! "Level storage"), then rendering every distinct metatile into an atlas.
 //! Addresses are for the European ROM (AX4P rev 0).
 
-use sma4_assets::{ANIM_FRAMES, BlockRules, EnemySpawn, LevelAsset, METATILE, METATILES, Rgba, Solidity};
+use sma4_assets::{
+    ANIM_FRAMES, BlockRules, EnemySpawn, Junction, LevelAsset, METATILE, METATILES, PipeExit, Rgba, SLOPE_SHAPES, Slopes,
+    Solidity,
+};
 use sma4_rom::{
     ROM_BASE, Rom,
     gfx::parse_palette,
@@ -87,8 +90,17 @@ impl From<sma4_rom::RomError> for ExtractError {
 
 type Result<T> = std::result::Result<T, ExtractError>;
 
+/// Pipe exit y per pointer bits 6-4 (0x08005290): low nibble = y page, high nibble = y
+/// low byte.
+const EXIT_Y: u32 = 0x0813_1EC1;
+const EXIT_CAMERA_Y: u32 = 0x0813_1ECA;
+
+/// Pointer records (kind 0x80, 0x08014CE0): `(page, value_a, value_b)` = row byte, the
+/// 0x0300381E and the 0x0300382E entries.
+type Pointers = Vec<(u8, u8, u8)>;
+
 /// Replays the object loop of the level loader (0x08014F20) record by record.
-fn load_objects(m: &mut Machine, rom: &Rom, data: u32, tileset: u8) -> Result<usize> {
+fn load_objects(m: &mut Machine, rom: &Rom, data: u32, tileset: u8, pointers: &mut Pointers) -> Result<usize> {
     m.w8(V_TILESET, tileset)?;
     m.w8(V_VERTICAL, rom.u8(data + 6)? & 0x10)?;
     let mut i = data + HEADER_LEN;
@@ -105,7 +117,10 @@ fn load_objects(m: &mut Machine, rom: &Rom, data: u32, tileset: u8) -> Result<us
         let rec = rom.slice(i, 4)?;
         let bank = b & 0xC0;
         if bank == 0x80 {
-            i += 4; // area setting, not drawn
+            // Pointer: where a pipe entered on page `rec[1]` leads; later records win.
+            pointers.retain(|p| p.0 != rec[1] & 0x0F);
+            pointers.push((rec[1] & 0x0F, rec[2], rec[3]));
+            i += 4;
             continue;
         }
         m.w8(V_BANK, bank)?;
@@ -145,7 +160,8 @@ pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_lis
     for i in 0..0x340 {
         m.call(FN_FILL_PAGES, &[SKY.id as u32, i])?;
     }
-    let records = load_objects(m, rom, data, tileset)?;
+    let mut pointers = Vec::new();
+    let records = load_objects(m, rom, data, tileset, &mut pointers)?;
 
     let gfx_set = ((hdr[8] & 0x30) << 1) | (hdr[7] & 0x1F);
     m.w8(V_TILESET, tileset)?;
@@ -215,7 +231,7 @@ pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_lis
         .collect::<Vec<_>>();
 
     let distinct = metatiles.iter().collect::<std::collections::HashSet<_>>().len();
-    println!("  level {level_id:#05x}: {records} objects, {width}x{ROWS} metatiles, {distinct} distinct, gfx set {gfx_set}, {} enemies", enemies.len());
+    println!("  level {level_id:#05x}: {records} objects, {width}x{ROWS} metatiles, {distinct} distinct, gfx set {gfx_set}, {} enemies, pipe pointers {pointers:02x?}", enemies.len());
     Ok(LevelAsset {
         level_id,
         tileset,
@@ -228,8 +244,48 @@ pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_lis
         enemies,
         time_limit: rom.u8(TIME_LIMITS + (hdr[8] >> 6) as u32)? as u16 * 100,
         start_y: rom.u16(START_Y + (hdr[4] >> 5) as u32 * 2)?,
+        junction: junction(rom, &hdr, &pointers)?,
+        camera_x: (data == BONUS_ROOM_1_1).then_some(BONUS_ROOM_CAMERA),
+        slopes: slopes(rom, tileset, solidity.top)?,
         atlas: Rgba { width: METATILE, height: METATILE * METATILES * ANIM_FRAMES, pixels: atlas },
     })
+}
+
+/// 0x080A4D4C special-cases the camera of World 1-1's coin room (object stream
+/// 0x08155460, level 0x23): x from 0x70 (+0xA0 of the player struct) to 0xA0 (+0x9E).
+const BONUS_ROOM_1_1: u32 = 0x0815_5460;
+const BONUS_ROOM_CAMERA: (u16, u16) = (0x70, 0xA0);
+
+/// The alternate area named by header bytes 0-3 / 6 (0x08014F20 -> 0x030037CE, 0x030037D0,
+/// 0x030037DE) and the pipe exits into it, decoded like 0x08005290: value_b low nibble =
+/// x page, high nibble | 8 = x low byte; value_a low nibble = exit direction (sideways
+/// exits clear x bits 0-3), bits 6-4 index the y table.
+fn junction(rom: &Rom, hdr: &[u8], pointers: &Pointers) -> Result<Option<Junction>> {
+    let level = u16::from_be_bytes([hdr[0], hdr[1]]);
+    if level == 0 || pointers.is_empty() {
+        return Ok(None);
+    }
+    let mut exits = Vec::new();
+    for &(page, a, b) in pointers {
+        let dir = a & 0x0F;
+        let mut x = ((b & 0x0F) as u16) << 8 | (b & 0xF0) as u16 | 8;
+        if dir > 2 {
+            x &= !0x0F;
+        }
+        let k = ((a & 0x70) >> 4) as u32;
+        let v = rom.u8(EXIT_Y + k)?;
+        let y = ((v & 0x0F) as u16) << 8 | (v & 0xF0) as u16;
+        // Camera: 0x08131ECA[k], 0x20 lower when y > 0x6F; below the first 256 px (and not
+        // a vertical area) 0xF0, or 0x110 when the low byte of y is above 0x6F.
+        let camera_y = if y >= 0x100 {
+            if y & 0xFF > 0x6F { 0x110 } else { 0xF0 }
+        } else {
+            rom.u16(EXIT_CAMERA_Y + k * 2)? + if y > 0x6F { 0x20 } else { 0 }
+        };
+        exits.push(PipeExit { page, x, y, dir, camera_y });
+    }
+    exits.sort_by_key(|e| e.page);
+    Ok(Some(Junction { level, enemies: u16::from_be_bytes([hdr[2], hdr[3]]), tileset: hdr[6] & 0x0F, exits }))
 }
 
 fn encode(m: Metatile) -> u16 {
@@ -251,4 +307,35 @@ fn high_ids(rom: &Rom, tileset: u8) -> Result<[u8; sma4_assets::HIGH_IDS]> {
         *b = rom.u8(table + i as u32)?;
     }
     Ok(out)
+}
+
+/// 0x080A1CEC: slopes are on in the hills (3) and underground (14) tilesets.
+// TODO(re): also tileset 5 when 0x030037DA == 2 (not traced yet).
+const SLOPE_TILESETS: [u8; 2] = [3, 14];
+/// Slope shape per id above the "top" threshold, one table per quadrant (0x080A3760).
+const SLOPE_SHAPE_TABLES: u32 = 0x0816_9E68;
+const SLOPE_HEIGHTS: u32 = 0x0816_A029;
+const SLOPE_NO_FLOOR: u32 = 0x0817_2DE3;
+const SLOPE_PUSH: u32 = 0x0816_A179;
+
+fn slopes(rom: &Rom, tileset: u8, top: [u8; 4]) -> Result<Option<Slopes>> {
+    if !SLOPE_TILESETS.contains(&tileset) {
+        return Ok(None);
+    }
+    let mut s = Slopes::default();
+    for id in 0..=255u8 {
+        let q = (id >> 6) as usize;
+        if id >= top[q] {
+            let table = rom.ptr(SLOPE_SHAPE_TABLES + q as u32 * 4)?;
+            s.shape[id as usize] = rom.u8(table + (id - top[q]) as u32)?;
+        }
+    }
+    for k in 0..SLOPE_SHAPES {
+        for (x, h) in s.height[k].iter_mut().enumerate() {
+            *h = rom.u8(SLOPE_HEIGHTS + (k * 16 + x) as u32)?;
+        }
+        s.no_floor[k] = rom.u8(SLOPE_NO_FLOOR + k as u32)? != 0;
+        s.push[k] = rom.u8(SLOPE_PUSH + k as u32)? as i8;
+    }
+    Ok(Some(s))
 }

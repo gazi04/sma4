@@ -10,6 +10,9 @@
 //!   glide and flight; fall speed capped at 0x40 (0x080A3678).
 //! * P-meter 0x0809F9A0 (0x03003C9F): a 7-bit shift register filled while running.
 //! * Tail whip 0x080984E8 (raccoon): 18-frame spin; the tail hits on 4 of those frames.
+//! * Slopes 0x0809A7E8 (tilesets with slopes): the floor comes from one probe under the
+//!   middle of the feet and the shape's heightmap; walls are probed 8 px and more above
+//!   the feet; walking uphill lowers the target speed.
 
 use sma4_assets::TileKind;
 
@@ -31,6 +34,18 @@ pub const PUFF_FRAMES: u8 = 0x17;
 const GOAL_WALK: i32 = 0x14;
 const RUN_MAX: i32 = 0x28;
 const P_MAX: i32 = 0x38;
+/// Target speeds walking uphill: 0x08172C8A[10], with B 0x08172C8A[1] (0x08096884).
+const UPHILL_WALK_MAX: i32 = 0x0D;
+const UPHILL_RUN_MAX: i32 = 0x16;
+/// With slopes, the lowest wall probes sit 8 px above the feet (0x08172DB7: frame y +
+/// 0x18), so the ground under a slope never blocks the feet.
+const SLOPE_WALL_LIFT: i32 = 8;
+/// Slope shapes that are the fill under a slope (0x0809A7E8: shapes 4 and 8): the floor
+/// is looked up one tile higher.
+const SLOPE_FILL: [u8; 2] = [4, 8];
+/// Standing on nothing this deep into a tile, the floor is looked up one tile lower (so the
+/// player follows a slope down); 0x0809A7E8.
+const SLOPE_FOLLOW_DOWN: i32 = 10;
 /// Acceleration table 0x08172C96 (1/256 of a speed unit per frame): friction (small 0xFF60,
 /// other forms 0xFF20), acceleration 0xE0, skid 0x200.
 const FRICTION_SMALL: i32 = -0xA0;
@@ -187,6 +202,8 @@ pub struct Player {
     /// Smoke puff of a transformation (+0x3E): 0x17, -1 per frame; the player is hidden
     /// and frozen.
     pub puff: u8,
+    /// Standing on a slope that pushes against the motion (0x03003CE4).
+    uphill: bool,
 }
 
 impl Player {
@@ -316,12 +333,17 @@ impl Player {
         let speed = self.vx / UNIT;
         let run = held.contains(Buttons::B);
         let target = match (run, self.p_meter == P_FULL) {
+            _ if self.uphill => {
+                // The walk cycle also runs twice as fast (+0x4B).
+                self.walk_timer += 1;
+                if run { UPHILL_RUN_MAX } else { UPHILL_WALK_MAX }
+            }
             (false, _) => WALK_MAX,
             (true, false) => RUN_MAX,
             (true, true) => P_MAX,
         };
-        // P-meter input (+0x53) and take-off permission (+0x1F).
-        if run && self.on_ground {
+        // P-meter input (+0x53) and take-off permission (+0x1F); not uphill.
+        if run && self.on_ground && !self.uphill {
             self.running = speed.abs() >= RUN_MAX;
             if speed.abs() >= WALK_MAX && dir != 0 && dir == speed.signum() && self.p_timer == 0 && self.p_meter > 0x3E {
                 self.fly_ready = true;
@@ -542,7 +564,8 @@ impl Player {
     fn move_x(&mut self, map: &Level) {
         self.x += self.vx;
         let (px, py) = self.px();
-        let rows = tile_span(py, self.height());
+        let lift = if map.slopes.is_some() { SLOPE_WALL_LIFT } else { 0 };
+        let rows = tile_span(py, self.height() - lift);
         if self.vx > 0 {
             let tx = (px + HITBOX_W - 1).div_euclid(TILE_PX);
             if rows.clone().any(|ty| map.at(tx, ty) == TileKind::Solid) {
@@ -564,7 +587,13 @@ impl Player {
         self.y += self.vy;
         let (px, py) = self.px();
         let cols = tile_span(px, HITBOX_W);
+        let grounded = self.on_ground;
         self.on_ground = false;
+        self.uphill = false;
+        if self.vy >= 0 && map.slopes.is_some() {
+            self.land_on_slope(map, grounded);
+            return None;
+        }
         if self.vy >= 0 {
             let ty = (py + h).div_euclid(TILE_PX);
             let top = ty * TILE_PX;
@@ -575,11 +604,7 @@ impl Player {
                 TileKind::Empty => false,
             });
             if lands && py + h >= top {
-                self.y = (top - h) * SUB;
-                self.vy = 0;
-                self.on_ground = true;
-                self.flutter = 0;
-                self.stomp_chain = 0;
+                self.land(top);
             }
             None
         } else {
@@ -593,6 +618,50 @@ impl Player {
             }
             None
         }
+    }
+
+    /// Puts the feet on `floor` (px) and lands (0x080A3A5C).
+    fn land(&mut self, floor: i32) {
+        self.y = (floor - self.height()) * SUB;
+        self.vy = 0;
+        self.on_ground = true;
+        self.flutter = 0;
+        self.stomp_chain = 0;
+    }
+
+    /// 0x0809A7E8: the floor of a slope tileset, from the probe under the middle of the
+    /// feet (frame x + 8, y + 0x20).
+    fn land_on_slope(&mut self, map: &Level, grounded: bool) {
+        let (px, py) = self.px();
+        let bottom = py + self.height();
+        let cx = px + HITBOX_W / 2;
+        let tx = cx.div_euclid(TILE_PX);
+        let mut ty = bottom.div_euclid(TILE_PX);
+        let mut shape = map.slope(tx, ty);
+        if SLOPE_FILL.contains(&shape) {
+            // The fill under a slope: the slope itself is one tile up.
+            let above = map.slope(tx, ty - 1);
+            if map.slope_floor(above, cx).is_some() {
+                shape = above;
+                ty -= 1;
+            }
+        } else if shape == 0 && grounded && bottom.rem_euclid(TILE_PX) >= SLOPE_FOLLOW_DOWN {
+            let below = map.slope(tx, ty + 1);
+            if map.slope_floor(below, cx).is_some() {
+                shape = below;
+                ty += 1;
+            }
+        }
+        let Some(offset) = map.slope_floor(shape, cx) else { return };
+        let floor = ty * TILE_PX + offset;
+        // On the ground the feet follow the floor up and down; in the air they only land
+        // once they reach it.
+        if !grounded && bottom < floor {
+            return;
+        }
+        self.land(floor);
+        let push = map.slope_push(shape);
+        self.uphill = push != 0 && (push < 0) != (self.vx < 0);
     }
 }
 
@@ -852,5 +921,100 @@ mod tests {
         }
         assert_eq!((boxes, blocks), (4, 1));
         assert!(!s.p.facing_left, "turned twice, facing the same way again");
+    }
+
+    /// 24x8 hills level (tileset 3 thresholds): flat ground on row 7, a 45-degree hill up
+    /// from column 6 to a flat top on row 4 (columns 9-12) and back down to column 15.
+    fn hill() -> Level {
+        use sma4_assets::{BlockRules, Slopes, Solidity};
+        const UP: u16 = 0x99;
+        const FLAT: u16 = 0x9A;
+        const DOWN: u16 = 0x9B;
+        const FILL: u16 = 0xAB;
+        const SKY: u16 = 0x80;
+        let (w, h) = (24, 8);
+        let mut m = vec![SKY; w * h];
+        let mut put = |x: usize, y: usize, t: u16| m[y * w + x] = t;
+        for x in 0..w {
+            put(x, 7, FLAT);
+        }
+        for (x, top, t) in [(6, 6, UP), (7, 5, UP), (8, 4, UP), (13, 4, DOWN), (14, 5, DOWN), (15, 6, DOWN)] {
+            put(x, top, t);
+            (top + 1..h).for_each(|y| put(x, y, FILL));
+        }
+        for x in 9..13 {
+            put(x, 4, FLAT);
+            (5..h).for_each(|y| put(x, y, FILL));
+        }
+        // Shapes 1 (up), 2 (down), 4 (fill), 7 (flat) as in the ROM tables.
+        let mut slopes = Slopes::default();
+        for (id, shape) in [(UP, 1), (FLAT, 7), (DOWN, 2), (FILL, 4)] {
+            slopes.shape[id as usize] = shape;
+        }
+        slopes.height[1] = std::array::from_fn(|x| 15 - x as u8);
+        slopes.height[2] = std::array::from_fn(|x| x as u8);
+        for k in [1, 2, 4, 7] {
+            slopes.no_floor[k] = false;
+        }
+        slopes.height[4] = [0; 16];
+        slopes.height[7] = [0; 16];
+        slopes.push[1] = -3;
+        slopes.push[2] = 3;
+        let solidity =
+            Solidity { top: [0x25, 0x5F, 0x99, 0xE2], solid: [0x2E, 0x5F, 0xA6, 0xF0], high: [0; sma4_assets::HIGH_IDS] };
+        Level::new(w, h, m, solidity, BlockRules::default()).with_slopes(Some(slopes))
+    }
+
+    #[test]
+    fn walks_over_a_hill_without_jumping() {
+        let mut s = Sim::new(hill(), 8);
+        assert!(s.p.on_ground);
+        let mut last_up = 0;
+        for _ in 0..240 {
+            s.run(Buttons::RIGHT, 1);
+            assert!(s.p.on_ground, "left the ground at x {}", s.p.px().0);
+            let cx = s.p.px().0 + HITBOX_W / 2;
+            let (tx, bottom) = (cx / TILE_PX, s.p.px().1 + s.p.height());
+            // The feet stay on the heightmap: 45 degrees up, flat on top, 45 degrees down.
+            let floor = match tx {
+                6..=8 => (13 - tx) * TILE_PX - 1 - cx % TILE_PX,
+                9..=12 => 4 * TILE_PX,
+                13..=15 => (tx - 9) * TILE_PX + cx % TILE_PX,
+                _ => 7 * TILE_PX,
+            };
+            assert_eq!(bottom, floor, "feet off the slope at x {cx}");
+            if (6..=8).contains(&tx) {
+                last_up = s.p.vx / UNIT;
+            }
+        }
+        assert!(s.p.px().0 > 17 * TILE_PX, "got over the hill");
+        assert!(last_up < WALK_MAX, "slowed down uphill: {last_up:#x}");
+    }
+
+    #[test]
+    fn walking_uphill_is_slower() {
+        let mut s = Sim::new(hill(), 6 * TILE_PX + 4);
+        let mut max = 0;
+        for _ in 0..20 {
+            s.run(Buttons::RIGHT, 1);
+            max = max.max(s.p.vx / UNIT);
+        }
+        assert_eq!(max, UPHILL_WALK_MAX);
+        // Downhill (left) the walk speed is the usual one.
+        s.run(Buttons::LEFT, 40);
+        assert_eq!(s.p.vx / UNIT, -WALK_MAX);
+    }
+
+    #[test]
+    fn lands_on_a_slope_from_a_jump() {
+        let mut s = Sim::new(hill(), 7 * TILE_PX);
+        assert!(s.p.on_ground);
+        let cx = s.p.px().0 + HITBOX_W / 2;
+        assert_eq!(s.p.px().1 + s.p.height(), 5 * TILE_PX + 15 - cx % TILE_PX);
+        s.run(Buttons::A, 1);
+        assert!(!s.p.on_ground);
+        s.run(Buttons::empty(), 80);
+        assert!(s.p.on_ground);
+        assert_eq!(s.p.px().1 + s.p.height(), 5 * TILE_PX + 15 - cx % TILE_PX, "back on the slope");
     }
 }
