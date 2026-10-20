@@ -119,29 +119,93 @@ mod tests {
         assert_eq!(s.kind(m(0x50)), TileKind::Top);
         assert_eq!(s.kind(m(0x00)), TileKind::Empty);
     }
+
+    /// A blank AX4P image big enough for the enemy-list tables.
+    fn blank_rom() -> Vec<u8> {
+        let mut d = vec![0u8; 0x17_0000];
+        d[0xAC..0xB0].copy_from_slice(b"AX4P");
+        d[0xBD] = d[0xA0..=0xBC].iter().fold(0u8, |c, &b| c.wrapping_sub(b)).wrapping_sub(0x19);
+        d
+    }
+
+    #[test]
+    fn enemy_list_records_take_their_types_extra_bytes() {
+        let mut d = blank_rom();
+        let list = 0x10_0000u32;
+        d[(ENEMY_LISTS - 0x0800_0000) as usize..][..4].copy_from_slice(&(0x0800_0000 + list).to_le_bytes());
+        // 0xE0 takes two extra bytes (flags 0x0C), 0x195 none, 0x72 none.
+        d[(LIST_FLAGS_LOW - 0x0800_0000) as usize + 0xE0] = 0x0C;
+        let bytes = [0x00, 0x00, 0xE0, 0x18, 0x18, 0x00, 0x80, 0x01, 0x95, 0x19, 0x13, 0x00, 0x72, 0x20, 0x18, 0xFF];
+        d[list as usize..][..bytes.len()].copy_from_slice(&bytes);
+        let rom = crate::Rom::from_bytes(d).unwrap();
+        let l = rom.enemy_list(0).unwrap();
+        assert_eq!(
+            l,
+            [
+                EnemyRecord { kind: 0xE0, col: 0x18, row: 0x18, extra: [Some(0), Some(0x80)] },
+                EnemyRecord { kind: 0x195, col: 0x19, row: 0x13, extra: [None, None] },
+                EnemyRecord { kind: 0x72, col: 0x20, row: 0x18, extra: [None, None] },
+            ]
+        );
+    }
 }
 
 /// Enemy-list pointers, indexed by enemy-list id (from the world map or a level header).
 const ENEMY_LISTS: u32 = 0x0813_6B14;
 
-/// One enemy-list record: object type, metatile column and row.
+/// Per-type flags of object types below 0x160 (bit 2: one extra record byte, bit 3: two)
+/// and of types 0x160..0x18F (bit 0: one, bit 1: two), indexed by the full type.
+const LIST_FLAGS_LOW: u32 = 0x0816_A9CA;
+const LIST_FLAGS_HIGH: u32 = 0x0816_ABF1;
+
+/// One enemy-list record: object type, metatile column and row, and the extra bytes
+/// some types take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnemyRecord {
-    pub kind: u8,
+    pub kind: u16,
     pub col: u8,
     pub row: u8,
+    pub extra: [Option<u8>; 2],
 }
 
 impl Rom {
-    /// Reads an enemy list: one header byte, then 4-byte records `[00, type, col, row]`
-    /// until 0xFF. (A few lists in the ROM contain longer records; not decoded yet.)
+    /// Reads an enemy list as 0x08004F38 copies it: one header byte, then records
+    /// `[type hi, type lo, col, row]` until 0xFF, each followed by the 0-2 extra bytes its
+    /// type's flags ask for (0x1AB always takes one).
     pub fn enemy_list(&self, id: u16) -> Result<Vec<EnemyRecord>> {
-        let mut p = self.ptr(ENEMY_LISTS + id as u32 * 4)? + 1;
+        self.enemy_list_at(self.ptr(ENEMY_LISTS + id as u32 * 4)?)
+    }
+
+    /// An enemy list by address (some areas name theirs directly, e.g. 0x03003B10).
+    pub fn enemy_list_at(&self, addr: u32) -> Result<Vec<EnemyRecord>> {
+        let mut p = addr + 1;
         let mut out = Vec::new();
         while self.u8(p)? != 0xFF {
             let r = self.slice(p, 4)?;
-            out.push(EnemyRecord { kind: r[1], col: r[2], row: r[3] });
+            let kind = u16::from_be_bytes([r[0], r[1]]);
             p += 4;
+            let (one, two) = match kind {
+                0..0x160 => {
+                    let f = self.u8(LIST_FLAGS_LOW + kind as u32)?;
+                    (f & 4 != 0, f & 8 != 0)
+                }
+                0x160..0x190 => {
+                    let f = self.u8(LIST_FLAGS_HIGH + kind as u32)?;
+                    (f & 1 != 0, f & 2 != 0)
+                }
+                0x1AB => (true, false),
+                _ => (false, false),
+            };
+            let mut extra = [None; 2];
+            if one {
+                extra[0] = Some(self.u8(p)?);
+                p += 1;
+                if two {
+                    extra[1] = Some(self.u8(p)?);
+                    p += 1;
+                }
+            }
+            out.push(EnemyRecord { kind, col: r[2], row: r[3], extra });
         }
         Ok(out)
     }

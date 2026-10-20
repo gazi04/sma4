@@ -102,6 +102,22 @@ impl Level {
         (!s.no_floor[k]).then(|| (s.height[k][x.rem_euclid(TILE_PX) as usize] & 0xF) as i32)
     }
 
+    /// The id a cell collides as (second-plane ids mapped, `Solidity::id`).
+    pub fn collision_id(&self, tx: i32, ty: i32) -> Option<u8> {
+        self.metatile(tx, ty).and_then(|m| self.solidity.id(m))
+    }
+
+    /// Whether this tileset has slope collision (0x03003CF4).
+    pub fn has_slopes(&self) -> bool {
+        self.slopes.is_some()
+    }
+
+    /// The low nibble of a shape's height map (0x0816A029) at pixel column `x`, whatever
+    /// the shape: the enemies' floor test (0x08045ABC) reads it for any shape.
+    pub fn slope_height(&self, shape: u8, x: i32) -> i32 {
+        self.slopes.as_ref().map_or(0, |s| (s.height[shape as usize][x.rem_euclid(TILE_PX) as usize] & 0xF) as i32)
+    }
+
     /// Push down the slope of a shape (signed speed units), 0 on flat ground.
     pub fn slope_push(&self, shape: u8) -> i32 {
         self.slopes.as_ref().map_or(0, |s| s.push[shape as usize] as i32)
@@ -132,3 +148,46 @@ impl Level {
 /// Thresholds of tileset 1, used by tests.
 pub const TEST_SOLIDITY: Solidity =
     Solidity { top: [0x25, 0x50, 0xA0, 0xE2], solid: [0x2D, 0x53, 0xAD, 0xF0], high: [0; sma4_assets::HIGH_IDS] };
+
+/// 24x8 hills level (tileset 3 thresholds): flat ground on row 7, a 45-degree hill up
+/// from column 6 to a flat top on row 4 (columns 9-12) and back down to column 15.
+#[cfg(test)]
+pub fn test_hill() -> Level {
+    use sma4_assets::{BlockRules, Slopes, Solidity};
+    const UP: u16 = 0x99;
+    const FLAT: u16 = 0x9A;
+    const DOWN: u16 = 0x9B;
+    const FILL: u16 = 0xAB;
+    const SKY: u16 = 0x80;
+    let (w, h) = (24, 8);
+    let mut m = vec![SKY; w * h];
+    let mut put = |x: usize, y: usize, t: u16| m[y * w + x] = t;
+    for x in 0..w {
+        put(x, 7, FLAT);
+    }
+    for (x, top, t) in [(6, 6, UP), (7, 5, UP), (8, 4, UP), (13, 4, DOWN), (14, 5, DOWN), (15, 6, DOWN)] {
+        put(x, top, t);
+        (top + 1..h).for_each(|y| put(x, y, FILL));
+    }
+    for x in 9..13 {
+        put(x, 4, FLAT);
+        (5..h).for_each(|y| put(x, y, FILL));
+    }
+    // Shapes 1 (up), 2 (down), 4 (fill), 7 (flat) as in the ROM tables.
+    let mut slopes = Slopes::default();
+    for (id, shape) in [(UP, 1), (FLAT, 7), (DOWN, 2), (FILL, 4)] {
+        slopes.shape[id as usize] = shape;
+    }
+    slopes.height[1] = std::array::from_fn(|x| 15 - x as u8);
+    slopes.height[2] = std::array::from_fn(|x| x as u8);
+    for k in [1, 2, 4, 7] {
+        slopes.no_floor[k] = false;
+    }
+    slopes.height[4] = [0; 16];
+    slopes.height[7] = [0; 16];
+    slopes.push[1] = -3;
+    slopes.push[2] = 3;
+    let solidity =
+        Solidity { top: [0x25, 0x5F, 0x99, 0xE2], solid: [0x2E, 0x5F, 0xA6, 0xF0], high: [0; sma4_assets::HIGH_IDS] };
+    Level::new(w, h, m, solidity, BlockRules::default()).with_slopes(Some(slopes))
+}

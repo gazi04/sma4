@@ -1,5 +1,6 @@
 //! Enemy sprites, extracted from the user's own ROM by `sma4-extract`: the Goomba
-//! (`objects/walker.png`), the Paragoomba (`objects/paragoomba.png`), the Koopa Troopas (`objects/koopa_*.png`), the Piranha Plants
+//! (`objects/walker.png`), the Paragoombas (`objects/paragoomba_*.png`), the Micro-Goombas
+//! (`objects/micro_goomba.png`), the Koopa Troopas (`objects/koopa_*.png`), the Piranha Plants
 //! (`objects/piranha_*.png`, the Venus Fire Trap included), its fireballs
 //! (`objects/fireball.png`) and the puff of smoke (`objects/puff.png`). Behaviour and the
 //! frame to show come from `sma4-core`.
@@ -9,7 +10,8 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use sma4_assets::{
     FIREBALL_FRAMES, KOOPA_CELL_H, KOOPA_CELL_W, KOOPA_ORIGIN, PARAGOOMBA_GOOMBA, PARAGOOMBA_SQUISHED, PIRANHA_ORIGIN,
-    WALKER_SQUISHED, fireball_path, koopa_path, paragoomba_path, piranha_path, puff_path, walker_path,
+    WALKER_SQUISHED, fireball_path, koopa_path, micro_goomba_path, paragoomba_path, piranha_path, puff_path,
+    walker_path,
 };
 use sma4_core::{EnemyState, enemies};
 
@@ -25,10 +27,12 @@ impl Plugin for EnemyPlugin {
 }
 
 const Z_ENEMY: f32 = 8.0;
+/// Riding Micro-Goombas show over the player (0x0808D7E0 uses OBJ priority 1, like it).
+const Z_MICRO: f32 = 10.5;
 
-/// Sprite cells per enemy type, the puff of smoke and the fireball.
+/// Sprite cells per enemy type, the puff of smoke, the fireball and the Micro-Goomba.
 #[derive(Resource)]
-struct Art(HashMap<u16, Vec<Handle<Image>>>, Vec<Handle<Image>>, Vec<Handle<Image>>);
+struct Art(HashMap<u16, Vec<Handle<Image>>>, Vec<Handle<Image>>, Vec<Handle<Image>>, Vec<Handle<Image>>);
 
 #[derive(Component)]
 struct EnemySprite;
@@ -39,7 +43,9 @@ fn load_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMu
     for kind in [enemies::KOOPA, enemies::RED_KOOPA, enemies::PARATROOPA] {
         art.insert(kind, load_cells(&koopa_path(&dir.0, kind), KOOPA_CELL_W, KOOPA_CELL_H, &mut images));
     }
-    art.insert(enemies::PARAGOOMBA, load_cells(&paragoomba_path(&dir.0), KOOPA_CELL_W, KOOPA_CELL_H, &mut images));
+    for kind in [enemies::PARAGOOMBA, enemies::MICRO_PARAGOOMBA] {
+        art.insert(kind, load_cells(&paragoomba_path(&dir.0, kind), KOOPA_CELL_W, KOOPA_CELL_H, &mut images));
+    }
     for kind in enemies::PIRANHA_TYPES {
         art.insert(kind, load_cells(&piranha_path(&dir.0, kind), KOOPA_CELL_W, KOOPA_CELL_H, &mut images));
     }
@@ -48,7 +54,11 @@ fn load_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMu
     if fireball.is_empty() {
         warn!("no objects/fireball.png; re-run sma4-extract");
     }
-    commands.insert_resource(Art(art, puff, fireball));
+    let micro = load_cells(&micro_goomba_path(&dir.0), KOOPA_CELL_W, KOOPA_CELL_H, &mut images);
+    if micro.is_empty() {
+        warn!("no objects/micro_goomba.png; re-run sma4-extract");
+    }
+    commands.insert_resource(Art(art, puff, fireball, micro));
 }
 
 fn sync_enemies(mut commands: Commands, game: Res<GameRes>, art: Res<Art>, old: Query<Entity, With<EnemySprite>>) {
@@ -63,6 +73,16 @@ fn sync_enemies(mut commands: Commands, game: Res<GameRes>, art: Res<Art>, old: 
             let (w, h) = (KOOPA_CELL_W as i32, KOOPA_CELL_H as i32);
             let (cx, cy) = (x - KOOPA_ORIGIN.0 + w / 2, y - KOOPA_ORIGIN.1 + h / 2);
             commands.spawn((EnemySprite, Sprite::from_image(image.clone()), Transform::from_xyz(cx as f32, -(cy as f32), Z_ENEMY + 0.5)));
+        }
+    }
+    // Micro-Goombas: the slot position (top-left of the 8x8 OBJ) sits at KOOPA_ORIGIN; in
+    // front of the player.
+    for m in &game.0.micro_goombas {
+        if let Some(image) = art.3.get(m.cell(game.0.frame)) {
+            let (x, y) = m.px();
+            let (w, h) = (KOOPA_CELL_W as i32, KOOPA_CELL_H as i32);
+            let (cx, cy) = (x - KOOPA_ORIGIN.0 + w / 2, y - KOOPA_ORIGIN.1 + h / 2);
+            commands.spawn((EnemySprite, Sprite::from_image(image.clone()), Transform::from_xyz(cx as f32, -(cy as f32), Z_MICRO)));
         }
     }
     for e in &game.0.enemies {

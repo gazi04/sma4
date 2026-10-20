@@ -37,6 +37,9 @@ const P_MAX: i32 = 0x38;
 /// Target speeds walking uphill: 0x08172C8A[10], with B 0x08172C8A[1] (0x08096884).
 const UPHILL_WALK_MAX: i32 = 0x0D;
 const UPHILL_RUN_MAX: i32 = 0x16;
+/// Target speed with n Micro-Goombas stuck on the player: 0x08172C8A[n] (0x08096884),
+/// for n = 1.. (six projectile slots at most).
+const STUCK_MAX: [i32; 6] = [0x16, 0x15, 0x14, 0x13, 0x12, 0x11];
 /// With slopes, the lowest wall probes sit 8 px above the feet (0x08172DB7: frame y +
 /// 0x18), so the ground under a slope never blocks the feet.
 const SLOPE_WALL_LIFT: i32 = 8;
@@ -207,6 +210,8 @@ pub struct Player {
     pub puff: u8,
     /// Standing on a slope that pushes against the motion (0x03003CE4).
     uphill: bool,
+    /// Micro-Goombas riding the player (0x03007820 + 7), set by the game every frame.
+    pub stuck: u8,
     /// Skidding this frame: the skid pose, and the skid dust follows (0x08097800).
     pub skidding: bool,
 }
@@ -345,12 +350,14 @@ impl Player {
                 self.walk_timer += 1;
                 if run { UPHILL_RUN_MAX } else { UPHILL_WALK_MAX }
             }
+            _ if self.stuck > 0 => STUCK_MAX[(self.stuck as usize).min(STUCK_MAX.len()) - 1],
             (false, _) => WALK_MAX,
             (true, false) => RUN_MAX,
             (true, true) => P_MAX,
         };
-        // P-meter input (+0x53) and take-off permission (+0x1F); not uphill.
-        if run && self.on_ground && !self.uphill {
+        // P-meter input (+0x53) and take-off permission (+0x1F); not uphill, nor with
+        // Micro-Goombas on.
+        if run && self.on_ground && !self.uphill && self.stuck == 0 {
             self.running = speed.abs() >= RUN_MAX;
             if speed.abs() >= WALK_MAX && dir != 0 && dir == speed.signum() && self.p_timer == 0 && self.p_meter > 0x3E {
                 self.fly_ready = true;

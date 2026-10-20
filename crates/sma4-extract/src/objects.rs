@@ -297,36 +297,55 @@ pub fn extract_koopas(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> 
 
 /// Paragoomba 0x73: draw 0x08053D88 = the Goomba body (0x080484C4: frame +0x17, OBJ
 /// palette +0x21) and two wings (tile 0x108, or 0x107 while +0x3C bit 3 is set) 10 px up.
-/// Stomped, it becomes 0x72 with its palette (+0x21 = 0x0816A770[0x73] & 7) kept, drawn
-/// by 0x080484C4 alone (frame 3 = flattened, state 7).
-const PARAGOOMBA: u16 = 0x73;
+/// Stomped, it becomes 0x72 with its palette (+0x21 = 0x0816A770[type] & 7) kept, drawn
+/// by 0x080484C4 alone (frame 3 = flattened, state 7). The Micro-Goomba dropper 0x74
+/// (main 0x0805425C) uses the same draw.
+const PARAGOOMBAS: [u16; 2] = [0x73, 0x74];
 const FN_DRAW_PARAGOOMBA: u32 = 0x0805_3D88;
 const FN_DRAW_GOOMBA_BODY: u32 = 0x0804_84C4;
 
-pub fn extract_paragoomba(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+pub fn extract_paragoomba(
+    rom: &Rom,
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     use sma4_assets::{PARAGOOMBA_CELLS, paragoomba_cell, paragoomba_path};
-    let pal = rom.u8(OBJ_PALETTES + PARAGOOMBA as u32)? & 7;
-    let mut bytes = Vec::new();
-    for body in 0..2u8 {
-        for wings_up in [false, true] {
-            debug_assert_eq!(paragoomba_cell(body as usize, wings_up), bytes.len());
-            bytes.push(vec![(0x17, body), (0x3C, if wings_up { 8 } else { 0 })]);
+    for kind in PARAGOOMBAS {
+        let pal = rom.u8(OBJ_PALETTES + kind as u32)? & 7;
+        let mut bytes = Vec::new();
+        for body in 0..2u8 {
+            for wings_up in [false, true] {
+                debug_assert_eq!(paragoomba_cell(body as usize, wings_up), bytes.len());
+                bytes.push(vec![(0x17, body), (0x3C, if wings_up { 8 } else { 0 })]);
+            }
         }
+        for frame in [0u8, 1, 3] {
+            bytes.push(vec![(0x17, frame), (0x21, pal)]);
+        }
+        let poses: Vec<Pose> = bytes
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let (kind, draw) = if i < 4 {
+                    (kind, FN_DRAW_PARAGOOMBA)
+                } else {
+                    (WALKER as u16, FN_DRAW_GOOMBA_BODY)
+                };
+                Pose {
+                    kind,
+                    state: 2,
+                    draw,
+                    bytes: b,
+                    globals: &[],
+                }
+            })
+            .collect();
+        debug_assert_eq!(poses.len(), PARAGOOMBA_CELLS as usize);
+        oam::render(m, rom.bytes(), &poses)?
+            .write_png(&paragoomba_path(out_dir, kind))
+            .map_err(|e| ExtractError(e.to_string()))?;
+        println!("  paragoomba {kind:#x}: {} frames", poses.len());
     }
-    for frame in [0u8, 1, 3] {
-        bytes.push(vec![(0x17, frame), (0x21, pal)]);
-    }
-    let poses: Vec<Pose> = bytes
-        .iter()
-        .enumerate()
-        .map(|(i, b)| {
-            let (kind, draw) = if i < 4 { (PARAGOOMBA, FN_DRAW_PARAGOOMBA) } else { (WALKER as u16, FN_DRAW_GOOMBA_BODY) };
-            Pose { kind, state: 2, draw, bytes: b, globals: &[] }
-        })
-        .collect();
-    debug_assert_eq!(poses.len(), PARAGOOMBA_CELLS as usize);
-    oam::render(m, rom.bytes(), &poses)?.write_png(&paragoomba_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
-    println!("  paragoomba 0x73: {} frames", poses.len());
     Ok(())
 }
 
@@ -430,6 +449,66 @@ fn extract_fireball(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Re
         bytes.iter().map(|b| Pose { kind: 0, state: 0, draw: FN_DRAW_FIREBALL, bytes: b, globals: &globals }).collect();
     oam::render(m, rom.bytes(), &poses)?.write_png(&fireball_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
     println!("  fireball: {} frames", poses.len());
+    Ok(())
+}
+
+/// Micro-Goomba (projectile type 6, handler 0x0808D95C, draw 0x0808D7E0): one 8x8 OBJ,
+/// tile 0x16F, palette 1, h-flipped while 0x03003CF6 bit 4 is set; once shaken off (+0x14
+/// negative) it falls upside down in palette 3. Like the fireball, it takes the OAM entry
+/// 0x08088EAC hands out (0xCCD = 0x20: entry 102).
+const FN_DRAW_MICRO_GOOMBA: u32 = 0x0808_D7E0;
+const MICRO_GOOMBA_TYPE: u8 = 6;
+const FRAME_COUNTER: u32 = 0x0300_3CF6;
+
+pub fn extract_micro_goomba(
+    rom: &Rom,
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
+    use sma4_assets::{MICRO_GOOMBA_CELLS, micro_goomba_path};
+    // Cells: falling (flip 0, 1), shaken off.
+    let poses_in = [(0u8, 0u8), (0, 0x10), (0xFF, 0)];
+    let bytes: Vec<[(u32, u8); 7]> = poses_in
+        .iter()
+        .map(|&(state, _)| {
+            [
+                (0x05, oam::AT as u8),
+                (0x08, 0),
+                (0x09, 0),
+                (0x0E, MICRO_GOOMBA_TYPE),
+                (0x14, state),
+                (0xCCD, FIREBALL_OAM),
+                (0xCD2, 0),
+            ]
+        })
+        .collect();
+    let globals: Vec<[(u32, u8); 4]> = poses_in
+        .iter()
+        .map(|&(_, flip)| {
+            [
+                (PAUSED, 0),
+                (PLAYER_SCRATCH + 1, 0),
+                (PLAYER_SCRATCH + 2, 0x08),
+                (FRAME_COUNTER, flip),
+            ]
+        })
+        .collect();
+    let poses: Vec<Pose> = bytes
+        .iter()
+        .zip(&globals)
+        .map(|(b, g)| Pose {
+            kind: 0,
+            state: 0,
+            draw: FN_DRAW_MICRO_GOOMBA,
+            bytes: b,
+            globals: g,
+        })
+        .collect();
+    debug_assert_eq!(poses.len(), MICRO_GOOMBA_CELLS as usize);
+    oam::render(m, rom.bytes(), &poses)?
+        .write_png(&micro_goomba_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))?;
+    println!("  micro-goomba: {} frames", poses.len());
     Ok(())
 }
 

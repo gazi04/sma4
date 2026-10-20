@@ -7,6 +7,11 @@
 //! * Paragoomba 0x73 (main 0x08053E9C): walks like a Goomba, hops three times (speed byte
 //!   0xF0), then high (0xD0) and rests 0x50 frames on the ground; stomped, it becomes a
 //!   Goomba 0x72 that keeps its own palette.
+//! * Micro-Goomba Paragoomba 0x74 (main 0x0805425C, phases 0x0816E5BC): walks, flies up
+//!   until 0x38 px above the player, hovers 0x80 frames dropping a Micro-Goomba every
+//!   0x20 frames (projectile type 6, `MicroGoomba`), drops back down and walks 0x80 frames.
+//! * In slope tilesets (World 1-2's hills) the floor test is 0x08045ABC's: the feet probe's
+//!   height map, following the slope down by +0x33 px when the floor drops away.
 //! * Init 0x080533A0: faces the player (direction table 0x0816E568, side test 0x08049F48).
 //! * Contact 0x080493AC -> 0x08048F80: stomp if the player is high enough, else 0x08048E8C.
 //! * Stomp 0x08048B3C: player bounces (0x0809D7C8). Goomba -> squished (state 7, 16
@@ -37,6 +42,8 @@ pub const RED_KOOPA: u16 = 0x6D;
 pub const PARATROOPA: u16 = 0x6E;
 /// Paragoomba: hops and flutters; loses its wings when stomped.
 pub const PARAGOOMBA: u16 = 0x73;
+/// Brown Paragoomba that drops Micro-Goombas (World 1-2).
+pub const MICRO_PARAGOOMBA: u16 = 0x74;
 /// Green Piranha Plant: comes 0x19 px out of its pipe.
 pub const PIRANHA: u16 = 0xA0;
 /// Red Piranha Plant: comes 0x21 px out.
@@ -47,10 +54,42 @@ pub const FIRE_PIRANHA: u16 = 0xA4;
 /// 0xA5 / 0xA7 and the red Venus Fire Trap 0xA6 are not ported yet).
 pub const PIRANHA_TYPES: [u16; 3] = [PIRANHA, RED_PIRANHA, FIRE_PIRANHA];
 /// Enemy types implemented so far.
-pub const SUPPORTED: [u16; 8] = [WALKER, KOOPA, RED_KOOPA, PARATROOPA, PARAGOOMBA, PIRANHA, RED_PIRANHA, FIRE_PIRANHA];
+pub const SUPPORTED: [u16; 9] =
+    [WALKER, KOOPA, RED_KOOPA, PARATROOPA, PARAGOOMBA, MICRO_PARAGOOMBA, PIRANHA, RED_PIRANHA, FIRE_PIRANHA];
 
 /// 8/16 px per frame.
 const WALK_SPEED: i32 = 8 * 16;
+/// 0x0816E586[2..]: the walk speed while the last floor value (+0x3E) is negative.
+const SLOPE_WALK_SPEED: i32 = 6 * 16;
+/// Frames between two turns of a Goomba at a wall (+0x27).
+const TURN_WAIT: u8 = 0x10;
+/// Goomba walk cycle (main 0x08053704): +0x35 += 0x0816E581[(0xC02 + 2) & 0xFF] each frame,
+/// +0x3A += 1 on the carry, frame (+0x3A >> 2) & 1. The ROM indexes with the floor value
+/// 0xC02 (see `Enemy::floor`), -15..15, so the table runs past its five entries.
+const WALK_STEP: [u8; 18] = [0xFF, 0xC0, 0x80, 0x60, 0x40, 0xF8, 0x08, 0xFA, 0x06, 0xFB, 0x05, 0xF0, 0x10, 0xF4, 0x0C, 0xF7, 0x09, 0x06];
+/// The same table at (0xC02 + 2) & 0xFF = 0xF3..0xFF.
+const WALK_STEP_WRAPPED: [u8; 13] = [0x99, 0x67, 0x05, 0x08, 0xA9, 0x67, 0x05, 0x08, 0xDD, 0x67, 0x05, 0x08, 0x35];
+/// Slope steepness per shape (0x0816955C): -2 / +2 at 45 degrees, -1 / +1 gentle, 0 flat,
+/// `NO_FLOOR` for shapes the enemies' floor test ignores (ceilings and the like).
+const SLOPE_DIR: [i8; sma4_assets::SLOPE_SHAPES] =
+    [0, -2, 2, 0, 0, NO_FLOOR, NO_FLOOR, 0, 0, NO_FLOOR, 0, NO_FLOOR, -1, -1, 1, 1, NO_FLOOR, NO_FLOOR, NO_FLOOR, NO_FLOOR, NO_FLOOR];
+const NO_FLOOR: i8 = -0x80;
+
+/// 0x0816955C: a slope shape's steepness, or `None` if it has no floor.
+pub fn slope_dir(shape: u8) -> Option<i8> {
+    let d = SLOPE_DIR[shape as usize];
+    (d != NO_FLOOR).then_some(d)
+}
+/// 0x08045ABC lands an enemy on a slope once its feet are this deep in the tile, or at the
+/// height map.
+const SLOPE_DEEP: i32 = 0xB;
+/// Ground under a slope (0x08045ABC -> 0x08045430): feet on one of these ids move up to
+/// 1 px above the tile and test again, which is how an enemy climbs onto a slope.
+const SLOPE_FILL_IDS: [u8; 4] = [0xA8, 0xAA, 0x37, 0xAB];
+/// Probe offsets 0x08169E78 (dy, dx) for class 8 (Goombas): walls (9, 0) / (9, 15); in a
+/// slope tileset, after a frame on the ground, (2, 1) / (2, 14) (class 0x68).
+const WALL_PROBE: (i32, i32, i32) = (9, 0, 15);
+const SLOPE_WALL_PROBE: (i32, i32, i32) = (2, 1, 14);
 // Shared object gravity (0x08049EC0): speed byte += 0x08169D9E[0] = 3 each frame, capped
 // at 0x08169D9C[0] = 64 while falling (1/16 px per frame; water uses 1 and 16, not ported).
 const GRAVITY: i32 = 3 * 16;
@@ -68,6 +107,22 @@ const PARA_HOPS: u8 = 4;
 const PARA_REST: u8 = 0x50;
 /// On the ground it turns toward the player when its counter +0x3A is a multiple of 0x40.
 const PARA_TURN_MASK: u32 = 0x3F;
+/// Micro-Goomba Paragoomba (0x0805425C): phase timer +0x23 = 0x80 on every phase change;
+/// the wings rise for the last 0x20 frames on the ground. Phase 0 gravity is 0x08049EC0's
+/// +3 (to 0x40) then -2.
+const MICRO_PARA_PHASE: u8 = 0x80;
+const MICRO_PARA_WINGS_UP: u8 = 0x20;
+const MICRO_PARA_LIFT: i32 = 2 * 16;
+const MICRO_PARA_MAX_FALL: i32 = 0x40 * 16;
+/// Phase 1 rises at speed byte -0x10 (moved twice a frame) until 0x38 px above the player,
+/// then slows by 1 a frame; phase 2 bobs at +/-8, flipping every 16 frames of +0x3A.
+const MICRO_PARA_RISE: i32 = -0x10 * 16;
+const MICRO_PARA_HEIGHT: u8 = 0x37;
+const MICRO_PARA_BOB: i32 = 8 * 16;
+/// Flying speed (0x08053FBC): toward +/-0x14 (0x0816E576) by 1 a frame (0x0816E574); faces
+/// the player every 0x40 frames of +0x1D.
+const MICRO_PARA_FLY: i32 = 0x14 * 16;
+const MICRO_PARA_DROP_MASK: u8 = 0x1F;
 const SIZE: i32 = 16;
 /// Stomp check in 0x08048F80: the enemy counts as stomped when the player's 32 px frame is
 /// at least 19 px above it, i.e. the player's feet are within its top 13 px.
@@ -193,6 +248,28 @@ pub struct Enemy {
     wings_drawn: u8,
     /// A Goomba that was a Paragoomba: it keeps the Paragoomba's palette (+0x21).
     pub was_para: bool,
+    /// Floor value 0xC02 of this frame's floor test (0x08045ABC): on a slope tile, the
+    /// feet's depth in the tile (y & 15, before the snap), negated while moving left; 0
+    /// elsewhere. The Goomba keeps last frame's in +0x3E for its speed.
+    floor: i8,
+    floor_seen: i8,
+    /// +0x33: px to follow the slope down when the floor drops away under the feet.
+    slope_drop: i32,
+    /// Stood on the ground last frame (0x03007848 + 0xBE7 bit 2): picks the wall probes.
+    grounded: bool,
+    /// Goomba turn cooldown +0x27 (main 0x08053704).
+    turn_wait: u8,
+    /// Goomba walk cycle: +0x35 accumulator and +0x3A counter.
+    walk_acc: u8,
+    walk_count: u8,
+    /// Micro-Goomba Paragoomba: phase +0x3B, facing right (+0x1A bit 6), its flight turn
+    /// counter +0x1D and the body frame its draw picked this frame (+0x17).
+    phase: u8,
+    pub facing_right: bool,
+    drift: u8,
+    body: u8,
+    /// Micro-Goomba dropped this frame; the game puts it in a free projectile slot.
+    pub dropped: Option<MicroGoomba>,
 }
 
 /// What touching an enemy did this frame.
@@ -208,9 +285,11 @@ pub enum Contact {
     HurtPlayer,
 }
 
-/// Direction toward the player (0x08049F48 side test): +1 if the player is to the right.
-fn toward(player: &Player, x_px: i32) -> i32 {
-    if player.centre().0 >= x_px + SIZE / 2 { 1 } else { -1 }
+/// Direction toward the player (0x08049F48 side test): +1 if the left of the player's
+/// 16x32 frame is at or right of the object's `x` (1/256 px, subpixels included).
+fn toward(player: &Player, x: i32) -> i32 {
+    let frame_x = player.frame().0 * SUB + player.x.rem_euclid(SUB);
+    if frame_x >= x { 1 } else { -1 }
 }
 
 impl Enemy {
@@ -231,7 +310,7 @@ impl Enemy {
             kind,
             x: x * SUB,
             y: y * SUB,
-            vx: toward(player, x) * WALK_SPEED,
+            vx: toward(player, x * SUB) * WALK_SPEED,
             vy: 0,
             state: EnemyState::Walking,
             age: 0,
@@ -252,6 +331,18 @@ impl Enemy {
             wings: 0,
             wings_drawn: 0,
             was_para: false,
+            floor: 0,
+            floor_seen: 0,
+            slope_drop: 0,
+            grounded: false,
+            turn_wait: 0,
+            walk_acc: 0,
+            walk_count: 0,
+            phase: 0,
+            facing_right: toward(player, x * SUB) > 0,
+            drift: 0,
+            body: 0,
+            dropped: None,
         }
     }
 
@@ -282,6 +373,18 @@ impl Enemy {
             wings: 0,
             wings_drawn: 0,
             was_para: false,
+            floor: 0,
+            floor_seen: 0,
+            slope_drop: 0,
+            grounded: false,
+            turn_wait: 0,
+            walk_acc: 0,
+            walk_count: 0,
+            phase: 0,
+            facing_right: false,
+            drift: 0,
+            body: 0,
+            dropped: None,
         }
     }
 
@@ -314,8 +417,10 @@ impl Enemy {
     pub fn step(&mut self, level: &Level, player: &Player, frame: u32) -> bool {
         self.age = self.age.wrapping_add(1);
         self.grace = self.grace.saturating_sub(1);
+        self.turn_wait = self.turn_wait.saturating_sub(1);
         self.wall_hit = None;
         self.spit = None;
+        self.dropped = None;
         match self.state {
             EnemyState::Squished(t) => {
                 self.state = EnemyState::Squished(t - 1);
@@ -323,14 +428,33 @@ impl Enemy {
             }
             EnemyState::Walking if self.kind == RED_KOOPA => self.walk_red(level),
             EnemyState::Walking if self.kind == PARAGOOMBA => self.step_paragoomba(level, player),
+            EnemyState::Walking if self.kind == MICRO_PARAGOOMBA => self.step_micro_paragoomba(level, player),
             EnemyState::Walking => {
-                if self.move_x(level) {
-                    self.vx = -self.vx;
+                // Main 0x08053704: speed 0x0816E586[direction, +2 if +0x3E < 0].
+                if self.vx != 0 {
+                    self.vx = self.vx.signum() * if self.floor_seen < 0 { SLOPE_WALK_SPEED } else { WALK_SPEED };
                 }
+                let wall = self.move_x(level);
                 let landed = self.fall(level);
+                if wall {
+                    // With slopes the wall is only flagged; a Goomba (0x0816AAF7 bit 1)
+                    // steps back out of it after the floor test, turning at most once
+                    // every 0x10 frames (+0x27).
+                    if level.has_slopes() && matches!(self.kind, WALKER | KOOPA) {
+                        self.x -= self.vx;
+                        if self.turn_wait == 0 {
+                            self.turn_wait = TURN_WAIT;
+                            self.vx = -self.vx;
+                        }
+                    } else {
+                        self.vx = -self.vx;
+                    }
+                }
                 if self.kind == PARATROOPA {
                     self.vy = if landed { HOP_SPEED } else { self.vy - HOP_LIFT };
                 }
+                self.floor_seen = self.floor;
+                self.walk_cycle(landed);
             }
             EnemyState::Shell(t) => self.shell(level, player, t, frame),
             EnemyState::Kicked => {
@@ -412,10 +536,12 @@ impl Enemy {
         // The object loop counts the timer down; the draw comes before the counters move.
         self.hop_timer = self.hop_timer.saturating_sub(1);
         self.wings_drawn = self.wings;
-        // 0x08049EC0 gravity, then one less (+0x12 - 1).
-        self.vy = (self.vy + GRAVITY).min(MAX_FALL) - HOP_LIFT;
+        // 0x08049EC0: move, collide, gravity; then one less (+0x12 - 1).
         let wall = self.move_x(level);
-        let landed = self.drop(level);
+        let old_bottom = self.px().1 + SIZE;
+        self.y += self.vy;
+        let landed = self.land(level, old_bottom);
+        self.vy = (self.vy + GRAVITY).min(MAX_FALL) - HOP_LIFT;
         // Wings beat faster while it rises from the high hop.
         if self.hops == 0 && self.vy < 0 {
             self.wings = self.wings.wrapping_add(2);
@@ -423,8 +549,10 @@ impl Enemy {
         self.wings = self.wings.wrapping_add(1);
         if landed {
             if self.age & PARA_TURN_MASK == 0 {
-                self.vx = toward(player, self.px().0) * WALK_SPEED;
+                self.vx = toward(player, self.x) * WALK_SPEED;
             }
+            // 0x08045384 snaps it to the ground.
+            self.vy = 0;
             if self.hops == 0 {
                 self.wings = 0;
             }
@@ -443,6 +571,143 @@ impl Enemy {
         if wall {
             self.vx = -self.vx;
         }
+    }
+
+    /// Goomba walk cycle (main 0x08053704): the step depends on the floor value; off the
+    /// ground +0x3A is held at 1.
+    fn walk_cycle(&mut self, landed: bool) {
+        let i = (self.floor as i32 + 2) as u8;
+        let step = match i {
+            0..=17 => WALK_STEP[i as usize],
+            0xF3.. => WALK_STEP_WRAPPED[(i - 0xF3) as usize],
+            _ => 0,
+        };
+        let acc = self.walk_acc.wrapping_add(step);
+        if acc <= self.walk_acc {
+            self.walk_count = self.walk_count.wrapping_add(1);
+        }
+        self.walk_acc = acc;
+        if !landed {
+            self.walk_count = 1;
+        }
+    }
+
+    /// Micro-Goomba Paragoomba main 0x0805425C. The draw (body frame from +0x3A & 8, wings
+    /// from +0x3C) runs before the phase handler.
+    fn step_micro_paragoomba(&mut self, level: &Level, player: &Player) {
+        self.hop_timer = self.hop_timer.saturating_sub(1);
+        self.wings_drawn = self.wings;
+        // TODO(re): the mask is 0x0816E57E[0xC02 of the last floor test], 8 off slopes.
+        self.body = (self.walk_count & 8 != 0) as u8;
+        let old_bottom = self.px().1 + SIZE;
+        match self.phase {
+            // 0x08054084: walk like a Goomba, take off when the timer runs out.
+            0 => {
+                self.walk_count = self.walk_count.wrapping_add(1);
+                self.vx = if self.facing_right { WALK_SPEED } else { -WALK_SPEED };
+                let wall = self.move_x(level);
+                self.y += self.vy;
+                let landed = self.land(level, old_bottom);
+                // 0x08049EC0: gravity after the move, then 2 less.
+                self.vy = (self.vy + GRAVITY).min(MICRO_PARA_MAX_FALL) - MICRO_PARA_LIFT;
+                if landed {
+                    if self.walk_count as u32 & PARA_TURN_MASK == 0 {
+                        self.facing_right = toward(player, self.x) > 0;
+                    }
+                    self.vy = 0;
+                    if self.hop_timer == 0 {
+                        self.phase = 1;
+                    } else {
+                        self.wings = if self.hop_timer >= MICRO_PARA_WINGS_UP { 0 } else { 8 };
+                    }
+                } else {
+                    self.wings = 8;
+                }
+                if wall {
+                    self.facing_right = !self.facing_right;
+                }
+            }
+            // 0x08054120: rise (moved twice a frame) until 0x38 px above the player.
+            1 => {
+                self.wings = self.wings.wrapping_add(3);
+                let dy = player.frame().1 - self.px().1;
+                if dy >= 0 && dy as u8 > MICRO_PARA_HEIGHT {
+                    let was = self.vy;
+                    self.vy += 16;
+                    if was == -16 {
+                        self.next_phase();
+                        return;
+                    }
+                } else {
+                    self.vy = MICRO_PARA_RISE;
+                }
+                self.y += self.vy;
+                self.fly(level, player, old_bottom);
+            }
+            // 0x080541C4: hover, bobbing, dropping a Micro-Goomba every 0x20 frames.
+            _ => {
+                if self.hop_timer == 0 {
+                    self.phase = 0;
+                    self.hop_timer = MICRO_PARA_PHASE;
+                }
+                self.wings = self.wings.wrapping_add(2);
+                self.walk_count = self.walk_count.wrapping_add(1);
+                if self.walk_count & MICRO_PARA_DROP_MASK == 0 {
+                    // 0x08054028: projectile type 6 at the body + (4, 4).
+                    self.dropped = Some(MicroGoomba::new(self.x + 4 * SUB, self.y + 4 * SUB));
+                }
+                self.vy = if self.walk_count & 0x10 == 0 { MICRO_PARA_BOB } else { -MICRO_PARA_BOB };
+                self.fly(level, player, old_bottom);
+            }
+        }
+    }
+
+    /// +0x3B += 1 with the phase timer at 0x80.
+    fn next_phase(&mut self) {
+        self.phase += 1;
+        self.hop_timer = MICRO_PARA_PHASE;
+    }
+
+    /// 0x08053FBC and the flying phases' collision: speed toward 0x14 the way it faces, a
+    /// turn toward the player every 0x40 frames of +0x1D, move; land (back to phase 0),
+    /// walls (reverse), ceiling (stop rising and hover).
+    fn fly(&mut self, level: &Level, player: &Player, old_bottom: i32) {
+        let target = if self.facing_right { MICRO_PARA_FLY } else { -MICRO_PARA_FLY };
+        if self.vx != target {
+            self.vx += if self.facing_right { 16 } else { -16 };
+        }
+        self.drift = self.drift.wrapping_add(1);
+        if self.drift & 0x3F == 0 {
+            self.facing_right = toward(player, self.x) > 0;
+        }
+        let wall = self.move_x(level);
+        self.y += self.vy;
+        if self.land(level, old_bottom) {
+            self.vy = 0;
+            self.phase = 0;
+            self.hop_timer = MICRO_PARA_PHASE;
+        }
+        if wall {
+            self.vx = -self.vx;
+            self.facing_right = !self.facing_right;
+        }
+        if self.vy < 0 && self.ceiling(level) {
+            self.vy = 0;
+            if self.phase == 1 {
+                self.next_phase();
+            }
+        }
+    }
+
+    /// Head probe (0, 8) in a solid tile: pushed down below it.
+    fn ceiling(&mut self, level: &Level) -> bool {
+        let (px, py) = self.px();
+        let ty = py.div_euclid(TILE_PX);
+        if level.at((px + 8).div_euclid(TILE_PX), ty) != TileKind::Solid {
+            return false;
+        }
+        self.y = (ty + 1) * TILE_PX * SUB;
+        true
     }
 
     /// Course clear (0x0806833C): a live enemy turns into a puff of smoke (its coin is
@@ -467,7 +732,7 @@ impl Enemy {
         if t == 0 {
             // Wakes up walking toward the player (0x08044720, direction 0x08169488).
             self.state = EnemyState::Walking;
-            self.vx = toward(player, self.px().0) * WALK_SPEED;
+            self.vx = toward(player, self.x) * WALK_SPEED;
             self.flipped = false;
             return;
         }
@@ -515,6 +780,9 @@ impl Enemy {
         if self.vx == 0 {
             return false;
         }
+        if level.has_slopes() {
+            return self.slope_wall(level);
+        }
         let (px, py) = self.px();
         let rows = (py + 2).div_euclid(TILE_PX)..=(py + SIZE - 2).div_euclid(TILE_PX);
         let front = if self.vx > 0 { px + SIZE - 1 } else { px };
@@ -526,18 +794,43 @@ impl Enemy {
         false
     }
 
-    /// Gravity and landing; returns true if standing on ground after the move.
+    /// Fall and land, then gravity (0x08049EC0: move, collide, speed += 3 up to 0x40);
+    /// returns true if standing on ground after the move.
     fn fall(&mut self, level: &Level) -> bool {
-        self.vy = (self.vy + GRAVITY).min(MAX_FALL);
-        self.drop(level)
+        let landed = self.drop(level);
+        if !landed {
+            self.vy = (self.vy + GRAVITY).min(MAX_FALL);
+        }
+        landed
+    }
+
+    /// The wall probe of a slope tileset (0x08045ABC): one point, high up the body after a
+    /// frame on the ground so the slope underfoot never counts. Nothing is pushed out.
+    fn slope_wall(&self, level: &Level) -> bool {
+        let (dy, left, right) = if self.grounded { SLOPE_WALL_PROBE } else { WALL_PROBE };
+        let (px, py) = self.px();
+        let x = px + if self.vx > 0 { right } else { left };
+        level.at(x.div_euclid(TILE_PX), (py + dy).div_euclid(TILE_PX)) == TileKind::Solid
     }
 
     /// Moves by `vy` and lands on the ground below.
     fn drop(&mut self, level: &Level) -> bool {
-        let old_bottom = self.px().1 + SIZE;
+        let old_bottom = self.px().1 + self.height();
         self.y += self.vy;
+        self.land(level, old_bottom)
+    }
+
+    /// Lands on the ground under the box if it is falling onto it; `old_bottom` is the
+    /// bottom before this frame's move.
+    fn land(&mut self, level: &Level, old_bottom: i32) -> bool {
+        if level.has_slopes() {
+            self.floor = 0;
+            self.grounded = self.vy >= 0 && (self.slope_floor(level) || self.follow_slope_down(level));
+            return self.grounded;
+        }
         let (px, py) = self.px();
-        let ty = (py + SIZE).div_euclid(TILE_PX);
+        let h = self.height();
+        let ty = (py + h).div_euclid(TILE_PX);
         let top = ty * TILE_PX;
         let cols = (px + 2).div_euclid(TILE_PX)..=(px + SIZE - 3).div_euclid(TILE_PX);
         let lands = cols.into_iter().any(|tx| match level.at(tx, ty) {
@@ -546,11 +839,70 @@ impl Enemy {
             TileKind::Empty => false,
         });
         if lands && self.vy >= 0 {
-            self.y = (top - SIZE) * SUB;
+            self.y = (top - h) * SUB;
             self.vy = 0;
             return true;
         }
         false
+    }
+
+    /// Feet below the object's y (probe offsets 0x08169E78: feet (0x10, 8)).
+    pub fn height(&self) -> i32 {
+        SIZE
+    }
+
+    /// 0x08045ABC's floor in a slope tileset: the feet probe (16, 8) in a tile at least
+    /// top-solid, whose shape has a floor (0x0816955C != 0x80), lands the enemy once the
+    /// feet reach the height map (or are more than 11 px into the tile), and snaps it there
+    /// (0x08045384). It also sets the floor value 0xC02 and the slope follow +0x33 =
+    /// (speed byte >> 4, or 1 when 0) down the slope.
+    fn slope_floor(&mut self, level: &Level) -> bool {
+        let (px, mut py) = self.px();
+        let h = self.height();
+        let (fx, mut ty) = (px + SIZE / 2, (py + h).div_euclid(TILE_PX));
+        let tx = fx.div_euclid(TILE_PX);
+        while level.collision_id(tx, ty).is_some_and(|id| SLOPE_FILL_IDS.contains(&id)) && ty > 0 {
+            py = py.div_euclid(TILE_PX) * TILE_PX - 1;
+            self.y = py * SUB;
+            ty = (py + h).div_euclid(TILE_PX);
+        }
+        if level.at(tx, ty) == TileKind::Empty {
+            return false;
+        }
+        let shape = level.slope(tx, ty);
+        let dir = SLOPE_DIR[shape as usize];
+        if dir == NO_FLOOR {
+            return false;
+        }
+        let depth = py.rem_euclid(TILE_PX);
+        let height = level.slope_height(shape, fx);
+        if depth <= SLOPE_DEEP && depth < height {
+            return false;
+        }
+        self.y = (py - depth + height) * SUB;
+        self.vy = 0;
+        let follow = match (self.vx / 16) >> 4 {
+            0 => 1,
+            v => v,
+        };
+        self.slope_drop = match dir {
+            0 => 0,
+            d if d < 0 => -follow,
+            _ => follow,
+        };
+        self.floor = if self.vx < 0 { -depth as i8 } else { depth as i8 };
+        true
+    }
+
+    /// 0x0804545C: no floor under the feet; once, move down by +0x33 px and test again
+    /// (0x08045DF4), so an enemy walking down a slope stays on it.
+    fn follow_slope_down(&mut self, level: &Level) -> bool {
+        if self.slope_drop == 0 {
+            return false;
+        }
+        self.y += self.slope_drop * SUB;
+        self.slope_drop = 0;
+        self.slope_floor(level)
     }
 
     fn overlaps_box(&self, x: i32, y: i32, w: i32, h: i32) -> bool {
@@ -595,6 +947,12 @@ impl Enemy {
                         self.vy = 0;
                         self.was_para = true;
                     }
+                    // 0x0816966C[0x74] = 0x72 too; its palette is the Goomba's.
+                    MICRO_PARAGOOMBA => {
+                        self.kind = WALKER;
+                        self.vy = 0;
+                        self.vx = if self.facing_right { WALK_SPEED } else { -WALK_SPEED };
+                    }
                     _ => self.state = EnemyState::Shell(SHELL_TIMER),
                 }
                 Contact::Stomped
@@ -609,13 +967,13 @@ impl Enemy {
                 Contact::Stomped
             }
             // 0x08048D88: a sliding shell only hurts when it moves toward the player.
-            EnemyState::Kicked if (self.vx > 0) != (toward(player, self.px().0) > 0) => Contact::None,
+            EnemyState::Kicked if (self.vx > 0) != (toward(player, self.x) > 0) => Contact::None,
             _ => Contact::HurtPlayer,
         }
     }
 
     fn kick(&mut self, player: &Player) {
-        let mut speed = -toward(player, self.px().0) * KICK_SPEED;
+        let mut speed = -toward(player, self.x) * KICK_SPEED;
         let pv = player.vx / 16;
         if speed * pv > 0 {
             speed += pv >> 1;
@@ -644,7 +1002,7 @@ impl Enemy {
             self.puff();
             return true;
         }
-        let away = -toward(player, self.px().0);
+        let away = -toward(player, self.x);
         if self.is_koopa() {
             if self.kind == PARATROOPA {
                 self.kind = KOOPA;
@@ -693,6 +1051,9 @@ impl Enemy {
             (EnemyState::Walking, PARAGOOMBA) => {
                 sma4_assets::paragoomba_cell(((frame >> 3) & 1) as usize, self.wings_drawn & 8 != 0)
             }
+            (EnemyState::Walking, MICRO_PARAGOOMBA) => sma4_assets::paragoomba_cell(self.body as usize, self.wings_drawn & 8 != 0),
+            // 0x08053704: frame (+0x3A >> 2) & 1.
+            (EnemyState::Walking, WALKER) => ((self.walk_count >> 2) & 1) as usize,
             (EnemyState::Walking, _) => (self.age / 8 % 2) as usize,
             (EnemyState::Shell(t), _) => {
                 let legs = t < SHELL_LEGS_BELOW && t & SHELL_LEG_MASKS[(t >> 4) as usize] != 0;
@@ -836,18 +1197,158 @@ impl Fireball {
 
     /// 0x0808CC9C: touches the player.
     pub fn touches(&self, player: &Player) -> bool {
+        projectile_touches(self.px(), player)
+    }
+}
+
+/// 0x0808CC9C: a projectile at `(x, y)` px touches the player.
+fn projectile_touches((x, y): (i32, i32), player: &Player) -> bool {
+    let (fx, fy) = player.frame();
+    let big = (player.form != crate::player::Form::Small) as usize;
+    let dy = (y - fy - FIRE_TOP[big] + 8) as u16;
+    let dx = (x - fx + 6) as u16;
+    dy < FIRE_H[big] as u16 && dx < FIRE_W as u16
+}
+
+/// Projectile slots 0x03007848 + 0x8EC + i * 0x18 (six in all) shared by fireballs and
+/// Micro-Goombas; 0x0808C8FC gives a Micro-Goomba the first free one from the top.
+pub const PROJECTILE_SLOTS: usize = 6;
+
+/// A Micro-Goomba dropped by the 0x74 Paragoomba: projectile type 6, handler 0x0808D95C.
+/// It sways down to the ground; touching the player it sticks (0x0808CAEC: +0x14 = 5)
+/// and rides along, holding the player's speed down, until enough button presses shake it
+/// off; then it falls upside down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MicroGoomba {
+    /// Top-left of its 8x8 OBJ, 1/256 px (+0 / +4).
+    pub x: i32,
+    pub y: i32,
+    /// Speeds in 1/16 px per frame (+0x0A / +0x08).
+    vx: i32,
+    vy: i32,
+    /// +0x14: 0 falling, 1-5 stuck to the player (presses left to shake it off), negative
+    /// shaken off.
+    pub state: i8,
+    /// +0x13: sway phase while falling, the ride's wobble while stuck.
+    count: u8,
+}
+
+/// Falling (0x0808D95C, state 0): down to 0x10 by 1 a frame, swaying by 1 a frame between
+/// +/-0x10 (0x08170B02 / 0x08170B04). Shaken off (0x0808D910 / 0x0808D0E4): speed -0x20 up,
+/// +/-8 across, then +2 a frame down to 0x6E.
+const MICRO_FALL: i32 = 0x10;
+const MICRO_SWAY: i32 = 0x10;
+const MICRO_OFF_VY: i32 = -0x20;
+const MICRO_OFF_VX: i32 = 8;
+const MICRO_OFF_FALL: i32 = 0x6E;
+/// Stuck: 0x0808CAEC sets 5; +1 every 16 frames (back to 5), -1 per press.
+const MICRO_GRIP: i8 = 5;
+/// Buttons whose press shakes it (0x03003AEC's low byte: A, B, Select, Start, the pad).
+const MICRO_SHAKE: u16 = 0xFF;
+
+impl MicroGoomba {
+    /// 0x08054028: dropped at `(x, y)` (1/256 px), still.
+    pub fn new(x: i32, y: i32) -> Self {
+        Self { x, y, vx: 0, vy: 0, state: 0, count: 0 }
+    }
+
+    pub fn px(&self) -> (i32, i32) {
+        (self.x >> 8, self.y >> 8)
+    }
+
+    pub fn stuck(&self) -> bool {
+        self.state > 0
+    }
+
+    /// Cell of `sma4_assets::micro_goomba_path`: the OBJ flips every 16 frames (0x03003CF6
+    /// bit 4); shaken off it falls upside down.
+    pub fn cell(&self, frame: u32) -> usize {
+        if self.state < 0 {
+            sma4_assets::MICRO_GOOMBA_OFF
+        } else if frame & 0x10 != 0 {
+            sma4_assets::MICRO_GOOMBA_FLIP
+        } else {
+            0
+        }
+    }
+
+    /// One frame (0x0808FB08 -> 0x0808D95C). `pressed` are this frame's new buttons;
+    /// `can_stick` is false while the player cannot be hit (0x0808CAEC). Returns false once
+    /// it has left the screen (x more than 8 px off either side, or more than 0xEC px
+    /// below the view's top; above it is fine for this type).
+    pub fn step(&mut self, player: &Player, camera: (i32, i32), frame: u32, pressed: u16, can_stick: bool) -> bool {
         let (x, y) = self.px();
+        if !(-8..0xF8).contains(&(x - camera.0)) || y - camera.1 + 0x14 >= 0x100 {
+            return false;
+        }
+        match self.state {
+            0 => {
+                self.x += self.vx * 16;
+                self.y += self.vy * 16;
+                if self.vy < MICRO_FALL {
+                    self.vy += 1;
+                }
+                let right = self.count & 1 == 0;
+                self.vx += if right { 1 } else { -1 };
+                if self.vx == if right { MICRO_SWAY } else { -MICRO_SWAY } {
+                    self.count = self.count.wrapping_add(1);
+                }
+                // The draw's touch test (0x0808CC9C -> 0x0808CAEC).
+                if can_stick && projectile_touches(self.px(), player) {
+                    self.state = MICRO_GRIP;
+                }
+            }
+            s if s < 0 => {
+                self.x += self.vx * 16;
+                self.y += self.vy * 16;
+                if self.vy < MICRO_OFF_FALL {
+                    self.vy += 2;
+                }
+            }
+            s => {
+                if s < MICRO_GRIP && frame & 0xF == 0 {
+                    self.state += 1;
+                }
+                if pressed & MICRO_SHAKE != 0 {
+                    self.state -= 1;
+                    if self.state == 0 {
+                        self.shake_off();
+                    }
+                }
+                self.ride(player);
+            }
+        }
+        true
+    }
+
+    /// 0x0808D95C while stuck: wobbles over the player's frame, 0-15 px down (8-15 for a
+    /// small player) and -3..12 px across, on a triangle of +0x13.
+    fn ride(&mut self, player: &Player) {
+        self.count = self.count.wrapping_add(1);
+        let tri = |v: u8| if v > 15 { (v ^ 0xF) & 0xF } else { v } as i32;
+        let mut dy = tri((self.count >> 2) & 0x1F);
+        if player.form == crate::player::Form::Small {
+            dy = (dy >> 1) + 8;
+        }
+        let dx = tri(self.count & 0x1F) - 3;
         let (fx, fy) = player.frame();
-        let big = (player.form != crate::player::Form::Small) as usize;
-        let dy = (y - fy - FIRE_TOP[big] + 8) as u16;
-        let dx = (x - fx + 6) as u16;
-        dy < FIRE_H[big] as u16 && dx < FIRE_W as u16
+        self.x = (fx + dx) * SUB;
+        self.y = (fy + dy) * SUB;
+    }
+
+    /// 0x0808D910.
+    // TODO(re): the ROM picks the side from the random bits 0x03003879[slot] & 0x80.
+    fn shake_off(&mut self) {
+        self.state = -1;
+        self.vy = MICRO_OFF_VY;
+        self.vx = if self.count & 1 == 0 { MICRO_OFF_VX } else { -MICRO_OFF_VX };
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::Buttons;
 
     /// 30x8 level with ground on the last row, a wall at column 20 and a ledge: no ground
     /// under columns 24-25.
@@ -1235,5 +1736,139 @@ mod tests {
         assert_eq!(active.len(), 2);
         sp.spawn_near(&player, &mut active);
         assert_eq!(active.len(), 2);
+    }
+
+    /// A player standing on the floor of `level()` with the left of its frame at `x`.
+    fn player_at(x: i32) -> Player {
+        let p0 = Player::spawn(0, 0);
+        let (ox, oy) = (p0.px().0 - p0.frame().0, p0.px().1 - p0.frame().1);
+        Player::spawn(x + ox, 7 * TILE_PX - 32 + oy)
+    }
+
+    #[test]
+    fn goomba_climbs_over_a_hill_and_follows_the_slope_down() {
+        let lvl = crate::level::test_hill();
+        let p = player_at(40 * TILE_PX);
+        let mut e = Enemy::spawn_at(WALKER, 2 * TILE_PX, 6 * TILE_PX, &p);
+        let mut top = i32::MAX;
+        for f in 0..900 {
+            e.step(&lvl, &p, f);
+            top = top.min(e.px().1);
+            let (x, y) = e.px();
+            // On the flat top (feet probe in columns 9-12) it stands on row 4.
+            if (9 * TILE_PX..12 * TILE_PX).contains(&(x + 8)) {
+                assert_eq!(y + SIZE, 4 * TILE_PX, "on the hilltop at x {x}");
+            }
+        }
+        assert_eq!(top, 4 * TILE_PX - SIZE, "reached the top");
+        assert!(e.px().0 > 16 * TILE_PX, "over the hill: {:?}", e.px());
+        assert_eq!(e.px().1 + SIZE, 7 * TILE_PX, "back on the ground");
+    }
+
+    #[test]
+    fn goomba_walks_slower_on_a_slope_moving_left() {
+        let lvl = crate::level::test_hill();
+        let p = player_at(0);
+        // Walking left down the far side of the hill: the floor value is negative.
+        let mut e = Enemy::spawn_at(WALKER, 16 * TILE_PX, 6 * TILE_PX, &p);
+        let mut speeds = std::collections::BTreeSet::new();
+        for f in 0..200 {
+            e.step(&lvl, &p, f);
+            speeds.insert(e.vx.abs());
+        }
+        assert_eq!(speeds.into_iter().collect::<Vec<_>>(), [SLOPE_WALK_SPEED, WALK_SPEED]);
+    }
+
+    #[test]
+    fn micro_paragoomba_flies_above_the_player_and_drops_micro_goombas() {
+        let lvl = level();
+        let p = player_at(4 * TILE_PX);
+        let (_, fy) = p.frame();
+        let mut e = Enemy::spawn_at(MICRO_PARAGOOMBA, 8 * TILE_PX, 6 * TILE_PX, &p);
+        let mut drops = Vec::new();
+        let mut highest = i32::MAX;
+        let mut landed_again = None;
+        for f in 0..400 {
+            e.step(&lvl, &p, f);
+            highest = highest.min(e.px().1);
+            if let Some(m) = e.dropped {
+                // Dropped from where the body was before this frame's move.
+                let (dx, dy) = (m.px().0 - e.px().0, m.px().1 - e.px().1);
+                assert!((3..=5).contains(&dx) && (3..=5).contains(&dy), "{:?} {:?}", m.px(), e.px());
+                drops.push(f);
+            }
+            if landed_again.is_none() && !drops.is_empty() && e.px().1 == 6 * TILE_PX {
+                landed_again = Some(f);
+            }
+        }
+        // Up until 0x38 px above the player's frame, then it slows to a stop (16 frames).
+        assert!(fy - highest > MICRO_PARA_HEIGHT as i32, "rose to {highest}, player at {fy}");
+        // Hovering 0x80 frames: a Micro-Goomba every 0x20 frames.
+        assert!(drops[..4].windows(2).all(|w| w[1] - w[0] == 0x20), "{drops:?}");
+        // Then it comes back down, walks out the 0x80 timer and flies off again.
+        let landed = landed_again.expect("comes back down");
+        assert!(drops[3] < landed && drops[4] > landed, "{drops:?}, landed at {landed}");
+    }
+
+    #[test]
+    fn stomping_a_micro_paragoomba_leaves_a_goomba() {
+        let lvl = level();
+        let p = far_player();
+        let mut e = Enemy::spawn_at(MICRO_PARAGOOMBA, 8 * TILE_PX, 6 * TILE_PX, &p);
+        e.step(&lvl, &p, 0);
+        let (ex, ey) = e.px();
+        let jumper = Player::spawn(ex, ey + 4 - 16);
+        assert_eq!(e.contact(&jumper), Contact::Stomped, "{e:?}");
+        assert_eq!(e.kind, WALKER);
+        assert!(!e.was_para, "brown like any Goomba");
+    }
+
+    #[test]
+    fn micro_goomba_sways_down_sticks_to_the_player_and_is_shaken_off() {
+        let p = player_at(100);
+        let (fx, fy) = p.frame();
+        let mut m = MicroGoomba::new((fx + 4) * SUB, (fy - 40) * SUB);
+        let camera = (0, 0);
+        let mut xs = Vec::new();
+        let mut f = 0;
+        while !m.stuck() {
+            assert!(m.step(&p, camera, f, 0, true));
+            xs.push(m.px().0);
+            f += 1;
+            assert!(f < 200, "never reached the player");
+        }
+        // It swayed both ways on the way down.
+        assert!(xs.iter().max() > xs.iter().min());
+        assert_eq!(m.state, MICRO_GRIP);
+        // Riding: it stays over the player's frame.
+        for _ in 0..40 {
+            m.step(&p, camera, f, 0, true);
+            let (x, y) = m.px();
+            assert!((fx - 3..=fx + 12).contains(&x) && (fy..=fy + 15).contains(&y), "{:?}", m.px());
+            f += 1;
+        }
+        // Five presses, quicker than the grip comes back (+1 every 16 frames).
+        for _ in 0..5 {
+            m.step(&p, camera, f, Buttons::A.bits(), true);
+            f += 1;
+        }
+        assert!(m.state < 0, "shaken off: {}", m.state);
+        let y = m.px().1;
+        for _ in 0..60 {
+            m.step(&p, camera, f, 0, true);
+            f += 1;
+        }
+        assert!(m.px().1 > y, "falls away");
+    }
+
+    #[test]
+    fn micro_goomba_does_not_stick_while_the_player_cannot_be_hit() {
+        let p = player_at(100);
+        let (fx, fy) = p.frame();
+        let mut m = MicroGoomba::new((fx + 4) * SUB, (fy + 12) * SUB);
+        for f in 0..10 {
+            m.step(&p, (0, 0), f, 0, false);
+        }
+        assert!(!m.stuck());
     }
 }

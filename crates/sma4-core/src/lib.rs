@@ -56,6 +56,8 @@ pub struct Game {
     pub enemies: Vec<Enemy>,
     /// Fireballs from Venus Fire Traps (projectile slots 0x03007848 + 0x8EC).
     pub fireballs: Vec<enemies::Fireball>,
+    /// Micro-Goombas from the 0x74 Paragoomba (the same projectile slots).
+    pub micro_goombas: Vec<enemies::MicroGoomba>,
     pub spawner: Spawner,
     /// Frames of invulnerability left after taking a hit.
     pub invulnerable: u16,
@@ -124,6 +126,7 @@ impl Game {
         self.spawner = Spawner::new(enemies);
         self.enemies.clear();
         self.fireballs.clear();
+        self.micro_goombas.clear();
         self.invulnerable = 0;
         self.spawn = spawn;
         self.player = Player::spawn(spawn.0, spawn.1);
@@ -500,16 +503,30 @@ impl Game {
             e.spits_twice = twice;
             e.step(level, player, frame)
         });
-        // 0x08055938 takes a free slot among the first four, or does not spit.
+        // 0x08055938 takes a free slot among the first four, or does not spit; 0x0808C8FC
+        // gives a Micro-Goomba any free slot.
         for e in &mut self.enemies {
+            let used = self.fireballs.len() + self.micro_goombas.len();
             if let Some(f) = e.spit.take()
                 && self.fireballs.len() < enemies::FIREBALL_SLOTS
+                && used < enemies::PROJECTILE_SLOTS
             {
                 self.fireballs.push(f);
+            }
+            if let Some(m) = e.dropped.take()
+                && used < enemies::PROJECTILE_SLOTS
+            {
+                self.micro_goombas.push(m);
             }
         }
         let camera = self.camera();
         self.fireballs.retain_mut(|f| f.step(camera));
+        // 0x0808FBD0 counts the Micro-Goombas riding the player (0x03007820 + 7) for the
+        // next frame's speed limit (0x08096884).
+        let (player, pressed) = (&self.player, self.input.pressed.bits());
+        let can_stick = self.invulnerable == 0 && !player.transforming();
+        self.micro_goombas.retain_mut(|m| m.step(player, camera, frame, pressed, can_stick));
+        self.player.stuck = self.micro_goombas.iter().filter(|m| m.stuck()).count() as u8;
         for ((x, y), chain) in enemies::shell_hits(&mut self.enemies, frame) {
             self.status.chain_popup(x, y, chain);
         }
@@ -648,6 +665,34 @@ mod tests {
     }
 
     /// Flat level with a question block, using the ROM's tileset-1 rules.
+    #[test]
+    fn a_micro_goomba_on_the_player_holds_its_speed_down_until_shaken_off() {
+        let mut g = Game::new();
+        g.enter_level(block_level((40, 2)), (2 * TILE_PX, 9 * TILE_PX - 16), &[]);
+        g.step(Buttons::empty());
+        let (fx, fy) = g.player.frame();
+        // Dropped right onto the player.
+        g.micro_goombas = vec![enemies::MicroGoomba::new((fx + 4) * 256, (fy + 14) * 256)];
+        let run = Buttons::RIGHT | Buttons::B;
+        for _ in 0..90 {
+            g.step(run);
+        }
+        assert_eq!(g.player.stuck, 1);
+        assert_eq!(g.player.vx / 16, 0x16, "0x08172C8A[1]: below the walk speed, no running");
+        assert_eq!(g.player.p_meter, 0, "no P-meter while carrying it");
+        // Each new press of a button loosens it (it tightens again every 16 frames): five
+        // and then some shake it off.
+        for _ in 0..8 {
+            g.step(run | Buttons::A);
+            g.step(run);
+        }
+        assert_eq!(g.player.stuck, 0);
+        for _ in 0..60 {
+            g.step(run);
+        }
+        assert!(g.player.vx / 16 > 0x18, "runs again: {:#x}", g.player.vx / 16);
+    }
+
     fn block_level(block: (usize, usize)) -> Level {
         let (w, h) = (24, 10);
         let mut m = vec![SKY; w * h];

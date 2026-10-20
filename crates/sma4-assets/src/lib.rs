@@ -123,14 +123,14 @@ impl Default for Solidity {
 }
 
 impl Solidity {
+    /// The id a metatile collides as; `None` for second-plane ids with special handlers.
+    pub fn id(&self, metatile: u16) -> Option<u8> {
+        if metatile >= 0x100 { self.high.get(metatile as u8 as usize).copied() } else { Some(metatile as u8) }
+    }
+
     pub fn kind(&self, metatile: u16) -> TileKind {
-        let id = if metatile >= 0x100 {
-            match self.high.get(metatile as u8 as usize) {
-                Some(&id) => id,
-                None => return TileKind::Empty,
-            }
-        } else {
-            metatile as u8
+        let Some(id) = self.id(metatile) else {
+            return TileKind::Empty;
         };
         let q = (id >> 6) as usize;
         if id >= self.solid[q] {
@@ -912,13 +912,14 @@ pub const KOOPA_SHELL: usize = 2;
 pub const KOOPA_SHELL_WAKING: usize = 3;
 pub const KOOPA_SPIN: usize = 4;
 
-/// Paragoomba (type 0x73, draw 0x08053D88): `KOOPA_CELL_W` x `KOOPA_CELL_H` cells, the
+/// Paragoombas (red 0x73, brown Micro-Goomba dropper 0x74; draw 0x08053D88), one sheet
+/// per type: `KOOPA_CELL_W` x `KOOPA_CELL_H` cells, the
 /// 16x16 box top-left at `KOOPA_ORIGIN`. Cells 0-3: `paragoomba_cell` (body walk frame x
 /// wings 0x108 / 0x107, two 8x16 OBJs 10 px up, at x - 2 and x + 10, the right one
 /// h-flipped); then the Goomba it turns into when stomped, which keeps its palette
 /// (+0x21): walk frames 0/1 (`PARAGOOMBA_GOOMBA`) and flattened (`PARAGOOMBA_SQUISHED`).
-pub fn paragoomba_path(dir: &Path) -> PathBuf {
-    dir.join("objects").join("paragoomba.png")
+pub fn paragoomba_path(dir: &Path, kind: u16) -> PathBuf {
+    dir.join("objects").join(format!("paragoomba_{kind:02x}.png"))
 }
 pub fn paragoomba_cell(body: usize, wings_up: bool) -> usize {
     body * 2 + wings_up as usize
@@ -954,6 +955,17 @@ pub fn fireball_path(dir: &Path) -> PathBuf {
     dir.join("objects").join("fireball.png")
 }
 pub const FIREBALL_FRAMES: u32 = 4;
+
+/// Micro-Goomba (projectile type 6, draw 0x0808D7E0): `KOOPA_CELL_W` x `KOOPA_CELL_H`
+/// cells, the projectile's position (top-left of its 8x8 OBJ) at `KOOPA_ORIGIN`. Cells:
+/// falling or stuck (`MICRO_GOOMBA_FLIP` h-flipped, the ROM flips it every 16 frames),
+/// then shaken off (`MICRO_GOOMBA_OFF`: upside down, palette 3).
+pub fn micro_goomba_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("micro_goomba.png")
+}
+pub const MICRO_GOOMBA_FLIP: usize = 1;
+pub const MICRO_GOOMBA_OFF: usize = 2;
+pub const MICRO_GOOMBA_CELLS: u32 = 3;
 
 /// Puff of smoke left by an enemy knocked out that has no body to fall (object state 8,
 /// e.g. a Piranha Plant hit by the tail): four 16x16 cells in the order they are shown.

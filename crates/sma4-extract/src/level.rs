@@ -241,7 +241,7 @@ pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_lis
     let enemies = rom
         .enemy_list(enemy_list)?
         .into_iter()
-        .map(|e| EnemySpawn { kind: e.kind as u16, col: e.col as u16, row: e.row })
+        .map(|e| EnemySpawn { kind: e.kind, col: e.col as u16, row: e.row })
         .collect::<Vec<_>>();
 
     let distinct = metatiles.iter().collect::<std::collections::HashSet<_>>().len();
