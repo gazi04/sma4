@@ -1,7 +1,7 @@
 //! The live level grid: metatiles that can change during play (hit blocks), with
 //! collision derived from the tileset's solidity thresholds.
 
-use sma4_assets::{BlockRules, SLOPE_SHAPES, Slopes, Solidity, TileKind};
+use sma4_assets::{BlockRules, Junction, SLOPE_SHAPES, Slopes, Solidity, TileKind};
 
 pub const TILE_PX: i32 = 16;
 
@@ -17,6 +17,13 @@ pub struct Level {
     pub rules: BlockRules,
     /// Cells changed since the renderer last drained this list.
     pub changed: Vec<(usize, usize)>,
+    /// Level id (0x03003B0A) of this area, so views know which assets to draw.
+    pub id: u16,
+    /// Where its pipes lead.
+    pub junction: Option<Junction>,
+    /// Camera limits the ROM sets for this area: x (min, max), and a fixed y.
+    pub camera_x: Option<(i32, i32)>,
+    pub camera_y: Option<i32>,
     /// Slope collision, in tilesets with slopes.
     pub slopes: Option<Slopes>,
 }
@@ -24,11 +31,31 @@ pub struct Level {
 impl Level {
     pub fn new(width: usize, height: usize, metatiles: Vec<u16>, solidity: Solidity, rules: BlockRules) -> Self {
         assert_eq!(metatiles.len(), width * height);
-        Self { width, height, metatiles, solidity, rules, changed: Vec::new(), slopes: None }
+        Self {
+            width,
+            height,
+            metatiles,
+            solidity,
+            rules,
+            changed: Vec::new(),
+            id: 0,
+            junction: None,
+            camera_x: None,
+            camera_y: None,
+            slopes: None,
+        }
     }
 
     pub fn with_slopes(mut self, slopes: Option<Slopes>) -> Self {
         self.slopes = slopes;
+        self
+    }
+
+    /// The area's id, pipe destination and camera limits.
+    pub fn with_area(mut self, id: u16, junction: Option<Junction>, camera_x: Option<(i32, i32)>) -> Self {
+        self.id = id;
+        self.junction = junction;
+        self.camera_x = camera_x;
         self
     }
 

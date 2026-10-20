@@ -65,6 +65,9 @@ const PUFF_CELLS: [usize; 4] = [3, 2, 0, 1];
 #[derive(Component)]
 struct PlayerSprite;
 
+/// Behind the level's tilemaps (z 0), over the background scene.
+pub(crate) const Z_BEHIND_TILES: f32 = -2.0;
+
 fn spawn_player(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMut<Assets<Image>>) {
     let mut load = |form| load_cells(&sma4_assets::player_path(&dir.0, form), PLAYER_W, PLAYER_H, &mut images);
     let frames = Frames {
@@ -111,7 +114,9 @@ fn sync_sprite(
     let feet = top + p.height();
     let half_body = PLAYER_BODY_W as i32 / 2;
     let centre_x = if p.facing_left { cx - half_body + PLAYER_W as i32 / 2 } else { cx + half_body - PLAYER_W as i32 / 2 };
-    transform.translation = Vec3::new(centre_x as f32, -((feet - PLAYER_H as i32 / 2) as f32), 10.0);
+    // In a pipe, the pipe's tiles cover the player (0x0809BA58).
+    let z = if game.0.pipe.is_some() { Z_BEHIND_TILES } else { 10.0 };
+    transform.translation = Vec3::new(centre_x as f32, -((feet - PLAYER_H as i32 / 2) as f32), z);
     sprite.flip_x = !p.facing_left;
     // Blink while invulnerable after a hit.
     let hidden = game.0.invulnerable > 0 && (game.0.invulnerable / 4) % 2 == 1;
@@ -168,9 +173,17 @@ fn follow_camera(
     let c = player_centre(&game);
     let level_w = map.pixel_width() as f32;
     let level_h = map.pixel_height() as f32;
-    let x = c.x.clamp(half_w, (level_w - half_w).max(half_w));
+    let mut x = c.x.clamp(half_w, (level_w - half_w).max(half_w));
     // Bottom of the level stays at the bottom of the view; taller views show more sky.
-    let y = c.y.clamp(-(level_h - half_h), (-half_h).max(-(level_h - half_h)));
+    let mut y = c.y.clamp(-(level_h - half_h), (-half_h).max(-(level_h - half_h)));
+    // Areas where the ROM sets the camera limits (the coin room): the core's camera.
+    let (gx, gy) = game.0.camera();
+    if map.camera_x.is_some() {
+        x = (gx + SCREEN_W as i32 / 2) as f32;
+    }
+    if map.camera_y.is_some() {
+        y = -((gy + SCREEN_H as i32 / 2) as f32);
+    }
     transform.translation.x = x.round();
     transform.translation.y = y.round();
 }

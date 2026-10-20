@@ -28,9 +28,10 @@ const Z_BUMP: f32 = 4.0;
 #[derive(Resource)]
 pub struct LevelRes(pub LevelAsset);
 
-/// Debug: start column for the player (`--spawn-col`), instead of the default.
+/// Debug: start column for the player (`--spawn-col`), instead of the default, and the
+/// row to stand on (`--spawn-row`).
 #[derive(Resource, Default)]
-pub struct SpawnColumn(pub Option<i32>);
+pub struct SpawnColumn(pub Option<i32>, pub Option<i32>);
 
 /// Debug: a score popup over the player at the start (`--popup`).
 #[derive(Resource, Default)]
@@ -63,7 +64,7 @@ pub struct LevelPlugin;
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, (spawn_level, load_item_art, load_coin_frames, load_sparkle_frames, load_skid_dust_frames))
-            .add_systems(Update, (debug_popup, load_pending_level))
+            .add_systems(Update, (debug_popup, load_pending_level, load_pending_area, follow_area).chain())
             .add_systems(Update, (sync_tiles, animate_tiles, sync_bumps, sync_items, sync_coins, sync_sparkles, sync_skid_dust))
             .add_systems(Update, sync_background.after(crate::player::CameraMoved));
     }
@@ -192,7 +193,9 @@ fn spawn_tilemaps(commands: &mut Commands, images: &mut Assets<Image>, level: &L
 }
 
 fn core_level(level: &LevelAsset) -> Level {
+    let camera_x = level.camera_x.map(|(a, b)| (a as i32, b as i32));
     Level::new(level.width, level.height, level.metatiles.clone(), level.solidity, level.rules.clone())
+        .with_area(level.level_id, level.junction.clone(), camera_x)
         .with_slopes(level.slopes.clone())
 }
 
@@ -207,9 +210,11 @@ fn spawn_level(
     let level = &level.0;
     spawn_tilemaps(&mut commands, &mut images, level);
     let core_level = core_level(level);
-    let spawn = match spawn_col.and_then(|c| c.0) {
-        Some(col) => spawn_point(&core_level, col),
-        None => start_point(level),
+    let spawn = match spawn_col.map(|c| (c.0, c.1)) {
+        // Centred on the column's right edge: the middle of a pipe starting there.
+        Some((Some(col), Some(row))) => ((col + 1) * sma4_core::level::TILE_PX - 6, row * sma4_core::level::TILE_PX - 16),
+        Some((Some(col), None)) => spawn_point(&core_level, col),
+        _ => start_point(level),
     };
     game.0.enter_level(core_level, spawn, &level.enemies);
     game.0.set_time_limit(level.time_limit);
@@ -271,6 +276,62 @@ fn load_pending_level(
 
 /// Pushes cells the game changed (hit blocks, collected coins) into the tilemaps; redraws
 /// everything when the level was restored (a new attempt from the map).
+/// A pipe led to the level's other area (0x08005690): load it and come out of its pipe.
+/// Without the area's asset, the player just climbs back out.
+fn load_pending_area(
+    mut commands: Commands,
+    mut game: ResMut<GameRes>,
+    dir: Res<crate::AssetDir>,
+    mut level_res: ResMut<LevelRes>,
+    mut images: ResMut<Assets<Image>>,
+    old: Query<Entity, With<LevelTiles>>,
+) {
+    let Some(to) = game.0.pending_area.take() else { return };
+    let level = match LevelAsset::read(&dir.0, to.level) {
+        Ok(l) => l,
+        Err(e) => {
+            warn!("{e} (re-run sma4-extract to get the areas behind pipes)");
+            game.0.pipe = None;
+            return;
+        }
+    };
+    for e in &old {
+        commands.entity(e).despawn();
+    }
+    spawn_tilemaps(&mut commands, &mut images, &level);
+    let core = core_level(&level);
+    game.0.enter_area(core, &level.enemies, &to);
+    level_res.0 = level;
+}
+
+/// The game went back to another area by itself (a new attempt after a lost life in a
+/// pipe's room restarts the level): draw that one.
+fn follow_area(
+    mut commands: Commands,
+    game: Res<GameRes>,
+    dir: Res<crate::AssetDir>,
+    mut level_res: ResMut<LevelRes>,
+    mut images: ResMut<Assets<Image>>,
+    old: Query<Entity, With<LevelTiles>>,
+) {
+    let id = game.0.level.id;
+    if game.0.level.width == 0 || id == level_res.0.level_id {
+        return;
+    }
+    let level = match LevelAsset::read(&dir.0, id) {
+        Ok(l) => l,
+        Err(e) => {
+            warn!("{e}");
+            return;
+        }
+    };
+    for e in &old {
+        commands.entity(e).despawn();
+    }
+    spawn_tilemaps(&mut commands, &mut images, &level);
+    level_res.0 = level;
+}
+
 fn sync_tiles(
     mut game: ResMut<GameRes>,
     mut generation: Local<u32>,
@@ -282,7 +343,8 @@ fn sync_tiles(
     let (w, h) = (level.width, level.height);
     if restored {
         level.changed.clear();
-        for mut tiles in &mut maps {
+        // Tilemaps of the area being left (despawned at the end of the frame) are skipped.
+        for mut tiles in maps.iter_mut().filter(|t| t.0.len() == w * h) {
             for ty in 0..h {
                 for tx in 0..w {
                     tiles.0[(h - 1 - ty) * w + tx] = tile(level.metatile(tx as i32, ty as i32).unwrap_or(SKY));
@@ -296,7 +358,7 @@ fn sync_tiles(
     }
     for (tx, ty) in std::mem::take(&mut level.changed) {
         let m = level.metatile(tx as i32, ty as i32).unwrap_or(SKY);
-        for mut tiles in &mut maps {
+        for mut tiles in maps.iter_mut().filter(|t| t.0.len() == w * h) {
             // Tile data is stored bottom row first.
             tiles.0[(h - 1 - ty) * w + tx] = tile(m);
         }

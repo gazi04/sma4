@@ -18,7 +18,8 @@ use sma4_rom::{Rom, gfx};
 const USAGE: &str = "usage: sma4-extract <rom.gba> [--out <dir>] [--level <id>:<tileset>:<enemies> ...]
   --out    output directory (default assets/extracted)
   --level  level to extract: hex level id, tileset, hex enemy-list id; repeatable
-           (default: every course level of World 1's map, 1-1 first)";
+           (default: every course level of World 1's map, 1-1 first)
+           areas behind pipes (each level's alternate area) are extracted as well";
 
 const SHEET_COLS: usize = 32;
 
@@ -85,11 +86,28 @@ fn run(args: &Args) -> Result<(), String> {
     } else {
         args.levels.clone()
     };
-    for (n, &(id, tileset, enemies)) in levels.iter().enumerate() {
-        let asset = level::extract(&rom, &mut m, id, tileset, enemies).map_err(|e| {
-            format!("level {id:#x} ({:#010x}): {}", level::level_addr(&rom, id), e.0)
-        })?;
+    let course_levels = levels.len();
+    let mut levels = levels;
+    let mut n = 0;
+    while n < levels.len() {
+        let (id, tileset, enemies) = levels[n];
+        let asset = match level::extract(&rom, &mut m, id, tileset, enemies) {
+            Ok(a) => a,
+            // A pipe's area that does not load is skipped (its pipe then stays shut).
+            Err(e) if n >= course_levels => {
+                println!("  level {id:#x} ({:#010x}): {}, skipped", level::level_addr(&rom, id), e.0);
+                levels.remove(n);
+                continue;
+            }
+            Err(e) => return Err(format!("level {id:#x} ({:#010x}): {}", level::level_addr(&rom, id), e.0)),
+        };
         asset.write(&args.out).map_err(|e| e.to_string())?;
+        // Areas behind pipes (the header's alternate level) are extracted too.
+        if let Some(j) = &asset.junction
+            && !levels.iter().any(|l| l.0 == j.level)
+        {
+            levels.push((j.level, j.tileset, j.enemies));
+        }
         // Object graphics are loaded by the same routines; take them after the first level.
         if n == 0 {
             objects::extract_coin(&rom, &m, &args.out).map_err(|e| e.0)?;
@@ -118,6 +136,7 @@ fn run(args: &Args) -> Result<(), String> {
             screens::extract_game_over(rom.bytes(), &mut m, &args.out).map_err(|e| e.0)?;
             screens::extract_game_over_menu(&mut m, &args.out).map_err(|e| e.0)?;
         }
+        n += 1;
     }
 
     let sheets = extract_gfx(&rom, args)?;

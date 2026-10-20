@@ -8,6 +8,7 @@ pub mod enemies;
 pub mod goal;
 pub mod input;
 pub mod level;
+pub mod pipes;
 pub mod player;
 pub mod screens;
 pub mod world_map;
@@ -19,6 +20,7 @@ pub use enemies::{Contact, Enemy, EnemyState, Spawner};
 pub use goal::{EndCoin, Goal};
 pub use input::Buttons;
 pub use level::Level;
+pub use pipes::{AreaRequest, Pipe};
 pub use player::{Form, Player};
 pub use screens::{Dying, GameOver, GameOverMenu, MenuChoice, Screen};
 pub use status::{ScorePopup, Status};
@@ -83,6 +85,10 @@ pub struct Game {
     pub world_map: Option<WorldMap>,
     /// A spot entered on the map: the host loads its level and calls `play`.
     pub pending_level: Option<sma4_assets::MapNode>,
+    /// The player in a pipe (drawn behind the tiles meanwhile); everything else waits.
+    pub pipe: Option<Pipe>,
+    /// A pipe led to the other area: the host loads it and calls `enter_area`.
+    pub pending_area: Option<AreaRequest>,
 }
 
 // TODO(re): the ROM's post-hit invulnerability length (player flashing) is not decoded yet.
@@ -131,6 +137,26 @@ impl Game {
         self.goal_camera = None;
         self.end_coins.clear();
         self.end_coin_chain = 0;
+        self.pipe = None;
+        self.pending_area = None;
+    }
+
+    /// Arrives through a pipe in the other area of the level (0x08005690): its objects
+    /// and enemies, the player coming out of the pipe the pointer names. The clock, the
+    /// form and the level to restart after a lost life stay as they were.
+    pub fn enter_area(&mut self, level: Level, enemies: &[sma4_assets::EnemySpawn], to: &AreaRequest) {
+        let (start, spawn, player) = (self.start.take(), self.spawn, self.player);
+        self.enter_level(level, spawn, enemies);
+        self.start = start;
+        self.player = player;
+        // The camera the ROM sets on arrival (0x08005290); a room with fixed camera limits
+        // keeps it.
+        if self.level.camera_x.is_some() {
+            self.level.camera_y = Some(to.exit.camera_y as i32);
+        }
+        pipes::place(&mut self.player, &to.exit);
+        self.pipe = Some(Pipe::exit(to.exit.dir));
+        self.level_generation = self.level_generation.wrapping_add(1);
     }
 
     /// Top-left of a GBA-sized view following the player, clamped to the level (the view
@@ -138,8 +164,12 @@ impl Game {
     pub fn camera(&self) -> (i32, i32) {
         let (cx, cy) = self.player.centre();
         let (w, h) = (SCREEN_W as i32, SCREEN_H as i32);
-        let x = (cx - w / 2).clamp(0, (self.level.pixel_width() - w).max(0));
-        let y = (cy - h / 2).clamp(0, (self.level.pixel_height() - h).max(0));
+        let (min_x, max_x) = self.level.camera_x.unwrap_or((0, (self.level.pixel_width() - w).max(0)));
+        let x = (cx - w / 2).clamp(min_x, max_x);
+        let y = match self.level.camera_y {
+            Some(y) => y,
+            None => (cy - h / 2).clamp(0, (self.level.pixel_height() - h).max(0)),
+        };
         (x, y)
     }
 
@@ -381,8 +411,27 @@ impl Game {
             return;
         }
 
+        // In a pipe: only the slide runs (the player is busy, 0x08094BD8, so the clock
+        // holds too); at the end of the way in, the host switches the area.
+        if let Some(pipe) = self.pipe {
+            self.pipe = pipe.step(&mut self.player);
+            if pipe != Pipe::Switching && self.pipe == Some(Pipe::Switching) {
+                self.pending_area = pipes::destination(&self.level, &self.player);
+                if self.pending_area.is_none() {
+                    self.pipe = None;
+                }
+            }
+            return;
+        }
+
         let head_hit = self.player.step(held, self.input.pressed, &self.level, self.frame);
         self.skid_dust.step(&self.player);
+        if !self.player.transforming()
+            && let Some(dir) = pipes::entry(&self.level, &self.player, held)
+        {
+            self.pipe = Some(Pipe::enter(dir));
+            return;
+        }
         if self.player.p_meter & 0x40 != 0 {
             self.p_blink = self.p_blink.wrapping_sub(1);
         }
