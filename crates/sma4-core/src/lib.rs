@@ -59,6 +59,8 @@ pub struct Game {
     /// Micro-Goombas from the 0x74 Paragoomba (the same projectile slots).
     pub micro_goombas: Vec<enemies::MicroGoomba>,
     pub spawner: Spawner,
+    /// Goomba pipes in range (generator slots 0x03007848 + 0xA54).
+    pub goomba_pipes: Vec<enemies::GoombaPipe>,
     /// Frames of invulnerability left after taking a hit.
     pub invulnerable: u16,
     /// Status-bar "P" blink counter (0x03003852), counted down while the P-meter is full.
@@ -127,6 +129,7 @@ impl Game {
         self.enemies.clear();
         self.fireballs.clear();
         self.micro_goombas.clear();
+        self.goomba_pipes.clear();
         self.invulnerable = 0;
         self.spawn = spawn;
         self.player = Player::spawn(spawn.0, spawn.1);
@@ -495,13 +498,21 @@ impl Game {
         }
 
         self.invulnerable = self.invulnerable.saturating_sub(1);
-        self.spawner.spawn_near(&self.player, &mut self.enemies);
+        self.spawner.spawn_near(&self.player, &mut self.enemies, &mut self.goomba_pipes);
+        // Generators run before the objects (0x08090448).
+        for i in 0..self.goomba_pipes.len() {
+            let room = self.enemies.iter().filter(|e| e.from_pipe).count() < enemies::PIPE_GOOMBA_SLOTS;
+            if let Some(e) = self.goomba_pipes[i].step(&self.player, room) {
+                self.enemies.push(e);
+            }
+        }
         // 0x08055B34: past World 1, fire plants spit twice per appearance.
         let twice = self.status.world != 0;
         let (level, player, frame) = (&self.level, &self.player, self.frame);
+        let camera = self.camera();
         self.enemies.retain_mut(|e| {
             e.spits_twice = twice;
-            e.step(level, player, frame)
+            e.step(level, player, frame) && !(e.from_pipe && e.off_screen(camera))
         });
         // 0x08055938 takes a free slot among the first four, or does not spit; 0x0808C8FC
         // gives a Micro-Goomba any free slot.

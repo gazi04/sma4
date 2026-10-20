@@ -44,6 +44,9 @@ pub const PARATROOPA: u16 = 0x6E;
 pub const PARAGOOMBA: u16 = 0x73;
 /// Brown Paragoomba that drops Micro-Goombas (World 1-2).
 pub const MICRO_PARAGOOMBA: u16 = 0x74;
+/// Enemy-list type of the Goomba pipe opening to the right (types >= 0x190 are
+/// generators, 0x0804B768 -> 0x0804B460: generator kind = type - 0x18F = 6).
+pub const GOOMBA_PIPE: u16 = 0x195;
 /// Green Piranha Plant: comes 0x19 px out of its pipe.
 pub const PIRANHA: u16 = 0xA0;
 /// Red Piranha Plant: comes 0x21 px out.
@@ -270,6 +273,11 @@ pub struct Enemy {
     body: u8,
     /// Micro-Goomba dropped this frame; the game puts it in a free projectile slot.
     pub dropped: Option<MicroGoomba>,
+    /// A Goomba coming out of a Goomba pipe: frames left of +0x1C, during which it only
+    /// moves across and is drawn behind the scenery (main 0x08053704, draw 0x08053664).
+    pub emerging: u8,
+    /// Made by a Goomba pipe: removed once off the screen (0x0804A0C4).
+    pub from_pipe: bool,
 }
 
 /// What touching an enemy did this frame.
@@ -343,6 +351,8 @@ impl Enemy {
             drift: 0,
             body: 0,
             dropped: None,
+            emerging: 0,
+            from_pipe: false,
         }
     }
 
@@ -385,6 +395,8 @@ impl Enemy {
             drift: 0,
             body: 0,
             dropped: None,
+            emerging: 0,
+            from_pipe: false,
         }
     }
 
@@ -429,6 +441,12 @@ impl Enemy {
             EnemyState::Walking if self.kind == RED_KOOPA => self.walk_red(level),
             EnemyState::Walking if self.kind == PARAGOOMBA => self.step_paragoomba(level, player),
             EnemyState::Walking if self.kind == MICRO_PARAGOOMBA => self.step_micro_paragoomba(level, player),
+            // 0x08053704 with +0x1C: out of the pipe, across only, the walk cycle +1 a frame.
+            EnemyState::Walking if self.emerging > 0 => {
+                self.emerging -= 1;
+                self.x += self.vx;
+                self.walk_count = self.walk_count.wrapping_add(1);
+            }
             EnemyState::Walking => {
                 // Main 0x08053704: speed 0x0816E586[direction, +2 if +0x3E < 0].
                 if self.vx != 0 {
@@ -1096,6 +1114,68 @@ pub fn shell_hits(enemies: &mut [Enemy], frame: u32) -> Vec<((i32, i32), u16)> {
     out
 }
 
+/// Goomba pipe (generator kind 6, handler 0x0809006C; slots 0x03007848 + 0xA54, eight,
+/// newest first): every 0x70 frames, three times out of four, a Goomba comes out of the
+/// pipe's mouth, 3 px above the entry's row, walking right for 0x28 frames before it
+/// starts to fall and collide; only while the player is to the right of the pipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GoombaPipe {
+    /// The list entry's position, px.
+    pub x: i32,
+    pub y: i32,
+    /// +0x0A: frames to the next Goomba (0x60 at first, 0x0804B460).
+    timer: u8,
+    /// +0x0C: Goombas tried so far; every fourth is skipped.
+    count: u8,
+}
+
+/// Generator slots (0x08090448 runs eight).
+pub const GENERATOR_SLOTS: usize = 8;
+/// Goombas from pipes take object slots 4..0 (0x0804CB98).
+pub const PIPE_GOOMBA_SLOTS: usize = 5;
+const PIPE_FIRST: u8 = 0x60;
+const PIPE_EVERY: u8 = 0x70;
+const PIPE_EMERGE: u8 = 0x28;
+const PIPE_RISE: i32 = 3;
+/// Off-screen removal (0x0804A0C4, table 0x08169DA8): more than 0x120 px right of the
+/// camera, or 0x40 px left of it.
+const OFFSCREEN_RIGHT: i32 = 0x120;
+const OFFSCREEN_LEFT: i32 = 0x40;
+
+impl GoombaPipe {
+    pub fn new(s: &EnemySpawn) -> Self {
+        Self { x: s.col as i32 * TILE_PX, y: s.row as i32 * TILE_PX, timer: PIPE_FIRST, count: 0 }
+    }
+
+    /// One frame (the loop counts the timer down first). `room` is whether one of the
+    /// five object slots is free.
+    pub fn step(&mut self, player: &Player, room: bool) -> Option<Enemy> {
+        self.timer = self.timer.saturating_sub(1);
+        if self.timer != 0 {
+            return None;
+        }
+        self.timer = PIPE_EVERY;
+        self.count = self.count.wrapping_add(1);
+        // 0x08049F48 must say the player is right of the mouth (kind 6; kind 5 = left).
+        if self.count & 3 == 0 || !room || toward(player, self.x * SUB) < 0 {
+            return None;
+        }
+        let mut e = Enemy::spawn_at(WALKER, self.x, self.y - PIPE_RISE, player);
+        e.vx = WALK_SPEED;
+        e.emerging = PIPE_EMERGE;
+        e.from_pipe = true;
+        Some(e)
+    }
+}
+
+impl Enemy {
+    /// 0x0804A0C4: off the screen for good.
+    pub fn off_screen(&self, camera: (i32, i32)) -> bool {
+        let x = self.px().0;
+        x > camera.0 + OFFSCREEN_RIGHT || x < camera.0 - OFFSCREEN_LEFT
+    }
+}
+
 /// Enemy list of a level, spawning entries as the player gets near them.
 #[derive(Debug, Clone, Default)]
 pub struct Spawner {
@@ -1105,20 +1185,26 @@ pub struct Spawner {
 impl Spawner {
     pub fn new(list: &[EnemySpawn]) -> Self {
         // TODO(re): other enemy types.
-        Self { pending: list.iter().copied().filter(|e| SUPPORTED.contains(&e.kind)).collect() }
+        let wanted = |k: &u16| SUPPORTED.contains(k) || *k == GOOMBA_PIPE;
+        Self { pending: list.iter().copied().filter(|e| wanted(&e.kind)).collect() }
     }
 
-    /// Moves list entries that came within range into `active`.
-    pub fn spawn_near(&mut self, player: &Player, active: &mut Vec<Enemy>) {
+    /// Moves list entries that came within range into `active`, Goomba pipes into `pipes`
+    /// (0x0804B460 shifts the eight generator slots and puts the new one first).
+    pub fn spawn_near(&mut self, player: &Player, active: &mut Vec<Enemy>, pipes: &mut Vec<GoombaPipe>) {
         let cx = player.centre().0;
         self.pending.retain(|s| {
             let ex = s.col as i32 * TILE_PX + SIZE / 2;
-            if (ex - cx).abs() <= SPAWN_DISTANCE {
-                active.push(Enemy::spawn(s, player));
-                false
-            } else {
-                true
+            if (ex - cx).abs() > SPAWN_DISTANCE {
+                return true;
             }
+            if s.kind == GOOMBA_PIPE {
+                pipes.insert(0, GoombaPipe::new(s));
+                pipes.truncate(GENERATOR_SLOTS);
+            } else {
+                active.push(Enemy::spawn(s, player));
+            }
+            false
         });
     }
 }
@@ -1732,9 +1818,9 @@ mod tests {
         let mut sp = Spawner::new(&[enemy(WALKER, 5), enemy(WALKER, 28), enemy(0xA6, 6), enemy(KOOPA, 7)]);
         let player = Player::spawn(0, 0);
         let mut active = Vec::new();
-        sp.spawn_near(&player, &mut active);
+        sp.spawn_near(&player, &mut active, &mut Vec::new());
         assert_eq!(active.len(), 2);
-        sp.spawn_near(&player, &mut active);
+        sp.spawn_near(&player, &mut active, &mut Vec::new());
         assert_eq!(active.len(), 2);
     }
 
@@ -1870,5 +1956,49 @@ mod tests {
             m.step(&p, (0, 0), f, 0, false);
         }
         assert!(!m.stuck());
+    }
+
+    #[test]
+    fn goomba_pipe_sends_goombas_out_three_times_in_four_while_the_player_is_right() {
+        let pipe = EnemySpawn { kind: GOOMBA_PIPE, col: 4, row: 5 };
+        let mut g = GoombaPipe::new(&pipe);
+        let right = player_at(12 * TILE_PX);
+        let mut out = Vec::new();
+        for f in 0..(0x60 + 4 * 0x70 - 1) {
+            if let Some(e) = g.step(&right, true) {
+                assert_eq!(e.px(), (4 * TILE_PX, 5 * TILE_PX - 3));
+                assert!(e.from_pipe && e.emerging == PIPE_EMERGE && e.vx > 0);
+                out.push(f + 1);
+            }
+        }
+        // First after 0x60 frames, then every 0x70; the fourth try is skipped.
+        assert_eq!(out, [0x60, 0x60 + 0x70, 0x60 + 2 * 0x70]);
+        // With the player on the pipe's left, or no free slot, nothing comes out.
+        let left = player_at(0);
+        let mut g = GoombaPipe::new(&pipe);
+        assert!((0..0x200).all(|_| g.step(&left, true).is_none()));
+        let mut g = GoombaPipe::new(&pipe);
+        assert!((0..0x200).all(|_| g.step(&right, false).is_none()));
+    }
+
+    #[test]
+    fn a_goomba_from_a_pipe_slides_out_for_0x28_frames_then_falls_and_walks() {
+        let lvl = level();
+        let p = player_at(20 * TILE_PX);
+        let mut g = GoombaPipe::new(&EnemySpawn { kind: GOOMBA_PIPE, col: 4, row: 4 });
+        let mut e = (0..0x100).find_map(|_| g.step(&p, true)).unwrap();
+        let (x0, y0) = e.px();
+        for f in 0..PIPE_EMERGE as u32 {
+            e.step(&lvl, &p, f);
+            assert_eq!(e.px().1, y0, "no gravity while it comes out");
+        }
+        assert_eq!(e.emerging, 0);
+        assert_eq!(e.px().0, x0 + PIPE_EMERGE as i32 / 2, "half a pixel a frame");
+        for f in 0..60 {
+            e.step(&lvl, &p, f);
+        }
+        assert_eq!(e.px().1, 6 * TILE_PX, "landed on the floor");
+        assert!(e.off_screen((e.px().0 - 0x121, 0)) && e.off_screen((e.px().0 + 0x41, 0)));
+        assert!(!e.off_screen((e.px().0 - 0x120, 0)) && !e.off_screen((e.px().0 + 0x40, 0)));
     }
 }

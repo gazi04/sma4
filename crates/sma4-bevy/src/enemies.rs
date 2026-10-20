@@ -27,6 +27,9 @@ impl Plugin for EnemyPlugin {
 }
 
 const Z_ENEMY: f32 = 8.0;
+/// A Goomba coming out of a pipe is drawn behind the scenery (+0x1A bit 4, 0x08053664),
+/// over the background scene.
+const Z_BEHIND: f32 = -1.0;
 /// Riding Micro-Goombas show over the player (0x0808D7E0 uses OBJ priority 1, like it).
 const Z_MICRO: f32 = 10.5;
 
@@ -127,7 +130,8 @@ fn sync_enemies(mut commands: Commands, game: Res<GameRes>, art: Res<Art>, old: 
             let (w, h) = (KOOPA_CELL_W as i32, KOOPA_CELL_H as i32);
             (x - KOOPA_ORIGIN.0 + w / 2, y - KOOPA_ORIGIN.1 + h / 2 + if dead { 16 } else { 0 })
         };
-        commands.spawn((EnemySprite, sprite, Transform::from_xyz(cx as f32, -(cy as f32), Z_ENEMY)));
+        let z = if e.emerging > 0 { Z_BEHIND } else { Z_ENEMY };
+        commands.spawn((EnemySprite, sprite, Transform::from_xyz(cx as f32, -(cy as f32), z)));
     }
 }
 
