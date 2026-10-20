@@ -50,9 +50,8 @@ pub fn load_cells(path: &std::path::Path, w: u32, h: u32, images: &mut Assets<Im
 /// Per form: one cell per pose slot (`sma4_assets::PLAYER_*`).
 #[derive(Resource)]
 struct Frames {
-    small: Vec<Handle<Image>>,
-    big: Vec<Handle<Image>>,
-    raccoon: Vec<Handle<Image>>,
+    /// By form id (`Form::id`), then star palette (0 = the form's own, 1-3 the star's).
+    forms: Vec<Vec<Vec<Handle<Image>>>>,
     /// Grow / shrink steps (`player_grow.png`) and the smoke puff (`puff.png`).
     grow: Vec<Handle<Image>>,
     puff: Vec<Handle<Image>>,
@@ -69,11 +68,22 @@ struct PlayerSprite;
 pub(crate) const Z_BEHIND_TILES: f32 = -2.0;
 
 fn spawn_player(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMut<Assets<Image>>) {
-    let mut load = |form| load_cells(&sma4_assets::player_path(&dir.0, form), PLAYER_W, PLAYER_H, &mut images);
+    let mut load = |path: std::path::PathBuf| load_cells(&path, PLAYER_W, PLAYER_H, &mut images);
+    let forms = (0..4u8)
+        .map(|form| {
+            (0..sma4_assets::PLAYER_STAR_PALETTES)
+                .map(|k| {
+                    load(if k == 0 {
+                        sma4_assets::player_path(&dir.0, form)
+                    } else {
+                        sma4_assets::player_star_path(&dir.0, form, k)
+                    })
+                })
+                .collect()
+        })
+        .collect();
     let frames = Frames {
-        small: load(0),
-        big: load(1),
-        raccoon: load(3),
+        forms,
         grow: load_cells(&sma4_assets::player_grow_path(&dir.0), PLAYER_W, PLAYER_H, &mut images),
         puff: load_cells(&sma4_assets::puff_path(&dir.0), 16, 16, &mut images),
     };
@@ -102,11 +112,17 @@ fn sync_sprite(
 ) {
     let p = &game.0.player;
     let (sprite, transform) = &mut *q;
-    let set = match p.form {
-        Form::Small => &frames.small,
-        Form::Big => &frames.big,
-        Form::Raccoon => &frames.raccoon,
+    // Star: palette 0x08133210[+0x25 & 3]. The Fire Flower's flash (+0x3F) cycles the
+    // player through OBJ palettes every frame (0x080A6E0C); drawn here with the star's.
+    // TODO(re): the flash uses OBJ palettes 7, 1, 2, 3 (the enemies' colours).
+    let palette = if p.flash != 0 {
+        game.0.frame as usize & 3
+    } else if p.star != 0 {
+        (p.star_palette & 3) as usize
+    } else {
+        0
     };
+    let set = &frames.forms[p.form.id() as usize][palette];
     // The cell's bottom row is the feet; its left 16 columns are the body, centred on the
     // box, and the raccoon tail extends into the right half. The art faces left; facing
     // right, the ROM h-flips the 32x32 sprite and moves it 16 px left (0x080A6E0C).
@@ -144,7 +160,7 @@ fn sync_sprite(
     // Dying: the death pose, drawn with the small form's graphics (0x080A8FC0).
     let (set, slot) = if game.0.dying.is_some() {
         sprite.flip_x = false;
-        (&frames.small, sma4_assets::PLAYER_DEATH)
+        (&frames.forms[Form::Small.id() as usize][0], sma4_assets::PLAYER_DEATH)
     } else {
         (set, p.pose().slot())
     };

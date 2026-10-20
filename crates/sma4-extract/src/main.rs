@@ -125,6 +125,7 @@ fn run(args: &Args) -> Result<(), String> {
             objects::extract_course_clear(&rom, &mut m, &args.out).map_err(|e| e.0)?;
             objects::extract_growth_item(&rom, &mut m, &args.out).map_err(|e| e.0)?;
             objects::extract_leaf(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+            objects::extract_flower_and_star(&rom, &mut m, &args.out).map_err(|e| e.0)?;
             if let Ok(d) = std::env::var("SMA4_DUMP_OBJ") {
                 std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
                 objects::dump_obj_vram(&m, std::path::Path::new(&d)).map_err(|e| e.0)?;

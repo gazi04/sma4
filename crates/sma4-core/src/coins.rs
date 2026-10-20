@@ -29,7 +29,7 @@ const FRAME_H: i32 = 32;
 fn probes(p: &Player, frame: u32) -> [(i32, i32); 4] {
     let base: usize = match p.form {
         Form::Small => 0x16,
-        Form::Big | Form::Raccoon => 6,
+        Form::Big | Form::Fire | Form::Raccoon => 6,
     };
     // Right-hand probes when moving right; standing still alternates sides every frame.
     let right = if p.vx == 0 { frame & 1 == 0 } else { p.vx > 0 };

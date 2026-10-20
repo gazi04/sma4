@@ -54,7 +54,7 @@ pub struct StartOptions {
     pub on_map: bool,
     /// Block cell to hit from below at the start.
     pub hit: Option<(i32, i32)>,
-    /// Starting form: 0 small, 1 big, 3 raccoon.
+    /// Starting form: 0 small, 1 big, 2 fire, 3 raccoon.
     pub form: u8,
     pub lives: Option<u16>,
 }
@@ -96,11 +96,13 @@ const Z_COIN: f32 = 6.0;
 #[derive(Resource, Default)]
 struct MetatileImages(HashMap<u16, Handle<Image>>);
 
-/// Item images: the mushroom and the Super Leaf.
+/// Item images: the mushroom, the Super Leaf, the Fire Flower and the Starman.
 #[derive(Resource)]
 struct ItemArt {
     mushroom: Option<Handle<Image>>,
     leaf: Option<Handle<Image>>,
+    flower: Option<Handle<Image>>,
+    star: Option<Handle<Image>>,
 }
 
 /// Coin-collect sparkle frames, 8x8, smallest first.
@@ -228,6 +230,7 @@ fn spawn_level(
     }
     match form {
         1 => game.0.player.set_form(sma4_core::Form::Big),
+        2 => game.0.player.set_form(sma4_core::Form::Fire),
         3 => game.0.player.set_form(sma4_core::Form::Raccoon),
         _ => {}
     }
@@ -420,7 +423,13 @@ fn sync_items(mut commands: Commands, game: Res<GameRes>, art: Res<ItemArt>, old
     }
     for item in &game.0.items {
         let leaf = item.kind == sma4_core::blocks::LEAF;
-        let Some(image) = (if leaf { &art.leaf } else { &art.mushroom }) else { continue };
+        let image = match item.kind {
+            sma4_core::blocks::LEAF => &art.leaf,
+            sma4_core::blocks::FIRE_FLOWER => &art.flower,
+            sma4_core::blocks::STAR => &art.star,
+            _ => &art.mushroom,
+        };
+        let Some(image) = image else { continue };
         let (x, y) = item.px();
         let z = if matches!(item.phase, ItemPhase::Emerging { .. }) { Z_ITEM_EMERGING } else { Z_ITEM };
         let mut sprite = Sprite::from_image(image.clone());
@@ -594,7 +603,9 @@ fn load_item_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: 
     let mut load = |path: std::path::PathBuf| crate::player::load_cells(&path, 16, 16, &mut images).into_iter().next();
     let mushroom = load(sma4_assets::growth_item_path(&dir.0));
     let leaf = load(sma4_assets::leaf_path(&dir.0));
-    commands.insert_resource(ItemArt { mushroom, leaf });
+    let flower = load(sma4_assets::fire_flower_path(&dir.0));
+    let star = load(sma4_assets::star_path(&dir.0));
+    commands.insert_resource(ItemArt { mushroom, leaf, flower, star });
 }
 
 /// TODO(re): use the start position from the level header (byte 4, bits 7-5).

@@ -201,7 +201,8 @@ fn sync_map(
         *v = vis(shown);
         let form = match game.0.player.form {
             Form::Small => 0,
-            Form::Big => 1,
+            // TODO(re): Fire Mario's own map sprite (not extracted yet).
+            Form::Big | Form::Fire => 1,
             Form::Raccoon => 2,
         };
         let phase = (game.0.frame >> 3 & 1) as usize;

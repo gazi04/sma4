@@ -31,6 +31,11 @@ const WALK_MAX: i32 = 0x18;
 /// Grow / shrink animation length (+0x3B = 0x2F) and transformation puff (+0x3E = 0x17).
 pub const MORPH_FRAMES: u8 = 0x2F;
 pub const PUFF_FRAMES: u8 = 0x17;
+/// Fire Flower flash (+0x3F) and the star (+0x3D, halved: 0xE0 counts on odd frames).
+pub const FIRE_FLASH: u8 = 0x1F;
+pub const STAR_TIME: u8 = 0xE0;
+/// Throw pose timer (+0x67, 0x0808BECC).
+pub const THROW_TIME: u8 = 0xB;
 const GOAL_WALK: i32 = 0x14;
 const RUN_MAX: i32 = 0x28;
 const P_MAX: i32 = 0x38;
@@ -101,6 +106,8 @@ pub enum Form {
     #[default]
     Small,
     Big,
+    /// Fire Mario (+0x37 = 2): throws fireballs with B.
+    Fire,
     Raccoon,
 }
 
@@ -110,16 +117,26 @@ impl Form {
     pub const fn height(self) -> i32 {
         match self {
             Form::Small => 16,
-            Form::Big | Form::Raccoon => 26,
+            Form::Big | Form::Fire | Form::Raccoon => 26,
         }
     }
 
-    /// Hits the player can take: a hit turns raccoon into big and big into small
+    /// Hits the player can take: a hit turns raccoon or fire into big and big into small
     /// (0x0804A5F4), and loses a life when small.
     pub const fn hit_points(self) -> u8 {
         match self {
             Form::Small => 1,
             Form::Big => 2,
+            Form::Fire | Form::Raccoon => 3,
+        }
+    }
+
+    /// The ROM's form number (+0x37), which also names the extracted sheets.
+    pub const fn id(self) -> u8 {
+        match self {
+            Form::Small => 0,
+            Form::Big => 1,
+            Form::Fire => 2,
             Form::Raccoon => 3,
         }
     }
@@ -145,6 +162,9 @@ pub enum Pose {
     Morph(u8),
     /// Skidding: holding against the motion on the ground (0x08097800).
     Skid,
+    /// Fire Mario throwing, step 0-2 (+0x67 >> 2), on the ground or in the air.
+    Throw(u8),
+    ThrowAir(u8),
     /// Transformation smoke, tile 0x0817388C[i] (0x83, 0x82, 0x81, 0x80); the player is
     /// not drawn.
     Puff(u8),
@@ -165,6 +185,8 @@ impl Pose {
             Pose::Whip(s) => a::PLAYER_WHIP + s as usize,
             Pose::WhipAir(s) => a::PLAYER_WHIP_AIR + s as usize,
             Pose::Skid => a::PLAYER_SKID,
+            Pose::Throw(s) => a::PLAYER_THROW + s as usize,
+            Pose::ThrowAir(s) => a::PLAYER_THROW_AIR + s as usize,
             // Drawn from their own sheets; the standing cell as a fallback.
             Pose::Morph(_) | Pose::Puff(_) => a::PLAYER_WALK + STAND_STEP as usize,
         }
@@ -212,6 +234,17 @@ pub struct Player {
     uphill: bool,
     /// Micro-Goombas riding the player (0x03007820 + 7), set by the game every frame.
     pub stuck: u8,
+    /// Fire Flower flash (+0x3F = 0x1F, 0x0806B1E4): the player and the objects stop.
+    pub flash: u8,
+    /// Starman (+0x3D = 0xE0, 0x0806B058): -1 every other frame; invincible meanwhile.
+    pub star: u8,
+    /// Enemies knocked out by the star in a row (+0x107), for the points.
+    pub star_chain: u16,
+    /// Star palette step (+0x25, palette 0x08133210[+0x25 & 3]) and its timer (+0x24).
+    pub star_palette: u8,
+    star_timer: i8,
+    /// Throw pose timer (+0x67 = 0xB when a fireball is thrown).
+    pub throw: u8,
     /// Skidding this frame: the skid pose, and the skid dust follows (0x08097800).
     pub skidding: bool,
 }
@@ -274,16 +307,62 @@ impl Player {
         }
     }
 
+    /// Fire Flower (0x0806B1E4): any other form -> fire (request +0x50 = 3) with the flash
+    /// +0x3F = 0x1F; already fire, nothing but the points.
+    pub fn fire_flower(&mut self) {
+        if self.form != Form::Fire {
+            self.set_form(Form::Fire);
+            self.flash = FIRE_FLASH;
+        }
+    }
+
+    /// Starman (0x0806B058): +0x3D = 0xE0, the chain restarts unless a star is running,
+    /// palette timer +0x24 = 3, step +0x25 = 0.
+    pub fn starman(&mut self) {
+        if self.star == 0 {
+            self.star_chain = 0;
+        }
+        self.star = STAR_TIME;
+        self.star_palette = 0;
+        self.star_timer = 3;
+    }
+
+    /// 0x08009180 (each frame the star runs): the palette steps every 4 frames while
+    /// +0x3D >= 0x40, then every 6, then every 7 below 0x1E; plain again below 5.
+    fn star_flash(&mut self) {
+        if self.star == 1 {
+            self.star_palette = 0;
+            return;
+        }
+        self.star_timer -= 1;
+        if self.star_timer < 0 {
+            self.star_timer = match self.star {
+                0x40.. => 3,
+                0x1E..=0x3F => 5,
+                _ => 6,
+            };
+            self.star_palette = self.star_palette.wrapping_add(1);
+            if self.star < 5 {
+                self.star_palette = 0;
+            }
+        }
+    }
+
+    /// 0x0808C068: Fire Mario throws on a new B press (the game checks the slots).
+    pub fn wants_fireball(&self, pressed: Buttons) -> bool {
+        self.form == Form::Fire && pressed.contains(Buttons::B) && !self.transforming()
+    }
+
     /// Busy with a transformation: frozen, and hits are ignored (0x0804A5F4 returns early
     /// while +0x3B or +0x3E is set).
     pub fn transforming(&self) -> bool {
-        self.morph != 0 || self.puff != 0
+        self.morph != 0 || self.puff != 0 || self.flash != 0
     }
 
     /// Takes a hit. Returns false if the player had no hit points left.
     pub fn hurt(&mut self) -> bool {
         match self.form {
-            Form::Raccoon => self.set_form(Form::Big),
+            Form::Raccoon | Form::Fire => self.set_form(Form::Big),
             Form::Big => {
                 // 0x0804A5F4: big shrinks with the same animation, played backwards.
                 self.set_form(Form::Small);
@@ -300,6 +379,10 @@ impl Player {
         // 0x080A8000: the puff (+0x3E) and the grow / shrink steps (+0x3B) replace the
         // player's update while they run.
         self.skidding = false;
+        if self.flash != 0 {
+            self.flash -= 1;
+            return None;
+        }
         if self.puff != 0 {
             self.puff -= 1;
             return None;
@@ -312,6 +395,18 @@ impl Player {
         self.p_timer = self.p_timer.saturating_sub(1);
         self.wag = self.wag.saturating_sub(1);
         self.whip = self.whip.saturating_sub(1);
+        self.throw = self.throw.saturating_sub(1);
+        // 0x080A6E0C: the star runs down on odd frames.
+        if self.star != 0 {
+            if frame & 1 != 0 {
+                self.star -= 1;
+            }
+            if self.star == 0 {
+                self.star_chain = 0;
+            } else {
+                self.star_flash();
+            }
+        }
         self.dither = (self.dither & 0xF0).wrapping_add(0x70);
 
         self.horizontal(held);
@@ -507,6 +602,11 @@ impl Player {
             // 0x080A8000: step morph >> 2 of 0x0813DE2F, reversed when the form is small.
             let step = self.morph >> 2;
             return Pose::Morph(if self.form == Form::Small { 11 - step } else { step });
+        }
+        if self.throw != 0 && self.form == Form::Fire {
+            // 0x08098648: 0x0813DE9E[(+0x67 >> 2) (+3 in the air)].
+            let step = (self.throw >> 2).min(2);
+            return if self.on_ground { Pose::Throw(step) } else { Pose::ThrowAir(step) };
         }
         if self.whip != 0 && self.is_raccoon() {
             let step = (self.whip >> 2).min(4);
@@ -1065,5 +1165,55 @@ mod tests {
         // Letting go is no skid, nor is a jump.
         s.run(Buttons::empty(), 1);
         assert!(!s.p.skidding);
+    }
+
+    #[test]
+    fn the_fire_flower_flashes_into_fire_mario_and_a_hit_leaves_him_big() {
+        let mut s = Sim::new(floor(), 40);
+        s.p.fire_flower();
+        assert_eq!((s.p.form, s.p.flash), (Form::Fire, FIRE_FLASH));
+        let x = s.p.x;
+        s.run(Buttons::RIGHT, FIRE_FLASH as u32);
+        assert_eq!(s.p.x, x, "frozen during the flash");
+        assert!(!s.p.transforming());
+        s.p.fire_flower();
+        assert_eq!(s.p.flash, 0, "already fire: no flash");
+        assert!(s.p.hurt());
+        assert_eq!(s.p.form, Form::Big);
+    }
+
+    #[test]
+    fn the_star_lasts_0xe0_odd_frames_and_its_palette_steps_slower_at_the_end() {
+        let mut s = Sim::new(floor(), 40);
+        s.p.starman();
+        let mut frames = 0;
+        let mut steps = Vec::new();
+        let mut last = s.p.star_palette;
+        while s.p.star != 0 {
+            s.run(Buttons::empty(), 1);
+            frames += 1;
+            if s.p.star_palette != last {
+                steps.push((s.p.star, frames));
+                last = s.p.star_palette;
+            }
+        }
+        assert!((2 * STAR_TIME as u32 - 1..=2 * STAR_TIME as u32 + 1).contains(&frames), "{frames}");
+        // Every 4 frames early on, every 7 near the end.
+        let gap = |w: &[(u8, u32)]| w[1].1 - w[0].1;
+        assert_eq!(gap(&steps[1..3]), 4);
+        let late: Vec<_> = steps.iter().filter(|s| (6..0x1E).contains(&s.0)).collect();
+        assert!(late.windows(2).all(|w| w[1].1 - w[0].1 == 7), "{late:?}");
+        assert_eq!(s.p.star_palette, 0);
+    }
+
+    #[test]
+    fn fire_mario_wants_a_fireball_on_a_new_b_press_only() {
+        let mut p = Player::spawn(0, 0);
+        assert!(!p.wants_fireball(Buttons::B));
+        p.set_form(Form::Fire);
+        assert!(p.wants_fireball(Buttons::B));
+        assert!(!p.wants_fireball(Buttons::A));
+        p.throw = THROW_TIME;
+        assert_eq!(p.pose(), Pose::ThrowAir(2));
     }
 }

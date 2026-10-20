@@ -1001,7 +1001,7 @@ pub const CARD_GOT_AT: (u32, u32) = (6, 6);
 pub const CARD_GOT_TILES: (u32, u32) = (20, 4);
 pub const CLEAR_CARD_AT: (u32, u32) = (23, 7);
 
-/// Player frames of one power-up form (0 small, 1 big, 3 raccoon): 32x32 cells, one per
+/// Player frames of one power-up form (0 small, 1 big, 2 fire, 3 raccoon): 32x32 cells, one per
 /// pose slot below. The body fills the left 16 columns with the feet on the bottom row;
 /// the raccoon's tail reaches into the right half. The art faces left.
 pub fn player_path(dir: &Path, form: u8) -> PathBuf {
@@ -1030,7 +1030,16 @@ pub const PLAYER_WHIP_AIR: usize = 24; // 5 in the air
 pub const PLAYER_DEATH: usize = 29;
 /// Skidding: on the ground, holding against the motion (0x08097800: 0x0813DE41[form != 0]).
 pub const PLAYER_SKID: usize = 30;
-pub const PLAYER_FRAMES: u32 = 31;
+/// Fire Mario throwing a fireball: 3 steps on the ground, 3 in the air (0x0813DE9E).
+pub const PLAYER_THROW: usize = 31;
+pub const PLAYER_THROW_AIR: usize = 34;
+pub const PLAYER_FRAMES: u32 = 37;
+/// Star flashing: the player is drawn in palette 7 = 0x08133210[k], k = 0 being the
+/// form's own palette (`player_path`), 1-3 in `player_star_path`.
+pub const PLAYER_STAR_PALETTES: u32 = 4;
+pub fn player_star_path(dir: &Path, form: u8, k: u32) -> PathBuf {
+    dir.join("objects").join(format!("player_form{form}_star{k}.png"))
+}
 pub const PLAYER_W: u32 = 32;
 pub const PLAYER_H: u32 = 32;
 /// Width of the body part of a player cell.
@@ -1042,6 +1051,14 @@ pub fn skid_dust_path(dir: &Path) -> PathBuf {
     dir.join("objects").join("skid_dust.png")
 }
 pub const SKID_DUST_FRAMES: u32 = 4;
+
+/// Fire Flower (object type 0x19) and Starman (0x0C): one 16x16 image each.
+pub fn fire_flower_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("fire_flower.png")
+}
+pub fn star_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("star.png")
+}
 
 /// Super Leaf (object type 0x1E): one 16x16 image.
 pub fn leaf_path(dir: &Path) -> PathBuf {

@@ -5,6 +5,7 @@ pub mod blocks;
 pub mod coins;
 pub mod dust;
 pub mod enemies;
+pub mod fire;
 pub mod goal;
 pub mod input;
 pub mod level;
@@ -13,6 +14,11 @@ pub mod player;
 pub mod screens;
 pub mod world_map;
 pub mod status;
+
+/// Fireball knockouts score 100 (0x08093560 with popup 5); star chains stop growing at
+/// the 9th (0x080488E4 caps +0x107 at 8).
+const FIRE_POPUP: u8 = 5;
+const STAR_CHAIN_MAX: u16 = 8;
 
 pub use blocks::{Bump, CoinPop, HitOutcome, Item, ItemPhase};
 pub use coins::Sparkle;
@@ -56,6 +62,8 @@ pub struct Game {
     pub enemies: Vec<Enemy>,
     /// Fireballs from Venus Fire Traps (projectile slots 0x03007848 + 0x8EC).
     pub fireballs: Vec<enemies::Fireball>,
+    /// Fire Mario's fireballs (player projectile slots 0x03007848 + 0xAD4 / + 0xAE8).
+    pub player_fireballs: Vec<fire::PlayerFireball>,
     /// Micro-Goombas from the 0x74 Paragoomba (the same projectile slots).
     pub micro_goombas: Vec<enemies::MicroGoomba>,
     pub spawner: Spawner,
@@ -129,6 +137,7 @@ impl Game {
         self.enemies.clear();
         self.fireballs.clear();
         self.micro_goombas.clear();
+        self.player_fireballs.clear();
         self.goomba_pipes.clear();
         self.invulnerable = 0;
         self.spawn = spawn;
@@ -181,7 +190,8 @@ impl Game {
 
     /// The player takes a hit: big shrinks to small, small dies.
     pub fn hurt(&mut self) {
-        if self.invulnerable > 0 || self.dying.is_some() || self.player.transforming() {
+        // 0x0804A5F4 ignores hits while the star (+0x3D) runs.
+        if self.invulnerable > 0 || self.dying.is_some() || self.player.transforming() || self.player.star != 0 {
             return;
         }
         if self.player.hurt() {
@@ -432,6 +442,11 @@ impl Game {
 
         let head_hit = self.player.step(held, self.input.pressed, &self.level, self.frame);
         self.skid_dust.step(&self.player);
+        // 0x0808C068 -> 0x0808BFEC: a free slot (a bursting fireball still holds its own).
+        if self.player.wants_fireball(self.input.pressed) && self.player_fireballs.len() < fire::FIREBALL_SLOTS {
+            self.player_fireballs.push(fire::PlayerFireball::thrown(&self.player));
+            self.player.throw = player::THROW_TIME;
+        }
         if !self.player.transforming()
             && let Some(dir) = pipes::entry(&self.level, &self.player, held)
         {
@@ -493,7 +508,12 @@ impl Game {
             !t
         });
         for (kind, (x, y)) in taken {
-            if kind == blocks::LEAF { self.player.leaf() } else { self.player.grow() }
+            match kind {
+                blocks::LEAF => self.player.leaf(),
+                blocks::FIRE_FLOWER => self.player.fire_flower(),
+                blocks::STAR => self.player.starman(),
+                _ => self.player.grow(),
+            }
             self.status.popup(x, y, 9);
         }
 
@@ -532,6 +552,26 @@ impl Game {
         }
         let camera = self.camera();
         self.fireballs.retain_mut(|f| f.step(camera));
+        // Fire Mario's fireballs: move and bounce, then knock out what they touch
+        // (0x0808B648; a fireball bursting this frame still hits everything it touches).
+        let level = &self.level;
+        self.player_fireballs.retain_mut(|f| f.step(level, camera) != fire::FireStep::Gone);
+        for f in &mut self.player_fireballs {
+            if !f.live() {
+                continue;
+            }
+            let mut hit = false;
+            for e in &mut self.enemies {
+                if e.fireball_hit(f.px(), f.vx.signum()) {
+                    hit = true;
+                    let (x, y) = e.px();
+                    self.status.popup(x, y, FIRE_POPUP);
+                }
+            }
+            if hit {
+                f.hit();
+            }
+        }
         // 0x0808FBD0 counts the Micro-Goombas riding the player (0x03007820 + 7) for the
         // next frame's speed limit (0x08096884).
         let (player, pressed) = (&self.player, self.input.pressed.bits());
@@ -580,6 +620,12 @@ impl Game {
                     self.player.stomp_chain += 1;
                 }
                 Contact::HurtPlayer => hurt = true,
+                // 0x080488E4: the star's own chain (+0x107), 100 points up to a 1-UP.
+                Contact::StarKill => {
+                    let (x, y) = e.px();
+                    self.status.chain_popup(x, y, self.player.star_chain.min(STAR_CHAIN_MAX));
+                    self.player.star_chain += 1;
+                }
                 Contact::Kicked | Contact::None => {}
             }
         }
@@ -702,6 +748,78 @@ mod tests {
             g.step(run);
         }
         assert!(g.player.vx / 16 > 0x18, "runs again: {:#x}", g.player.vx / 16);
+    }
+
+    /// A level with a floor and one Goomba to the right of the player.
+    fn goomba_ahead() -> Game {
+        let mut g = Game::new();
+        let list = [sma4_assets::EnemySpawn { kind: enemies::WALKER, col: 10, row: 8 }];
+        g.enter_level(block_level((20, 2)), (2 * TILE_PX, 9 * TILE_PX - 16), &list);
+        g.screen = Screen::Level;
+        g
+    }
+
+    #[test]
+    fn fire_mario_throws_two_fireballs_at_most_and_they_knock_out_a_goomba() {
+        let mut g = goomba_ahead();
+        g.player.set_form(Form::Fire);
+        g.step(Buttons::empty());
+        assert_eq!(g.enemies.len(), 1);
+        for _ in 0..3 {
+            g.step(Buttons::B);
+            g.step(Buttons::empty());
+        }
+        assert_eq!(g.player_fireballs.len(), 2, "two slots");
+        let score = g.status.score;
+        let mut killed = false;
+        for _ in 0..150 {
+            g.step(Buttons::empty());
+            killed |= g.enemies.first().is_some_and(|e| e.state == EnemyState::Dead);
+        }
+        assert!(killed, "knocked out");
+        assert_eq!(g.status.score, score + 10, "100 points");
+    }
+
+    #[test]
+    fn with_the_star_touching_an_enemy_knocks_it_out_and_hits_do_not_count() {
+        let mut g = goomba_ahead();
+        g.player.starman();
+        let mut killed = false;
+        for _ in 0..200 {
+            g.step(Buttons::RIGHT);
+            killed |= g.enemies.iter().any(|e| e.state == EnemyState::Dead);
+        }
+        assert!(killed, "the Goomba was knocked out");
+        assert_eq!(g.player.star_chain, 1);
+        assert_eq!(g.player.form, Form::Small, "no hit taken");
+        assert!(g.dying.is_none());
+    }
+
+    #[test]
+    fn a_fire_flower_from_a_block_makes_a_big_player_fire_mario() {
+        let block = (4, 5);
+        let mut g = Game::new();
+        let mut level = block_level(block);
+        level.rules.item_types[2] = blocks::FIRE_FLOWER;
+        level.rules.bump_behaviour[0x61] = 1;
+        g.enter_level(level, (block.0 as i32 * TILE_PX + 2, 9 * TILE_PX - 16), &[]);
+        g.screen = Screen::Level;
+        g.player.set_form(Form::Big);
+        for _ in 0..60 {
+            g.step(Buttons::empty());
+        }
+        for f in 0..120 {
+            g.step(if f < 12 { Buttons::A } else { Buttons::empty() });
+        }
+        // It rose out of the block and stays on top of it.
+        let flower = g.items.first().copied().expect("a flower");
+        assert_eq!(flower.kind, blocks::FIRE_FLOWER);
+        assert_eq!(flower.px(), (block.0 as i32 * TILE_PX, (block.1 as i32 - 1) * TILE_PX));
+        // Stand on the block next to it.
+        g.player = Player::spawn(flower.px().0 + 4, flower.px().1 + 16 - Form::Big.height());
+        g.player.set_form(Form::Big);
+        g.step(Buttons::empty());
+        assert_eq!((g.player.form, g.player.flash), (Form::Fire, player::FIRE_FLASH));
     }
 
     fn block_level(block: (usize, usize)) -> Level {

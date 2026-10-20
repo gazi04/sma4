@@ -78,6 +78,24 @@ fn sync_enemies(mut commands: Commands, game: Res<GameRes>, art: Res<Art>, old: 
             commands.spawn((EnemySprite, Sprite::from_image(image.clone()), Transform::from_xyz(cx as f32, -(cy as f32), Z_ENEMY + 0.5)));
         }
     }
+    // Fire Mario's fireballs: spin frame (frame counter >> 2) & 3, the "flying left" cells
+    // when they go left; bursting, the puff's 16x16 cells 4 px left of the slot.
+    for f in &game.0.player_fireballs {
+        let (x, y) = f.px();
+        if !f.live() {
+            if let Some(image) = art.1.get(f.puff_cell()) {
+                let t = Transform::from_xyz((x - 4 + 8) as f32, -((y + 8) as f32), Z_ENEMY + 0.5);
+                commands.spawn((EnemySprite, Sprite::from_image(image.clone()), t));
+            }
+            continue;
+        }
+        let cell = f.frame(game.0.frame) + if f.vx < 0 { FIREBALL_FRAMES as usize } else { 0 };
+        if let Some(image) = art.2.get(cell) {
+            let (w, h) = (KOOPA_CELL_W as i32, KOOPA_CELL_H as i32);
+            let (cx, cy) = (x - KOOPA_ORIGIN.0 + w / 2, y - KOOPA_ORIGIN.1 + h / 2);
+            commands.spawn((EnemySprite, Sprite::from_image(image.clone()), Transform::from_xyz(cx as f32, -(cy as f32), Z_ENEMY + 0.5)));
+        }
+    }
     // Micro-Goombas: the slot position (top-left of the 8x8 OBJ) sits at KOOPA_ORIGIN; in
     // front of the player.
     for m in &game.0.micro_goombas {

@@ -183,6 +183,15 @@ const PLANT_BOX_H: i32 = 24;
 const RED_PLANT_BOX_H: i32 = 20;
 /// Puff of smoke (state 8, 0x08044550): timer +0x23 = 0x1F, frame = timer >> 3.
 const PUFF_TIME: u8 = 0x1F;
+/// Star knockout (0x080488E4): speed 0xC8 up, 0x081698C6 = -8 / 8 across.
+const STAR_KNOCKOUT: i32 = -0x38 * 16;
+const STAR_DRIFT: i32 = 8 * 16;
+/// Fireball knockout (0x0808B2F0): speed 0xCC up, 0x0C across in the fireball's direction;
+/// the box of Goombas and Koopas (0x0816A516[type] = 1 -> 0x08169F44[1]: dx 1, w 13, dy 2,
+/// h 8).
+const FIRE_KNOCKOUT: i32 = -0x34 * 16;
+const FIRE_DRIFT: i32 = 0x0C * 16;
+const FIRE_BOX: (i32, i32, i32, i32) = (1, 13, 2, 8);
 
 /// Enemies spawn once they are this close to the player horizontally: half the GBA screen
 /// plus a margin, so they appear just outside the view.
@@ -284,6 +293,8 @@ pub struct Enemy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Contact {
     None,
+    /// The player has the star: the enemy is knocked out (0x080488E4).
+    StarKill,
     /// Landed on it: the player bounces.
     Stomped,
     /// Kicked a shell from the side.
@@ -943,6 +954,19 @@ impl Enemy {
         if !self.alive() || self.grace > 0 || !self.overlaps(player) {
             return Contact::None;
         }
+        // 0x08048960: with the star, any touch knocks the object out (0x080488E4): state 6,
+        // speed 0xC8 up and 0x081698C6[side] = -8 / 8 away from the player.
+        if player.star != 0 {
+            if self.is_plant() {
+                self.puff();
+            } else {
+                self.state = EnemyState::Dead;
+                self.flipped = false;
+                self.vy = STAR_KNOCKOUT;
+                self.vx = -toward(player, self.x) * STAR_DRIFT;
+            }
+            return Contact::StarKill;
+        }
         let feet = player.px().1 + player.height();
         let stomp = feet <= self.px().1 + STOMP_DEPTH;
         match self.state {
@@ -1033,6 +1057,37 @@ impl Enemy {
         self.vy = KNOCKOUT_SPEED;
         self.vx = away * TAIL_DRIFT;
         self.grace = TAIL_GRACE;
+        true
+    }
+
+    /// A player fireball at `(x, y)` px (8x8, flying in direction `dir`) hits this enemy
+    /// (0x0808B2F0): box 0x08169F44[+0x64 & 0x3F] widened by 8 px to the left and 0xE px
+    /// up. The enemy is knocked out (state 6, speed 0xCC up and 0x0C away; plants puff).
+    /// Returns whether it hit.
+    pub fn fireball_hit(&mut self, (x, y): (i32, i32), dir: i32) -> bool {
+        if !self.alive() || (self.is_plant() && !self.plant_visible()) {
+            return false;
+        }
+        let (ex, ey) = self.px();
+        let (dx, w, dy, h) = if self.is_plant() {
+            let (dx, w, dy) = PLANT_BOX;
+            (dx, w, dy, if self.kind == RED_PIRANHA { RED_PLANT_BOX_H } else { PLANT_BOX_H })
+        } else {
+            FIRE_BOX
+        };
+        let vertical = (y - (ey + dy) + 0xE) as u16 as i32;
+        let across = (x - (ex + dx) + 8) as u16 as i32;
+        if vertical >= h + 0xE || across >= w + 8 {
+            return false;
+        }
+        if self.is_plant() {
+            self.puff();
+        } else {
+            self.state = EnemyState::Dead;
+            self.flipped = false;
+            self.vy = FIRE_KNOCKOUT;
+            self.vx = dir * FIRE_DRIFT;
+        }
         true
     }
 

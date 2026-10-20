@@ -22,6 +22,19 @@ const BUMP_FRAMES: u8 = 10;
 pub const GROWTH_ITEM: u16 = 0x0D;
 /// Object type of the Super Leaf (hit result 3: a big player hits the block).
 pub const LEAF: u16 = 0x1E;
+/// Fire Flower (hit result 2, init 0x0804E548, main 0x0804EB00): rises out of the block
+/// and stays put (its speed is cleared while it is not falling).
+pub const FIRE_FLOWER: u16 = 0x19;
+/// Starman (hit result 4, init 0x0804E4E0, main 0x0804E984): rises out of the block, then
+/// bounces along away from the player.
+pub const STAR: u16 = 0x0C;
+/// Starman speeds (1/16 px per frame): across 0x10 away from the player (0x0804E0F4); out
+/// of a block hit from below it jumps at 0xC8 (-0x38), and every landing 0xC0 (-0x40).
+const STAR_SPEED: i32 = 0x10 * 16;
+const STAR_LAUNCH: i32 = -0x38 * 16;
+const STAR_BOUNCE: i32 = -0x40 * 16;
+/// Flower and star can't be taken for 0x10 frames (+0x24).
+const ITEM_GRACE: u8 = 0x10;
 
 // Leaf (speeds in 1/16 px per frame). A head hit sets 0x03003CFB = 1, so it starts at
 // 0x0816E3A4[1] = -32 and rises while the speed climbs by 1 per frame to 0. Then it
@@ -146,12 +159,17 @@ pub fn hit_block(level: &mut Level, player: &Player, tx: i32, ty: i32) -> Option
     }
     let behaviour = level.rules.bump_behaviour[m as usize];
     // Behaviour handlers (table 0x0817310C) return the low nibble of the hit result.
+    let small = player.form == Form::Small;
     let (low, outcome) = match behaviour {
+        // 0x0809FF34: mushroom for a small player, else the fire flower (result 2).
+        1 => (if small { 5 } else { 2 }, HitOutcome::Item),
         // 0x0809FF64: power-up block. Small player gets result 5, otherwise 3.
-        2 => (if player.form == Form::Small { 5 } else { 3 }, HitOutcome::Item),
+        2 => (if small { 5 } else { 3 }, HitOutcome::Item),
+        // 0x0809FF94: star (result 4, 0x03003D04 = 0x80).
+        3 => (4, HitOutcome::Item),
         // 0x0809FFAC: coin block (0x080A03A8 gives the coin), result 1.
         4 => (1, HitOutcome::Coin),
-        // TODO(re): other behaviours (bricks, stars, vines, multi-coin...).
+        // TODO(re): other behaviours (bricks, vines, multi-coin...).
         _ => return None,
     };
     let result = low | level.rules.result_hi[m as usize];
@@ -173,10 +191,10 @@ impl Bump {
         let mut spawned = None;
         if self.timer == BUMP_FRAMES {
             let kind = level.rules.item_types[(self.result & 0xF) as usize];
-            if kind == GROWTH_ITEM || kind == LEAF {
+            if matches!(kind, GROWTH_ITEM | LEAF | FIRE_FLOWER | STAR) {
                 spawned = Some(Item::spawn(kind, self.tx, self.ty, player));
             }
-            // TODO(re): other item types (fire flower 0x0C, star, 1-up...).
+            // TODO(re): other item types (1-up, vine...).
         }
         if self.timer == 1 {
             level.set(self.tx, self.ty, self.final_metatile);
@@ -206,15 +224,12 @@ impl Item {
                 grace: LEAF_GRACE,
             };
         }
-        Self {
-            kind,
-            x: x * SUB,
-            y: y * SUB,
-            vx: dir * ITEM_SPEED,
-            vy: 0,
-            phase: ItemPhase::Emerging { timer: EMERGE_FRAMES, sub: 0 },
-            grace: 0,
-        }
+        let (vx, vy, grace) = match kind {
+            FIRE_FLOWER => (0, 0, ITEM_GRACE),
+            STAR => (dir * STAR_SPEED, STAR_LAUNCH, ITEM_GRACE),
+            _ => (dir * ITEM_SPEED, 0, 0),
+        };
+        Self { kind, x: x * SUB, y: y * SUB, vx, vy, phase: ItemPhase::Emerging { timer: EMERGE_FRAMES, sub: 0 }, grace }
     }
 
     /// Leaf (0x0804EBE4), speeds in 1/16 px per frame.
@@ -262,7 +277,12 @@ impl Item {
                 true
             }
             ItemPhase::Walking => {
-                self.walk(level);
+                self.grace = self.grace.saturating_sub(1);
+                let landed = self.walk(level);
+                // 0x0804E984: the star bounces off the ground.
+                if landed && self.kind == STAR {
+                    self.vy = STAR_BOUNCE;
+                }
                 self.px().1 < level.pixel_height() + TILE_PX
             }
             ItemPhase::Popping | ItemPhase::Swaying { .. } => {
@@ -272,7 +292,8 @@ impl Item {
         }
     }
 
-    fn walk(&mut self, level: &Level) {
+    /// Returns true if it is standing on the ground.
+    fn walk(&mut self, level: &Level) -> bool {
         // Horizontal: turn around at walls.
         self.x += self.vx;
         let (px, py) = self.px();
@@ -299,7 +320,9 @@ impl Item {
         if lands && self.vy >= 0 {
             self.y = (top - ITEM_SIZE) * SUB;
             self.vy = 0;
+            return true;
         }
+        false
     }
 
     /// Whether the item's box overlaps the player's.

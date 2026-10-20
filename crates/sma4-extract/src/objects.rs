@@ -73,6 +73,14 @@ const SKID_POSES: u32 = 0x0813_DE41;
 const DEATH_POSE: u8 = 0x4B;
 /// Grow / shrink poses (0x080A8000), one per 4 frames of player +0x3B.
 const GROW_POSES: u32 = 0x0813_DE2F;
+/// Fire Mario's throw poses 0x0813DE9E[(+0x67 >> 2) (+3 in the air)] (0x08098648).
+const THROW_POSES: u32 = 0x0813_DE9E;
+const FIRE: u8 = 2;
+/// Player palette loader (0x0809FB54: OBJ palette 7 and 0x02000800 = 0x08173050[form 2,
+/// else the character]) and the star palette step (0x08009208: palette 7 = 0x08133210[+0x25
+/// & 3], 0 being the player's own at 0x02000800).
+const FN_PLAYER_PALETTE: u32 = 0x0809_FB54;
+const FN_STAR_PALETTE: u32 = 0x0800_9208;
 
 struct Sheet<'a> {
     chars: &'a [u8],
@@ -700,12 +708,22 @@ fn player_poses(rom: &Rom, form: u8) -> Result<Vec<u8>, ExtractError> {
         poses.extend(table(WHIP_POSES, 0, 10)?);
     } else {
         poses.push(jump);
-        poses.push(if form == 1 { BIG_FALL_POSE } else { jump });
+        poses.push(if form == 1 || form == FIRE {
+            BIG_FALL_POSE
+        } else {
+            jump
+        });
         poses.extend([jump; 9]);
         poses.extend([walk[2]; 10]);
     }
     poses.push(DEATH_POSE);
     poses.push(rom.u8(SKID_POSES + (form != 0) as u32)?);
+    // Throwing (fire form; the others keep a walking step): on the ground, then in the air.
+    if form == FIRE {
+        poses.extend(table(THROW_POSES, 0, 6)?);
+    } else {
+        poses.extend([walk[2]; 6]);
+    }
     debug_assert_eq!(poses.len(), PLAYER_FRAMES as usize);
     Ok(poses)
 }
@@ -713,33 +731,81 @@ fn player_poses(rom: &Rom, form: u8) -> Result<Vec<u8>, ExtractError> {
 /// Player frames for the small, big and raccoon forms (`sma4_assets::PLAYER_*` slots),
 /// rendered by running the game's own per-frame graphics upload. Overwrites OBJ tiles 0-3
 /// of rows 0-3.
-pub fn extract_player(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+pub fn extract_player(
+    rom: &Rom,
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
+    use sma4_assets::{PLAYER_STAR_PALETTES, player_star_path};
     let palette = parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?);
     m.w32(PLAYER_PTR, PLAYER_SCRATCH)?;
     m.w32(PLAYER_GFX_PTR, PLAYER_GFX_SCRATCH)?;
     m.w8(CHARACTER, 0)?;
-    for form in [0u8, 1, RACCOON] {
+    for form in [0u8, 1, FIRE, RACCOON] {
         let poses = player_poses(rom, form)?;
-        let w = PLAYER_W * PLAYER_FRAMES;
-        let mut px = vec![0u8; (w * PLAYER_H * 4) as usize];
-        for (i, &pose) in poses.iter().enumerate() {
-            m.w8(PLAYER_SCRATCH + 0x37, form)?;
-            m.w8(PLAYER_SCRATCH + 0x38, pose)?;
-            m.call(FN_PLAYER_POSE_GFX, &[])?;
-            m.call(FN_PLAYER_DMA, &[])?;
-            let chars = m.read(OBJ_VRAM, 4 * TILES_PER_ROW as usize * 32)?;
-            let sheet = Sheet { chars: &chars, palette: palette.clone() };
-            for ty in 0..4 {
-                for tx in 0..4 {
-                    sheet.tile(&mut px, w, ty * TILES_PER_ROW + tx, i as u32 * PLAYER_W + tx * 8, ty * 8, false, PLAYER_PALETTE);
+        // The form's own palette (Fire Mario's differs), then the three star palettes.
+        m.w8(PLAYER_SCRATCH + 0x37, form)?;
+        m.w8(PLAYER_SCRATCH + 0x52, 0)?;
+        m.call(FN_PLAYER_PALETTE, &[])?;
+        let mut palettes = Vec::new();
+        for k in 0..PLAYER_STAR_PALETTES {
+            if k > 0 {
+                m.w8(PLAYER_SCRATCH + 0x25, k as u8)?;
+                m.call(FN_STAR_PALETTE, &[])?;
+            }
+            let mut p = palette.clone();
+            let own = parse_palette(&m.read(OBJ_PAL_BUFFER + PLAYER_PALETTE * 0x20, 0x20)?);
+            p[(PLAYER_PALETTE * 16) as usize..][..16].copy_from_slice(&own);
+            palettes.push(p);
+        }
+        for (k, palette) in palettes.iter().enumerate() {
+            let w = PLAYER_W * PLAYER_FRAMES;
+            let mut px = vec![0u8; (w * PLAYER_H * 4) as usize];
+            for (i, &pose) in poses.iter().enumerate() {
+                m.w8(PLAYER_SCRATCH + 0x37, form)?;
+                m.w8(PLAYER_SCRATCH + 0x38, pose)?;
+                m.call(FN_PLAYER_POSE_GFX, &[])?;
+                m.call(FN_PLAYER_DMA, &[])?;
+                let chars = m.read(OBJ_VRAM, 4 * TILES_PER_ROW as usize * 32)?;
+                let sheet = Sheet {
+                    chars: &chars,
+                    palette: palette.clone(),
+                };
+                for ty in 0..4 {
+                    for tx in 0..4 {
+                        sheet.tile(
+                            &mut px,
+                            w,
+                            ty * TILES_PER_ROW + tx,
+                            i as u32 * PLAYER_W + tx * 8,
+                            ty * 8,
+                            false,
+                            PLAYER_PALETTE,
+                        );
+                    }
                 }
             }
-        }
-        Rgba { width: w, height: PLAYER_H, pixels: px }
-            .write_png(&player_path(out_dir, form))
+            let path = if k == 0 {
+                player_path(out_dir, form)
+            } else {
+                player_star_path(out_dir, form, k as u32)
+            };
+            Rgba {
+                width: w,
+                height: PLAYER_H,
+                pixels: px,
+            }
+            .write_png(&path)
             .map_err(|e| ExtractError(e.to_string()))?;
-        println!("  player form {form}: {} poses", poses.len());
+        }
+        println!(
+            "  player form {form}: {} poses, {PLAYER_STAR_PALETTES} palettes",
+            poses.len()
+        );
     }
+    // Back to the small form's palette for what follows.
+    m.w8(PLAYER_SCRATCH + 0x37, 0)?;
+    m.call(FN_PLAYER_PALETTE, &[])?;
     // Grow / shrink: 0x080A8000 draws pose 0x0813DE2F[step] with the form forced to big.
     use sma4_assets::{PLAYER_GROW_STEPS, player_grow_path};
     let w = PLAYER_W * PLAYER_GROW_STEPS;
@@ -750,14 +816,31 @@ pub fn extract_player(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> 
         m.call(FN_PLAYER_POSE_GFX, &[])?;
         m.call(FN_PLAYER_DMA, &[])?;
         let chars = m.read(OBJ_VRAM, 4 * TILES_PER_ROW as usize * 32)?;
-        let sheet = Sheet { chars: &chars, palette: palette.clone() };
+        let sheet = Sheet {
+            chars: &chars,
+            palette: palette.clone(),
+        };
         for ty in 0..4 {
             for tx in 0..4 {
-                sheet.tile(&mut px, w, ty * TILES_PER_ROW + tx, i * PLAYER_W + tx * 8, ty * 8, false, PLAYER_PALETTE);
+                sheet.tile(
+                    &mut px,
+                    w,
+                    ty * TILES_PER_ROW + tx,
+                    i * PLAYER_W + tx * 8,
+                    ty * 8,
+                    false,
+                    PLAYER_PALETTE,
+                );
             }
         }
     }
-    Rgba { width: w, height: PLAYER_H, pixels: px }.write_png(&player_grow_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
+    Rgba {
+        width: w,
+        height: PLAYER_H,
+        pixels: px,
+    }
+    .write_png(&player_grow_path(out_dir))
+    .map_err(|e| ExtractError(e.to_string()))?;
     println!("  player grow: {PLAYER_GROW_STEPS} steps");
     Ok(())
 }
@@ -767,6 +850,46 @@ pub fn extract_player(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> 
 /// swings right.
 const LEAF: u16 = 0x1E;
 const FN_DRAW_LEAF: u32 = 0x0804_7400;
+
+/// Fire Flower (0x19) and Starman (0x0C), drawn by the item draw like the mushroom: one
+/// 16x16 image each (frame +0x17 = 0; the star of a star block has palette
+/// 0x0816E3A0[0] = 0).
+pub fn extract_flower_and_star(
+    rom: &Rom,
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
+    use sma4_assets::{fire_flower_path, star_path};
+    for (kind, path, extra) in [
+        (0x19u16, fire_flower_path(out_dir), None),
+        (0x0C, star_path(out_dir), Some((0x21u32, 0u8))),
+    ] {
+        let bytes: Vec<(u32, u8)> = extra.into_iter().collect();
+        let pose = Pose {
+            kind,
+            state: 2,
+            draw: FN_DRAW_ITEM,
+            bytes: &bytes,
+            globals: &[],
+        };
+        let cell = oam::render(m, rom.bytes(), &[pose])?;
+        let (ox, oy) = (oam::ORIGIN.0 as u32, oam::ORIGIN.1 as u32 + 1);
+        let mut px = Vec::with_capacity(16 * 16 * 4);
+        for y in oy..oy + 16 {
+            let o = ((y * cell.width + ox) * 4) as usize;
+            px.extend_from_slice(&cell.pixels[o..o + 16 * 4]);
+        }
+        Rgba {
+            width: 16,
+            height: 16,
+            pixels: px,
+        }
+        .write_png(&path)
+        .map_err(|e| ExtractError(e.to_string()))?;
+    }
+    println!("  fire flower, star");
+    Ok(())
+}
 
 pub fn extract_leaf(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
     let pose = Pose { kind: LEAF, state: 2, draw: FN_DRAW_LEAF, bytes: &[], globals: &[] };
