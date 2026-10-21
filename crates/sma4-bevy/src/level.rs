@@ -236,7 +236,7 @@ fn spawn_level(
     }
     if let Some((tx, ty)) = hit {
         let g = &mut game.0;
-        if let Some((bump, _)) = sma4_core::blocks::hit_block(&mut g.level, &g.player, tx, ty) {
+        if let Some((bump, _)) = sma4_core::blocks::hit_block(&mut g.level, &g.player, tx, ty, sma4_core::HitFrom::Below) {
             g.bumps.push(bump);
         }
     }

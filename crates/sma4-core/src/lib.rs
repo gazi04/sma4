@@ -20,7 +20,7 @@ pub mod status;
 const FIRE_POPUP: u8 = 5;
 const STAR_CHAIN_MAX: u16 = 8;
 
-pub use blocks::{Bump, CoinPop, HitOutcome, Item, ItemPhase};
+pub use blocks::{Bump, CoinPop, HitFrom, HitOutcome, Item, ItemPhase};
 pub use coins::Sparkle;
 pub use enemies::{Contact, Enemy, EnemyState, Spawner};
 pub use goal::{EndCoin, Goal};
@@ -249,9 +249,10 @@ impl Game {
         let stop = Goal::player_stopped(&self.player, camera);
         self.player.goal_walk(&self.level, self.frame, stop);
         self.skid_dust.step(&self.player);
-        let (level, player, frame) = (&mut self.level, &self.player, self.frame);
-        self.bumps.retain_mut(|b| !b.step(level, player).1);
-        let level = &*level;
+        let (level, frame) = (&mut self.level, self.frame);
+        let player = &mut self.player;
+        self.bumps.retain_mut(|b| !b.step(level, player, false).1);
+        let (level, player) = (&*level, &self.player);
         self.enemies.retain_mut(|e| e.step(level, player, frame));
         self.coin_pops.retain_mut(|c| c.step());
         self.sparkles.retain_mut(|s| s.step(frame));
@@ -456,14 +457,23 @@ impl Game {
         if self.player.p_meter & 0x40 != 0 {
             self.p_blink = self.p_blink.wrapping_sub(1);
         }
-        // Blocks react the same to a head hit and to the raccoon's tail (0x0809A748).
-        for (tx, ty) in head_hit.into_iter().chain(self.player.tail_block()) {
+        // Blocks react the same to a head hit and to the raccoon's tail (0x0809A748); the
+        // feet probe bumps note blocks the player stands on.
+        let hits = head_hit
+            .map(|t| (t, HitFrom::Below, true))
+            .into_iter()
+            .chain(self.player.tail_block().map(|t| (t, HitFrom::Side, false)))
+            .chain(self.player.feet_block(&self.level).map(|t| (t, HitFrom::Above, false)));
+        for ((tx, ty), from, head) in hits.collect::<Vec<_>>() {
             if self.bumps.len() < MAX_BUMPS
-                && let Some((bump, outcome)) = blocks::hit_block(&mut self.level, &self.player, tx, ty)
+                && let Some((bump, outcome)) = blocks::hit_block(&mut self.level, &self.player, tx, ty, from)
             {
                 if outcome == HitOutcome::Coin {
                     self.status.add_coin();
                     self.coin_pops.push(CoinPop::new(tx, ty));
+                }
+                if head {
+                    self.player.vy = blocks::HEAD_BUMP_PUSH;
                 }
                 self.bumps.push(bump);
             }
@@ -475,10 +485,11 @@ impl Game {
             self.sparkles.push(Sparkle::new(tx, ty));
         }
 
-        let (level, player) = (&mut self.level, &self.player);
+        let (level, player) = (&mut self.level, &mut self.player);
+        let a_pressed = self.input.pressed.contains(Buttons::A);
         let mut spawned = Vec::new();
         self.bumps.retain_mut(|b| {
-            let (item, done) = b.step(level, player);
+            let (item, done) = b.step(level, player, a_pressed);
             spawned.extend(item);
             !done
         });
@@ -585,7 +596,7 @@ impl Game {
         let walls: Vec<(i32, i32)> = self.enemies.iter().filter_map(|e| e.wall_hit).collect();
         for (tx, ty) in walls {
             if self.bumps.len() < MAX_BUMPS
-                && let Some((bump, outcome)) = blocks::hit_block(&mut self.level, &self.player, tx, ty)
+                && let Some((bump, outcome)) = blocks::hit_block(&mut self.level, &self.player, tx, ty, HitFrom::Side)
             {
                 if outcome == HitOutcome::Coin {
                     self.status.add_coin();
@@ -838,6 +849,54 @@ mod tests {
         rules.final_metatile[7] = 0x5F;
         rules.bounce = [0, -64, -64, -48, -32, -16, 0, 16, 32, 48, 64];
         Level::new(w, h, m, TEST_SOLIDITY, rules)
+    }
+
+    /// A floor with a note block (0x2E) at column 6 of the ground row.
+    fn note_level() -> Level {
+        let (w, h) = (24, 10);
+        let mut m = vec![SKY; w * h];
+        for x in 0..w {
+            m[(h - 1) * w + x] = 0x53;
+        }
+        m[(h - 1) * w + 6] = 0x2E;
+        let mut rules = BlockRules::default();
+        rules.bump_behaviour[0x2E] = 0;
+        rules.land_behaviour[0x2E] = 0;
+        rules.result_hi[0x2E] = 0x40;
+        rules.final_kind[4] = 5;
+        rules.final_metatile[4] = 0x2E;
+        rules.bounce = [0, -64, -64, -48, -32, -16, 0, 16, 32, 48, 64];
+        Level::new(w, h, m, TEST_SOLIDITY, rules)
+    }
+
+    /// Highest point (smallest y) of the player after falling onto the note block, tapping
+    /// A during its bounce or not.
+    fn bounce_height(press_a: bool) -> i32 {
+        let mut g = Game::new();
+        g.enter_level(note_level(), (6 * TILE_PX + 2, 5 * TILE_PX), &[]);
+        g.screen = Screen::Level;
+        let mut top = i32::MAX;
+        let mut bounced = false;
+        for f in 0..120 {
+            // Tap A once the block is bouncing.
+            let held = if press_a && !g.bumps.is_empty() && f % 2 == 0 { Buttons::A } else { Buttons::empty() };
+            g.step(held);
+            bounced |= !g.bumps.is_empty();
+            if bounced {
+                top = top.min(g.player.px().1);
+            }
+        }
+        assert!(bounced, "the note block bounced");
+        let standing = 9 * TILE_PX - g.player.height();
+        assert!(top < standing - 16, "launched: {top} vs {standing}");
+        top
+    }
+
+    #[test]
+    fn landing_on_a_note_block_bounces_the_player_and_a_bounces_it_higher() {
+        let low = bounce_height(false);
+        let high = bounce_height(true);
+        assert!(high < low - 32, "A during the bounce: {high} vs {low}");
     }
 
     /// A big player gets a Super Leaf; it pops up, sways down and makes the player a raccoon.

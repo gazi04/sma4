@@ -231,6 +231,7 @@ pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_lis
     let t = rom.block_tables(tileset)?;
     let rules = BlockRules {
         bump_behaviour: t.bump_behaviour,
+        land_behaviour: t.land_behaviour,
         result_hi: t.result_hi,
         item_types: t.item_types,
         final_kind: t.final_kind,

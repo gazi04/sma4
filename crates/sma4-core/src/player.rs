@@ -746,6 +746,18 @@ impl Player {
         }
     }
 
+    /// The feet probe (probe 0, frame + (0x20, 8)) on a tile that reacts to being stood on
+    /// (note blocks: `BlockRules::land_behaviour`), while on the ground.
+    pub fn feet_block(&self, map: &Level) -> Option<(i32, i32)> {
+        if !self.on_ground {
+            return None;
+        }
+        let (px, py) = self.px();
+        let (tx, ty) = ((px + HITBOX_W / 2).div_euclid(TILE_PX), (py + self.height()).div_euclid(TILE_PX));
+        let m = map.metatile(tx, ty)?;
+        (m < 0x100 && map.rules.land_behaviour[m as usize] != sma4_assets::BlockRules::NOT_BUMPABLE).then_some((tx, ty))
+    }
+
     /// Puts the feet on `floor` (px) and lands (0x080A3A5C).
     fn land(&mut self, floor: i32) {
         self.y = (floor - self.height()) * SUB;

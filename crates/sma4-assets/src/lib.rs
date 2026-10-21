@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub const METATILE: u32 = 16;
 pub const DEFAULT_DIR: &str = "assets/extracted";
 
-const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV12";
+const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV13";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssetError {
@@ -227,6 +227,9 @@ pub struct BlockRules {
     /// Per low-layer metatile id: behaviour when hit by the player's head-centre probe while
     /// moving up, or `NOT_BUMPABLE`.
     pub bump_behaviour: [u8; 256],
+    /// Per low-layer metatile id: behaviour when the feet probe (probe 0) stands on it
+    /// (note blocks), or `NOT_BUMPABLE`.
+    pub land_behaviour: [u8; 256],
     /// Per metatile id: high nibble of the hit result (selects the final tile kind).
     pub result_hi: [u8; 256],
     /// Object type spawned for a hit result's low nibble (0 = none).
@@ -241,10 +244,11 @@ pub struct BlockRules {
 
 impl BlockRules {
     pub const NOT_BUMPABLE: u8 = 0xFF;
-    const BYTES: usize = 256 + 256 + 32 + 16 + 64 + 11;
+    const BYTES: usize = 256 + 256 + 256 + 32 + 16 + 64 + 11;
 
     fn write(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.bump_behaviour);
+        out.extend_from_slice(&self.land_behaviour);
         out.extend_from_slice(&self.result_hi);
         self.item_types.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
         out.extend_from_slice(&self.final_kind);
@@ -262,6 +266,7 @@ impl BlockRules {
         };
         Self {
             bump_behaviour: take(256).try_into().unwrap(),
+            land_behaviour: take(256).try_into().unwrap(),
             result_hi: take(256).try_into().unwrap(),
             item_types: u16s(take(32)).try_into().unwrap(),
             final_kind: take(16).try_into().unwrap(),
@@ -275,6 +280,7 @@ impl Default for BlockRules {
     fn default() -> Self {
         Self {
             bump_behaviour: [Self::NOT_BUMPABLE; 256],
+            land_behaviour: [Self::NOT_BUMPABLE; 256],
             result_hi: [0; 256],
             item_types: [0; 16],
             final_kind: [0; 16],

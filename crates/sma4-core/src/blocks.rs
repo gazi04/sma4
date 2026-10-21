@@ -71,6 +71,10 @@ pub struct Bump {
     pub result: u8,
     /// Metatile the cell turns into when the bounce ends.
     pub final_metatile: u16,
+    /// Hit from above (stood on): the block dips first and carries the player.
+    pub from: HitFrom,
+    /// A was pressed during a bounce from above: the launch is higher (+0x24).
+    pub high: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,17 +154,34 @@ pub enum HitOutcome {
     Item,
 }
 
-/// Reacts to the player's head hitting tile `(tx, ty)`. Returns `None` if the tile does
-/// not react (a plain ceiling).
-pub fn hit_block(level: &mut Level, player: &Player, tx: i32, ty: i32) -> Option<(Bump, HitOutcome)> {
+/// Where a block was hit from: the bump direction 0x03003CFB the bump object keeps in
+/// +0x1D (0x0809FC1C).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitFrom {
+    /// The feet probe, moving down or standing (0): a note block dips and launches.
+    Above,
+    /// The head (1).
+    Below,
+    /// The raccoon's tail or a kicked shell (probe 4).
+    Side,
+}
+
+/// Reacts to the player's head (or feet, for `HitFrom::Above`) hitting tile `(tx, ty)`.
+/// Returns `None` if the tile does not react (a plain ceiling or floor).
+pub fn hit_block(level: &mut Level, player: &Player, tx: i32, ty: i32, from: HitFrom) -> Option<(Bump, HitOutcome)> {
     let m = level.metatile(tx, ty)?;
     if m >= 0x100 {
         return None; // high-layer specials use a different path (0x080A12BC), not ported
     }
-    let behaviour = level.rules.bump_behaviour[m as usize];
+    let behaviour = match from {
+        HitFrom::Below | HitFrom::Side => level.rules.bump_behaviour[m as usize],
+        HitFrom::Above => level.rules.land_behaviour[m as usize],
+    };
     // Behaviour handlers (table 0x0817310C) return the low nibble of the hit result.
     let small = player.form == Form::Small;
     let (low, outcome) = match behaviour {
+        // 0x0809FF30: a plain bump (note blocks), result 1: no item.
+        0 => (1, HitOutcome::Nothing),
         // 0x0809FF34: mushroom for a small player, else the fire flower (result 2).
         1 => (if small { 5 } else { 2 }, HitOutcome::Item),
         // 0x0809FF64: power-up block. Small player gets result 5, otherwise 3.
@@ -181,13 +202,23 @@ pub fn hit_block(level: &mut Level, player: &Player, tx: i32, ty: i32) -> Option
         k => level.rules.final_metatile[(k - 1) as usize],
     };
     level.set(tx, ty, BUMP_PLACEHOLDER);
-    let bump = Bump { tx, ty, timer: BUMP_FRAMES, lift: 0, result, final_metatile };
+    let bump = Bump { tx, ty, timer: BUMP_FRAMES, lift: 0, result, final_metatile, from, high: false };
     Some((bump, outcome))
 }
 
+/// Bump init 0x08084EB8: a block hit by the head pushes the player down (speed byte 0x20,
+/// sound 0x60); the tail and shells do not.
+pub const HEAD_BUMP_PUSH: i32 = 0x20 * 16;
+/// Launch when a note block's bounce ends (0x08084FBC): speed byte 0xC8, or 0x90 if A
+/// was pressed during the bounce (+0x24 = 0xB).
+pub const NOTE_LAUNCH: i32 = -0x38 * 16;
+pub const NOTE_LAUNCH_HIGH: i32 = -0x70 * 16;
+
 impl Bump {
-    /// One frame of the bump-block object. Returns an item to spawn, and whether it ended.
-    pub fn step(&mut self, level: &mut Level, player: &Player) -> (Option<Item>, bool) {
+    /// One frame of the bump-block object (0x08084FBC). Returns an item to spawn, and
+    /// whether it ended. A block stood on carries the player and launches it at the end;
+    /// `a_pressed` is this frame's new A press (0x03003AEC bit 0).
+    pub fn step(&mut self, level: &mut Level, player: &mut Player, a_pressed: bool) -> (Option<Item>, bool) {
         let mut spawned = None;
         if self.timer == BUMP_FRAMES {
             let kind = level.rules.item_types[(self.result & 0xF) as usize];
@@ -198,11 +229,28 @@ impl Bump {
         }
         if self.timer == 1 {
             level.set(self.tx, self.ty, self.final_metatile);
+            if self.from == HitFrom::Above {
+                player.vy = if self.high { NOTE_LAUNCH_HIGH } else { NOTE_LAUNCH };
+                player.on_ground = false;
+            }
             return (spawned, true);
         }
         // Bounce speed per timer value (1/16 px per frame). Positive values move the block
-        // up first, then back down; over timers 10..2 the profile sums to zero.
-        self.lift += level.rules.bounce[self.timer as usize] as i32 * 16;
+        // up first, then back down; over timers 10..2 the profile sums to zero. Hit from
+        // above, it goes down first (+0x12 = the table value, not its negation).
+        let speed = level.rules.bounce[self.timer as usize] as i32 * 16;
+        match self.from {
+            HitFrom::Below | HitFrom::Side => self.lift += speed,
+            HitFrom::Above => {
+                self.lift -= speed;
+                // The player rides it: its speed follows the block's while the block rises
+                // or the player is not rising.
+                if speed < 0 || player.vy >= 0 {
+                    player.vy = speed;
+                }
+                self.high |= a_pressed;
+            }
+        }
         self.timer -= 1;
         (spawned, false)
     }
@@ -229,6 +277,8 @@ impl Item {
             STAR => (dir * STAR_SPEED, STAR_LAUNCH, ITEM_GRACE),
             _ => (dir * ITEM_SPEED, 0, 0),
         };
+        // TODO(re): stood on (note blocks), the flower and the star skip the rise
+        // (0x0804E548 / 0x0804E4E0 with 0x03003CFB = 0); here they always rise.
         Self { kind, x: x * SUB, y: y * SUB, vx, vy, phase: ItemPhase::Emerging { timer: EMERGE_FRAMES, sub: 0 }, grace }
     }
 
@@ -339,12 +389,18 @@ impl Item {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hit(level: &mut Level, player: &Player, tx: i32, ty: i32, from: HitFrom) -> (Bump, HitOutcome) {
+        hit_block(level, player, tx, ty, from).unwrap()
+    }
     use crate::level::{SKY, TEST_SOLIDITY};
     use sma4_assets::BlockRules;
 
     const QBLOCK: u16 = 0x61;
     const COIN_BLOCK: u16 = 0x63;
     const USED: u16 = 0x5F;
+    const NOTE: u16 = 0x2E;
+    const NOTE_LEAF: u16 = 0x30;
     const GROUND: u16 = 0x53;
 
     /// Rules with the values the extractor reads from the European ROM for tileset 1.
@@ -359,6 +415,15 @@ mod tests {
         r.final_kind[2] = 8;
         r.final_metatile[7] = USED;
         r.bounce = [0, -64, -64, -48, -32, -16, 0, 16, 32, 48, 64];
+        // Note blocks: plain (behaviour 0) and with a leaf (2), from below and from above;
+        // high nibble 0x40 -> kind 5 -> the plain note block again.
+        for (id, b) in [(NOTE, 0), (NOTE_LEAF, 2)] {
+            r.bump_behaviour[id as usize] = b;
+            r.land_behaviour[id as usize] = b;
+            r.result_hi[id as usize] = 0x40;
+        }
+        r.final_kind[4] = 5;
+        r.final_metatile[4] = NOTE;
         r
     }
 
@@ -376,19 +441,19 @@ mod tests {
     #[test]
     fn question_block_releases_growth_item_and_becomes_used() {
         let mut lvl = level(QBLOCK);
-        let player = Player::spawn(4 * TILE_PX, 6 * TILE_PX - 16);
-        let (mut bump, outcome) = hit_block(&mut lvl, &player, 5, 4).unwrap();
+        let mut player = Player::spawn(4 * TILE_PX, 6 * TILE_PX - 16);
+        let (mut bump, outcome) = hit(&mut lvl, &player, 5, 4, HitFrom::Below);
         assert_eq!(outcome, HitOutcome::Item);
         assert_eq!(bump.result, 0x25);
         assert_eq!(lvl.metatile(5, 4), Some(BUMP_PLACEHOLDER));
 
-        let (item, done) = bump.step(&mut lvl, &player);
+        let (item, done) = bump.step(&mut lvl, &mut player, false);
         let item = item.expect("growth item spawned on the first bump frame");
         assert_eq!(item.kind, GROWTH_ITEM);
         assert!(!done);
         assert!(bump.lift > 0, "block moves up first");
         let mut frames = 1;
-        while !bump.step(&mut lvl, &player).1 {
+        while !bump.step(&mut lvl, &mut player, false).1 {
             frames += 1;
         }
         assert_eq!(frames + 1, BUMP_FRAMES as usize);
@@ -402,17 +467,17 @@ mod tests {
         let mut lvl = level(QBLOCK);
         let mut player = Player::spawn(4 * TILE_PX, 6 * TILE_PX - 16);
         player.grow();
-        let (bump, _) = hit_block(&mut lvl, &player, 5, 4).unwrap();
+        let (bump, _) = hit(&mut lvl, &player, 5, 4, HitFrom::Below);
         assert_eq!(bump.result, 0x23);
     }
 
     #[test]
     fn coin_block_gives_coin_and_no_item() {
         let mut lvl = level(COIN_BLOCK);
-        let player = Player::spawn(4 * TILE_PX, 6 * TILE_PX - 16);
-        let (mut bump, outcome) = hit_block(&mut lvl, &player, 5, 4).unwrap();
+        let mut player = Player::spawn(4 * TILE_PX, 6 * TILE_PX - 16);
+        let (mut bump, outcome) = hit(&mut lvl, &player, 5, 4, HitFrom::Below);
         assert_eq!(outcome, HitOutcome::Coin);
-        assert!(bump.step(&mut lvl, &player).0.is_none());
+        assert!(bump.step(&mut lvl, &mut player, false).0.is_none());
     }
 
     #[test]
@@ -434,16 +499,16 @@ mod tests {
     fn plain_tiles_do_not_react() {
         let mut lvl = level(GROUND);
         let player = Player::spawn(4 * TILE_PX, 6 * TILE_PX - 16);
-        assert!(hit_block(&mut lvl, &player, 5, 4).is_none());
+        assert!(hit_block(&mut lvl, &player, 5, 4, HitFrom::Below).is_none());
     }
 
     #[test]
     fn item_rises_out_of_the_block_then_walks_away_from_player() {
         let mut lvl = level(QBLOCK);
-        let player = Player::spawn(4 * TILE_PX, 6 * TILE_PX - 16); // left of the block
-        let (mut bump, _) = hit_block(&mut lvl, &player, 5, 4).unwrap();
-        let mut item = bump.step(&mut lvl, &player).0.unwrap();
-        while !bump.step(&mut lvl, &player).1 {}
+        let mut player = Player::spawn(4 * TILE_PX, 6 * TILE_PX - 16); // left of the block
+        let (mut bump, _) = hit(&mut lvl, &player, 5, 4, HitFrom::Below);
+        let mut item = bump.step(&mut lvl, &mut player, false).0.unwrap();
+        while !bump.step(&mut lvl, &mut player, false).1 {}
         let start_y = item.px().1;
         // Waits 16 frames, then rises 1 px every 3 frames.
         for _ in 0..(EMERGE_FRAMES - RISE_BELOW) {
@@ -485,5 +550,68 @@ mod tests {
         }
         assert!(item.vx < 0);
         let _ = player;
+    }
+
+    #[test]
+    fn a_note_block_stood_on_dips_carries_the_player_and_launches_it() {
+        let mut lvl = level(NOTE);
+        let mut player = Player::spawn(5 * TILE_PX, 4 * TILE_PX - 16);
+        player.on_ground = true;
+        let (mut bump, outcome) = hit(&mut lvl, &player, 5, 4, HitFrom::Above);
+        assert_eq!(outcome, HitOutcome::Nothing);
+        let mut lifts = Vec::new();
+        let mut speeds = Vec::new();
+        loop {
+            let (item, done) = bump.step(&mut lvl, &mut player, false);
+            assert!(item.is_none());
+            if done {
+                break;
+            }
+            lifts.push(bump.lift);
+            speeds.push(player.vy / 16);
+        }
+        assert!(lifts[0] < 0, "goes down first: {lifts:?}");
+        assert_eq!(*lifts.last().unwrap(), 0, "back in its cell");
+        // The player follows the block down, then up.
+        assert_eq!(speeds, [64, 48, 32, 16, 0, -16, -32, -48, -64]);
+        assert_eq!(player.vy, NOTE_LAUNCH);
+        assert!(!player.on_ground);
+        assert_eq!(lvl.metatile(5, 4), Some(NOTE), "still a note block");
+    }
+
+    #[test]
+    fn pressing_a_during_the_bounce_launches_higher() {
+        let mut lvl = level(NOTE);
+        let mut player = Player::spawn(5 * TILE_PX, 4 * TILE_PX - 16);
+        let (mut bump, _) = hit(&mut lvl, &player, 5, 4, HitFrom::Above);
+        let mut f = 0;
+        while !bump.step(&mut lvl, &mut player, f == 6).1 {
+            f += 1;
+        }
+        assert_eq!(player.vy, NOTE_LAUNCH_HIGH);
+    }
+
+    #[test]
+    fn a_note_block_hit_from_below_goes_up_and_does_not_launch() {
+        let mut lvl = level(NOTE);
+        let mut player = Player::spawn(5 * TILE_PX, 6 * TILE_PX - 16);
+        let (mut bump, _) = hit(&mut lvl, &player, 5, 4, HitFrom::Below);
+        player.vy = HEAD_BUMP_PUSH;
+        assert!(!bump.step(&mut lvl, &mut player, true).1);
+        assert!(bump.lift > 0);
+        while !bump.step(&mut lvl, &mut player, true).1 {}
+        assert_eq!(player.vy, HEAD_BUMP_PUSH, "the player is left alone");
+    }
+
+    #[test]
+    fn a_note_block_with_an_item_releases_it_when_stood_on_and_stays_a_note_block() {
+        let mut lvl = level(NOTE_LEAF);
+        let mut player = Player::spawn(5 * TILE_PX, 4 * TILE_PX - 16);
+        let (mut bump, outcome) = hit(&mut lvl, &player, 5, 4, HitFrom::Above);
+        assert_eq!(outcome, HitOutcome::Item);
+        let (item, _) = bump.step(&mut lvl, &mut player, false);
+        assert_eq!(item.map(|i| i.kind), Some(GROWTH_ITEM), "small player: mushroom");
+        while !bump.step(&mut lvl, &mut player, false).1 {}
+        assert_eq!(lvl.metatile(5, 4), Some(NOTE));
     }
 }
