@@ -245,6 +245,8 @@ pub struct Player {
     star_timer: i8,
     /// Throw pose timer (+0x67 = 0xB when a fireball is thrown).
     pub throw: u8,
+    /// Course clear: has stood on the ground since touching the card (+0x43).
+    goal_walking: bool,
     /// Skidding this frame: the skid pose, and the skid dust follows (0x08097800).
     pub skidding: bool,
 }
@@ -647,10 +649,16 @@ impl Player {
             self.vx = 0;
             return;
         }
-        if self.on_ground {
+        // +0x43 is set the first time the player stands on the ground; from then on
+        // 0x080A8000 walks right, also through the air (e.g. off the end of World 1-2's
+        // ground), until the player is off the screen.
+        self.goal_walking |= self.on_ground;
+        if self.goal_walking {
             self.vx = GOAL_WALK * UNIT;
             self.facing_left = false;
-            self.walk_step = ((frame & 6) >> 1) as u8;
+            if self.on_ground {
+                self.walk_step = ((frame & 6) >> 1) as u8;
+            }
         } else {
             self.vx = 0;
         }

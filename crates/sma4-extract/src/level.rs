@@ -197,9 +197,11 @@ pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_lis
         Metatile { id: pages[o], high: high[o] != 0 }
     };
 
-    // Width: up to the last column containing anything but sky, rounded to whole pages.
-    let last = (0..PAGES * 16).filter(|&x| (0..ROWS).any(|y| at(x, y) != SKY)).max().unwrap_or(0);
-    let width = (last + 16) & !15;
+    // Width: the level's last screen page, header byte 4 bits 3-0 (0x08014F20 ->
+    // 0x03003AE6; the camera stops there, 0x0809869C). Some levels fill all 16 pages with
+    // a background metatile, so the content alone does not tell where they end.
+    let width = ((hdr[4] & 0x0F) as usize + 1) * 16;
+    debug_assert!(width <= PAGES * 16);
 
     let solidity = rom.solidity(tileset)?;
     let metatiles: Vec<u16> =

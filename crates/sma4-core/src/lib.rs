@@ -1042,6 +1042,30 @@ mod tests {
     }
 
     #[test]
+    fn the_course_clear_walk_carries_on_off_the_end_of_the_ground() {
+        // World 1-2: slope collision, and the ground ends before the player is off the
+        // screen, so he walks off it and must keep going through the air (+0x43).
+        let mut level = crate::level::test_hill();
+        for x in 17..24 {
+            level.set(x, 7, 0x80);
+        }
+        let mut g = Game::new();
+        let list = [sma4_assets::EnemySpawn { kind: goal::GOAL, col: 1, row: 6 }];
+        g.enter_level(level, (TILE_PX, 7 * TILE_PX - 16), &list);
+        g.set_time_limit(100);
+        g.screen = Screen::Level;
+        g.step(Buttons::empty());
+        assert!(g.goal_camera.is_some(), "touched");
+        let mut frames = 0;
+        while g.screen == Screen::Level {
+            g.step(Buttons::empty());
+            frames += 1;
+            assert!(frames < 3000, "stuck at {:?}", g.player.px());
+        }
+        assert_eq!(g.screen, Screen::Map);
+    }
+
+    #[test]
     fn touching_the_goal_card_clears_the_level() {
         let (w, h) = (40, 10);
         let mut kinds = vec![TileKind::Empty; w * h];
