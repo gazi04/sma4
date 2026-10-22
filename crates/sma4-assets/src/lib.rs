@@ -337,6 +337,11 @@ pub const fn anim_frame(frame: u32) -> usize {
     ((frame & 0x18) >> 3) as usize
 }
 
+/// A piece of a broken brick (effect kind 2): one 8x8 image.
+pub fn brick_debris_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("brick_debris.png")
+}
+
 /// Sparkle left where a coin was collected: 8x8 cells, tile 0x68 + i (smallest first).
 pub fn sparkle_path(dir: &Path) -> PathBuf {
     dir.join("objects").join("sparkle.png")

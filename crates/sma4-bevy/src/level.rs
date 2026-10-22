@@ -63,9 +63,9 @@ pub struct LevelPlugin;
 
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_level, load_item_art, load_coin_frames, load_sparkle_frames, load_skid_dust_frames))
+        app.add_systems(Startup, (spawn_level, load_item_art, load_coin_frames, load_sparkle_frames, load_skid_dust_frames, load_debris))
             .add_systems(Update, (debug_popup, load_pending_level, load_pending_area, follow_area).chain())
-            .add_systems(Update, (sync_tiles, animate_tiles, sync_bumps, sync_items, sync_coins, sync_sparkles, sync_skid_dust))
+            .add_systems(Update, (sync_tiles, animate_tiles, sync_bumps, sync_items, sync_coins, sync_sparkles, sync_skid_dust, sync_debris))
             .add_systems(Update, sync_background.after(crate::player::CameraMoved));
     }
 }
@@ -519,6 +519,35 @@ fn sync_sparkles(
                 Sprite::from_image(image.clone()),
                 Transform::from_xyz((x + 4) as f32, -((y + 4) as f32), Z_SPARKLE),
             ));
+        }
+    }
+}
+
+/// A piece of a broken brick (`objects/brick_debris.png`).
+#[derive(Resource)]
+struct DebrisImage(Option<Handle<Image>>);
+
+#[derive(Component)]
+struct DebrisSprite;
+
+fn load_debris(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMut<Assets<Image>>) {
+    let piece = crate::player::load_cells(&sma4_assets::brick_debris_path(&dir.0), 8, 8, &mut images).into_iter().next();
+    commands.insert_resource(DebrisImage(piece));
+}
+
+/// Broken bricks: four 8x8 pieces each, flipped by the frame counter (0x080907F0).
+fn sync_debris(mut commands: Commands, game: Res<GameRes>, art: Res<DebrisImage>, old: Query<Entity, With<DebrisSprite>>) {
+    for e in &old {
+        commands.entity(e).despawn();
+    }
+    let Some(image) = &art.0 else { return };
+    let (flip_x, flip_y) = sma4_core::blocks::BrickDebris::flips(game.0.frame);
+    for d in &game.0.debris {
+        for (x, y) in d.pieces() {
+            let mut sprite = Sprite::from_image(image.clone());
+            sprite.flip_x = flip_x;
+            sprite.flip_y = flip_y;
+            commands.spawn((DebrisSprite, sprite, Transform::from_xyz((x + 4) as f32, -((y + 4) as f32), Z_SPARKLE)));
         }
     }
 }

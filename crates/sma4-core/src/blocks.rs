@@ -152,6 +152,9 @@ pub enum HitOutcome {
     Nothing,
     Coin,
     Item,
+    /// A brick broke (0x080A0024: sound 0x5D, 10 points, debris); no bump. `coin`: a coin
+    /// sitting on it was knocked out too.
+    Broken { coin: bool },
 }
 
 /// Where a block was hit from: the bump direction 0x03003CFB the bump object keeps in
@@ -162,23 +165,27 @@ pub enum HitFrom {
     Above,
     /// The head (1).
     Below,
-    /// The raccoon's tail or a kicked shell (probe 4).
+    /// The raccoon's tail or a kicked shell (probe 4): bricks break even for a small player.
     Side,
 }
 
+/// Tile 0x66 is skipped outside tileset 0 (0x0809FC1C); World 1 never uses tileset 0.
+const SKIPPED_TILE: u16 = 0x66;
+
 /// Reacts to the player's head (or feet, for `HitFrom::Above`) hitting tile `(tx, ty)`.
 /// Returns `None` if the tile does not react (a plain ceiling or floor).
-pub fn hit_block(level: &mut Level, player: &Player, tx: i32, ty: i32, from: HitFrom) -> Option<(Bump, HitOutcome)> {
+pub fn hit_block(level: &mut Level, player: &Player, tx: i32, ty: i32, from: HitFrom) -> Option<(Option<Bump>, HitOutcome)> {
     let m = level.metatile(tx, ty)?;
-    if m >= 0x100 {
+    if m >= 0x100 || m == SKIPPED_TILE {
         return None; // high-layer specials use a different path (0x080A12BC), not ported
     }
     let behaviour = match from {
         HitFrom::Below | HitFrom::Side => level.rules.bump_behaviour[m as usize],
         HitFrom::Above => level.rules.land_behaviour[m as usize],
     };
-    // Behaviour handlers (table 0x0817310C) return the low nibble of the hit result.
     let small = player.form == Form::Small;
+    let mut hi = level.rules.result_hi[m as usize];
+    // Behaviour handlers (table 0x0817310C) return the low nibble of the hit result.
     let (low, outcome) = match behaviour {
         // 0x0809FF30: a plain bump (note blocks), result 1: no item.
         0 => (1, HitOutcome::Nothing),
@@ -193,7 +200,7 @@ pub fn hit_block(level: &mut Level, player: &Player, tx: i32, ty: i32, from: Hit
         // TODO(re): other behaviours (bricks, vines, multi-coin...).
         _ => return None,
     };
-    let result = low | level.rules.result_hi[m as usize];
+    let result = low | hi;
     let kind = level.rules.final_kind[(result >> 4) as usize];
     let final_metatile = match kind {
         0 => m,
@@ -203,7 +210,58 @@ pub fn hit_block(level: &mut Level, player: &Player, tx: i32, ty: i32, from: Hit
     };
     level.set(tx, ty, BUMP_PLACEHOLDER);
     let bump = Bump { tx, ty, timer: BUMP_FRAMES, lift: 0, result, final_metatile, from, high: false };
-    Some((bump, outcome))
+    Some((Some(bump), outcome))
+}
+
+/// Multi-coin block timer (0x080A0154: 0x03003CFE = 200, -1 a frame in 0x08094780).
+const MULTI_COIN_TIME: u8 = 200;
+
+/// The four pieces of a broken brick (effect kind 2: init 0x080A0024, step 0x0809098C,
+/// draw 0x080907F0): from the cell's top-left, the top pair rises at -6 and the bottom pair
+/// (8 px lower) 2 px faster down each frame; the speed grows by 1 every 4th frame (frame
+/// counter & 3); the pieces spread 1 px a frame to each side (x - t and x + 8 + t). Tile
+/// 0xA5, flipped by the frame counter (bits 1 and 2). Gone once the top pair is 0xB0 px
+/// into the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrickDebris {
+    x: i32,
+    y_top: i32,
+    y_bottom: i32,
+    vy: i32,
+    spread: i32,
+}
+
+const DEBRIS_VY: i32 = -6;
+const DEBRIS_BOTTOM_EXTRA: i32 = 2;
+const DEBRIS_GONE: i32 = 0xB0;
+
+impl BrickDebris {
+    pub fn new(tx: i32, ty: i32) -> Self {
+        let (x, y) = (tx * TILE_PX, ty * TILE_PX);
+        Self { x, y_top: y, y_bottom: y + 8, vy: DEBRIS_VY, spread: 0 }
+    }
+
+    /// One frame; false once it has fallen out of view.
+    pub fn step(&mut self, frame: u32, camera: (i32, i32)) -> bool {
+        if frame & 3 == 0 {
+            self.vy += 1;
+        }
+        self.y_top += self.vy;
+        self.spread += 1;
+        self.y_bottom += self.vy + DEBRIS_BOTTOM_EXTRA;
+        self.y_top - camera.1 < DEBRIS_GONE
+    }
+
+    /// Top-left of each 8x8 piece.
+    pub fn pieces(&self) -> [(i32, i32); 4] {
+        let (l, r) = (self.x - self.spread, self.x + 8 + self.spread);
+        [(l, self.y_top), (r, self.y_top), (l, self.y_bottom), (r, self.y_bottom)]
+    }
+
+    /// (h-flip, v-flip) for frame counter `frame` (0x03003CF6 bits 1 and 2).
+    pub fn flips(frame: u32) -> (bool, bool) {
+        (frame & 2 != 0, frame & 4 != 0)
+    }
 }
 
 /// Bump init 0x08084EB8: a block hit by the head pushes the player down (speed byte 0x20,
@@ -391,7 +449,8 @@ mod tests {
     use super::*;
 
     fn hit(level: &mut Level, player: &Player, tx: i32, ty: i32, from: HitFrom) -> (Bump, HitOutcome) {
-        hit_block(level, player, tx, ty, from).unwrap()
+        let (bump, outcome) = hit_block(level, player, tx, ty, from).unwrap();
+        (bump.expect("a bump"), outcome)
     }
     use crate::level::{SKY, TEST_SOLIDITY};
     use sma4_assets::BlockRules;
@@ -438,6 +497,9 @@ mod tests {
         Level::new(w, h, m, TEST_SOLIDITY, rules())
     }
 
+    const BRICK: u16 = 0x67;
+    const MULTI: u16 = 0x6D;
+    const MULTI_ON: u16 = 0x6B;
     #[test]
     fn question_block_releases_growth_item_and_becomes_used() {
         let mut lvl = level(QBLOCK);
@@ -462,6 +524,18 @@ mod tests {
         assert_eq!(lvl.at(5, 4), TileKind::Solid);
     }
 
+        // Brick (behaviour 6, hi 0x30 -> kind 7 -> itself), multi-coin brick (8, hi 0x60 ->
+        // kind 11 -> 0x6B) and the coin block it turns into (4, hi 0x20 -> used block).
+        r.bump_behaviour[BRICK as usize] = 6;
+        r.result_hi[BRICK as usize] = 0x30;
+        r.final_kind[3] = 7;
+        r.final_metatile[6] = BRICK;
+        r.bump_behaviour[MULTI as usize] = 8;
+        r.result_hi[MULTI as usize] = 0x60;
+        r.final_kind[6] = 11;
+        r.final_metatile[10] = MULTI_ON;
+        r.bump_behaviour[MULTI_ON as usize] = 4;
+        r.result_hi[MULTI_ON as usize] = 0x20;
     #[test]
     fn big_player_gets_a_different_result() {
         let mut lvl = level(QBLOCK);
@@ -615,3 +689,68 @@ mod tests {
         assert_eq!(lvl.metatile(5, 4), Some(NOTE));
     }
 }
+
+    #[test]
+    fn a_small_player_bumps_a_brick_and_a_big_one_breaks_it() {
+        let mut lvl = level(BRICK);
+        let mut player = Player::spawn(4 * TILE_PX, 6 * TILE_PX - 16);
+        let (mut bump, outcome) = hit(&mut lvl, &player, 5, 4, HitFrom::Below);
+        assert_eq!(outcome, HitOutcome::Nothing);
+        while !bump.step(&mut lvl, &mut player, false).1 {}
+        assert_eq!(lvl.metatile(5, 4), Some(BRICK), "still a brick");
+        player.grow();
+        let (bump, outcome) = hit_block(&mut lvl, &player, 5, 4, HitFrom::Below).unwrap();
+        assert!(bump.is_none(), "no bump object");
+        assert_eq!(outcome, HitOutcome::Broken { coin: false });
+        assert_eq!(lvl.at(5, 4), TileKind::Empty);
+    }
+
+    #[test]
+    fn the_tail_breaks_bricks_even_small_and_a_coin_on_top_is_knocked_out() {
+        let mut lvl = level(BRICK);
+        lvl.set(5, 3, crate::coins::COIN);
+        let player = Player::spawn(4 * TILE_PX, 6 * TILE_PX - 16);
+        let (_, outcome) = hit_block(&mut lvl, &player, 5, 4, HitFrom::Side).unwrap();
+        assert_eq!(outcome, HitOutcome::Broken { coin: true });
+        assert_eq!(lvl.at(5, 3), TileKind::Empty);
+    }
+
+    #[test]
+    fn the_multi_coin_brick_pays_until_its_timer_runs_out() {
+        let mut lvl = level(MULTI);
+        let mut player = Player::spawn(4 * TILE_PX, 6 * TILE_PX - 16);
+        let mut coins = 0;
+        let mut hits = 0;
+        loop {
+            let Some((bump, outcome)) = hit_block(&mut lvl, &player, 5, 4, HitFrom::Below) else { break };
+            hits += 1;
+            coins += (outcome == HitOutcome::Coin) as u32;
+            let mut bump = bump.unwrap();
+            // Hit it again every 20 frames.
+            for _ in 0..20 {
+                bump.step(&mut lvl, &mut player, false);
+                lvl.coin_timer = lvl.coin_timer.saturating_sub(1);
+            }
+            assert!(hits < 30);
+        }
+        assert_eq!(lvl.metatile(5, 4), Some(USED));
+        // 200 frames at one hit every 20: ten while the timer runs, and one more after.
+        assert_eq!((hits, coins), (11, 11));
+    }
+
+    #[test]
+    fn brick_debris_flies_up_spreads_and_falls_away() {
+        let mut d = BrickDebris::new(5, 4);
+        let top = d.pieces()[0].1;
+        let mut highest = top;
+        let mut f = 0;
+        while d.step(f, (0, 0)) {
+            highest = highest.min(d.pieces()[0].1);
+            f += 1;
+            assert!(f < 200);
+        }
+        assert!(top - highest > 10, "rose {}", top - highest);
+        let [l, r, bl, _] = d.pieces();
+        assert_eq!(r.0 - l.0, 8 + 2 * f as i32 + 2);
+        assert!(bl.1 > l.1, "the bottom pair falls faster");
+    }

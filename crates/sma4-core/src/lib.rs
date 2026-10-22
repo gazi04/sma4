@@ -69,6 +69,8 @@ pub struct Game {
     pub spawner: Spawner,
     /// Goomba pipes in range (generator slots 0x03007848 + 0xA54).
     pub goomba_pipes: Vec<enemies::GoombaPipe>,
+    /// Pieces of broken bricks (effect slots 0x03007848 + 0x7E0).
+    pub debris: Vec<blocks::BrickDebris>,
     /// Frames of invulnerability left after taking a hit.
     pub invulnerable: u16,
     /// Status-bar "P" blink counter (0x03003852), counted down while the P-meter is full.
@@ -177,6 +179,7 @@ impl Game {
     /// Top-left of a GBA-sized view following the player, clamped to the level (the view
     /// `sma4-bevy` centres on the player).
     pub fn camera(&self) -> (i32, i32) {
+        self.debris.clear();
         let (cx, cy) = self.player.centre();
         let (w, h) = (SCREEN_W as i32, SCREEN_H as i32);
         let (min_x, max_x) = self.level.camera_x.unwrap_or((0, (self.level.pixel_width() - w).max(0)));
@@ -343,6 +346,24 @@ impl Game {
     }
 
     /// Back to the map: with the "WORLD n" panel or straight to walking.
+    /// Coins and debris from a block hit.
+    fn block_outcome(&mut self, tx: i32, ty: i32, outcome: HitOutcome) {
+        let coin = match outcome {
+            HitOutcome::Coin => true,
+            HitOutcome::Broken { coin } => {
+                // 0x080A0024: 10 points (0x030038AC = 1) and the pieces.
+                self.status.add_score(1);
+                self.debris.push(blocks::BrickDebris::new(tx, ty));
+                coin
+            }
+            HitOutcome::Item | HitOutcome::Nothing => false,
+        };
+        if coin {
+            self.status.add_coin();
+            self.coin_pops.push(CoinPop::new(tx, ty));
+        }
+    }
+
     fn to_map(&mut self, intro: bool) {
         if let Some(map) = &mut self.world_map {
             map.show(intro);
@@ -468,12 +489,12 @@ impl Game {
             if self.bumps.len() < MAX_BUMPS
                 && let Some((bump, outcome)) = blocks::hit_block(&mut self.level, &self.player, tx, ty, from)
             {
-                if outcome == HitOutcome::Coin {
-                    self.status.add_coin();
-                    self.coin_pops.push(CoinPop::new(tx, ty));
-                }
-                if head {
-                    self.player.vy = blocks::HEAD_BUMP_PUSH;
+                self.block_outcome(tx, ty, outcome);
+                if let Some(bump) = bump {
+                    if head {
+                        self.player.vy = blocks::HEAD_BUMP_PUSH;
+                    }
+                    self.bumps.push(bump);
                 }
                 self.bumps.push(bump);
             }
@@ -598,11 +619,8 @@ impl Game {
             if self.bumps.len() < MAX_BUMPS
                 && let Some((bump, outcome)) = blocks::hit_block(&mut self.level, &self.player, tx, ty, HitFrom::Side)
             {
-                if outcome == HitOutcome::Coin {
-                    self.status.add_coin();
-                    self.coin_pops.push(CoinPop::new(tx, ty));
-                }
-                self.bumps.push(bump);
+                self.block_outcome(tx, ty, outcome);
+                self.bumps.extend(bump);
             }
         }
         // Tail hits score with the stomp chain without advancing it (0x0804955C).
@@ -657,6 +675,7 @@ impl Game {
         }
         // Falling out of the level costs a life straight away.
         if self.player.px().1 > self.level.pixel_height() + 32 {
+        let view = self.camera();
             self.lose_life();
         }
     }
@@ -678,6 +697,9 @@ mod tests {
         g.step(Buttons::empty());
         assert!(g.input.pressed.is_empty());
     }
+        self.debris.retain_mut(|d| d.step(frame, view));
+        // 0x08094780: the multi-coin block's timer.
+        self.level.coin_timer = self.level.coin_timer.saturating_sub(1);
 
     /// Full loop: jump into a question block, wait for the item, walk into it, grow.
     #[test]

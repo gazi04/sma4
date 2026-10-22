@@ -226,6 +226,22 @@ pub fn extract_score_popups(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -
 }
 
 /// Sparkle frames side by side in 8x8 cells, smallest first.
+/// Brick debris (effect kind 2, draw 0x080907F0): 8x8 OBJ tile 0xA5, palette 1.
+const DEBRIS_TILE: u32 = 0xA5;
+const DEBRIS_PALETTE: u32 = 1;
+
+pub fn extract_brick_debris(m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    let chars = m.read(OBJ_VRAM, 0x8000)?;
+    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?) };
+    let mut px = vec![0u8; 8 * 8 * 4];
+    sheet.tile(&mut px, 8, DEBRIS_TILE, 0, 0, false, DEBRIS_PALETTE);
+    Rgba { width: 8, height: 8, pixels: px }
+        .write_png(&sma4_assets::brick_debris_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))?;
+    println!("  brick debris");
+    Ok(())
+}
+
 pub fn extract_sparkle(m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
     let chars = m.read(OBJ_VRAM, 0x8000)?;
     let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?) };

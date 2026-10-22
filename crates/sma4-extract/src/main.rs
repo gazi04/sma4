@@ -113,6 +113,7 @@ fn run(args: &Args) -> Result<(), String> {
             objects::extract_coin(&rom, &m, &args.out).map_err(|e| e.0)?;
             objects::extract_walker(&rom, &m, &args.out).map_err(|e| e.0)?;
             objects::extract_sparkle(&m, &args.out).map_err(|e| e.0)?;
+            objects::extract_brick_debris(&m, &args.out).map_err(|e| e.0)?;
             objects::extract_skid_dust(&rom, &m, &args.out).map_err(|e| e.0)?;
             objects::extract_hud(&rom, &m, &args.out).map_err(|e| e.0)?;
             objects::extract_score_popups(&rom, &m, &args.out).map_err(|e| e.0)?;
