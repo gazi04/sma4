@@ -3,8 +3,8 @@
 //! Addresses are for the European ROM (AX4P rev 0).
 
 use sma4_assets::{
-    ANIM_FRAMES, BACKGROUND_PX, Background, BlockRules, EnemySpawn, Junction, LevelAsset, METATILE, METATILES, PipeExit, Rgba, SLOPE_SHAPES, Slopes,
-    Solidity,
+    ANIM_FRAMES, BACKGROUND_PX, Background, BlockRules, EnemySpawn, Junction, LevelAsset, METATILE,
+    METATILES, PipeExit, Rgba, SLOPE_SHAPES, Slopes, Solidity,
 };
 use sma4_rom::{
     ROM_BASE, Rom,
@@ -37,8 +37,12 @@ const V_SCENE_MODE: u32 = 0x0300_3B9A;
 const V_SCENE_PALETTE: u32 = 0x0300_3BA4;
 /// BGxCNT shadows: each layer gets its own char/screen base so the loaders don't
 /// overwrite each other. Level layer (BG1) uses char block 0.
-const BG_CNT_SHADOWS: [(u32, u16); 4] =
-    [(0x0300_2DA4, 0x1F08), (0x0300_2DA6, 0x1C00), (0x0300_2DA8, 0x1D08), (0x0300_2DAA, 0x1E08)];
+const BG_CNT_SHADOWS: [(u32, u16); 4] = [
+    (0x0300_2DA4, 0x1F08),
+    (0x0300_2DA6, 0x1C00),
+    (0x0300_2DA8, 0x1D08),
+    (0x0300_2DAA, 0x1E08),
+];
 
 // Loader routines.
 const FN_POSITION: u32 = 0x0801_4D24;
@@ -76,7 +80,10 @@ const HIGH_LAYER: u32 = PAGE_BUFFERS + 0x4000;
 const PAL_BUFFER: u32 = 0x0200_0000;
 const PAGES: usize = 16;
 const ROWS: usize = 27;
-const SKY: Metatile = Metatile { id: 0x80, high: false };
+const SKY: Metatile = Metatile {
+    id: 0x80,
+    high: false,
+};
 
 #[derive(Debug)]
 pub struct ExtractError(pub String);
@@ -105,7 +112,13 @@ const EXIT_CAMERA_Y: u32 = 0x0813_1ECA;
 type Pointers = Vec<(u8, u8, u8)>;
 
 /// Replays the object loop of the level loader (0x08014F20) record by record.
-fn load_objects(m: &mut Machine, rom: &Rom, data: u32, tileset: u8, pointers: &mut Pointers) -> Result<usize> {
+fn load_objects(
+    m: &mut Machine,
+    rom: &Rom,
+    data: u32,
+    tileset: u8,
+    pointers: &mut Pointers,
+) -> Result<usize> {
     m.w8(V_TILESET, tileset)?;
     m.w8(V_VERTICAL, rom.u8(data + 6)? & 0x10)?;
     let mut i = data + HEADER_LEN;
@@ -145,14 +158,22 @@ fn load_objects(m: &mut Machine, rom: &Rom, data: u32, tileset: u8, pointers: &m
         // Generators may consume extra bytes; the loader resumes where they leave the pointer.
         let next = m.r32(V_DATA_PTR)?;
         if !(i + 4..=i + 12).contains(&next) {
-            return Err(ExtractError(format!("object at {i:#x} moved the data pointer to {next:#x}")));
+            return Err(ExtractError(format!(
+                "object at {i:#x} moved the data pointer to {next:#x}"
+            )));
         }
         i = next;
         records += 1;
     }
 }
 
-pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_list: u16) -> Result<LevelAsset> {
+pub fn extract(
+    rom: &Rom,
+    m: &mut Machine,
+    level_id: u16,
+    tileset: u8,
+    enemy_list: u16,
+) -> Result<LevelAsset> {
     let data = rom.ptr(LEVEL_TABLE + level_id as u32 * 4)?;
     let hdr = rom.slice(data, HEADER_LEN as usize)?.to_vec();
 
@@ -179,7 +200,10 @@ pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_lis
     m.w8(V_SKY_COLOUR, (hdr[5] & 0x1C) >> 2)?;
     m.w8(V_EXTRA_PALETTE, hdr[9] >> 4)?;
     m.w8(V_SCENE_MODE, hdr[9] & 0xF)?;
-    m.w8(V_SCENE_PALETTE, rom.u8(rom.ptr(SCENE_DATA + hdr[10] as u32 * 4)?)?)?;
+    m.w8(
+        V_SCENE_PALETTE,
+        rom.u8(rom.ptr(SCENE_DATA + hdr[10] as u32 * 4)?)?,
+    )?;
     for (addr, v) in BG_CNT_SHADOWS {
         m.w16(addr, v)?;
     }
@@ -194,7 +218,10 @@ pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_lis
     let mut chars = m.read(0x0600_0000, 0x8000)?;
     let at = |x: usize, y: usize| {
         let o = (x >> 4) * 0x400 + y * 16 + (x & 15);
-        Metatile { id: pages[o], high: high[o] != 0 }
+        Metatile {
+            id: pages[o],
+            high: high[o] != 0,
+        }
     };
 
     // Width: the level's last screen page, header byte 4 bits 3-0 (0x08014F20 ->
@@ -204,24 +231,37 @@ pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_lis
     debug_assert!(width <= PAGES * 16);
 
     let solidity = rom.solidity(tileset)?;
-    let metatiles: Vec<u16> =
-        (0..ROWS).flat_map(|y| (0..width).map(move |x| (y, x))).map(|(y, x)| encode(at(x, y))).collect();
+    let metatiles: Vec<u16> = (0..ROWS)
+        .flat_map(|y| (0..width).map(move |x| (y, x)))
+        .map(|(y, x)| encode(at(x, y)))
+        .collect();
 
     // Every metatile of the tileset, so the game can swap cells freely (e.g. a hit
     // question block turning into an empty block). Layer = id | 0x100 * high.
     // Rendered once per animation frame, with that frame's tiles patched in.
     let anim = rom.decompress(ANIM_SOURCE)?;
-    let mut atlas = Vec::with_capacity((METATILE * METATILE * 4 * METATILES * ANIM_FRAMES) as usize);
+    let mut atlas =
+        Vec::with_capacity((METATILE * METATILE * 4 * METATILES * ANIM_FRAMES) as usize);
     for f in 0..ANIM_FRAMES {
         if animates(gfx_set) {
-            for (offsets, dest) in [(ANIM_BLOCK_OFFSETS, ANIM_BLOCK_DEST), (ANIM_COIN_OFFSETS, ANIM_COIN_DEST)] {
+            for (offsets, dest) in [
+                (ANIM_BLOCK_OFFSETS, ANIM_BLOCK_DEST),
+                (ANIM_COIN_OFFSETS, ANIM_COIN_DEST),
+            ] {
                 let src = rom.u16(offsets + f * 2)? as usize;
                 chars[dest..dest + ANIM_BYTES].copy_from_slice(&anim[src..src + ANIM_BYTES]);
             }
         }
         for m in 0..METATILES as u16 {
-            let mt = Metatile { id: m as u8, high: m >= 0x100 };
-            atlas.extend(render_metatile(&chars, &palette, rom.metatile_entries(tileset, mt)?));
+            let mt = Metatile {
+                id: m as u8,
+                high: m >= 0x100,
+            };
+            atlas.extend(render_metatile(
+                &chars,
+                &palette,
+                rom.metatile_entries(tileset, mt)?,
+            ));
         }
     }
 
@@ -244,18 +284,32 @@ pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_lis
     let enemies = rom
         .enemy_list(enemy_list)?
         .into_iter()
-        .map(|e| EnemySpawn { kind: e.kind, col: e.col as u16, row: e.row })
+        .map(|e| EnemySpawn {
+            kind: e.kind,
+            col: e.col as u16,
+            row: e.row,
+        })
         .collect::<Vec<_>>();
 
-    let distinct = metatiles.iter().collect::<std::collections::HashSet<_>>().len();
-    println!("  level {level_id:#05x}: {records} objects, {width}x{ROWS} metatiles, {distinct} distinct, gfx set {gfx_set}, {} enemies, pipe pointers {pointers:02x?}", enemies.len());
+    let distinct = metatiles
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    println!(
+        "  level {level_id:#05x}: {records} objects, {width}x{ROWS} metatiles, {distinct} distinct, gfx set {gfx_set}, {} enemies, pipe pointers {pointers:02x?}",
+        enemies.len()
+    );
     Ok(LevelAsset {
         level_id,
         tileset,
         width,
         height: ROWS,
         backdrop: [r, g, b],
-        solidity: Solidity { top: solidity.top, solid: solidity.solid, high: high_ids(rom, tileset)? },
+        solidity: Solidity {
+            top: solidity.top,
+            solid: solidity.solid,
+            high: high_ids(rom, tileset)?,
+        },
         metatiles,
         rules,
         enemies,
@@ -265,7 +319,11 @@ pub fn extract(rom: &Rom, m: &mut Machine, level_id: u16, tileset: u8, enemy_lis
         camera_x: (data == BONUS_ROOM_1_1).then_some(BONUS_ROOM_CAMERA),
         slopes: slopes(rom, tileset, solidity.top)?,
         background,
-        atlas: Rgba { width: METATILE, height: METATILE * METATILES * ANIM_FRAMES, pixels: atlas },
+        atlas: Rgba {
+            width: METATILE,
+            height: METATILE * METATILES * ANIM_FRAMES,
+            pixels: atlas,
+        },
     })
 }
 
@@ -300,10 +358,21 @@ fn junction(rom: &Rom, hdr: &[u8], pointers: &Pointers) -> Result<Option<Junctio
         } else {
             rom.u16(EXIT_CAMERA_Y + k * 2)? + if y > 0x6F { 0x20 } else { 0 }
         };
-        exits.push(PipeExit { page, x, y, dir, camera_y });
+        exits.push(PipeExit {
+            page,
+            x,
+            y,
+            dir,
+            camera_y,
+        });
     }
     exits.sort_by_key(|e| e.page);
-    Ok(Some(Junction { level, enemies: u16::from_be_bytes([hdr[2], hdr[3]]), tileset: hdr[6] & 0x0F, exits }))
+    Ok(Some(Junction {
+        level,
+        enemies: u16::from_be_bytes([hdr[2], hdr[3]]),
+        tileset: hdr[6] & 0x0F,
+        exits,
+    }))
 }
 
 fn encode(m: Metatile) -> u16 {
@@ -312,7 +381,8 @@ fn encode(m: Metatile) -> u16 {
 
 /// ROM address of a level's object stream (for messages).
 pub fn level_addr(rom: &Rom, level_id: u16) -> u32 {
-    rom.ptr(LEVEL_TABLE + level_id as u32 * 4).unwrap_or(ROM_BASE)
+    rom.ptr(LEVEL_TABLE + level_id as u32 * 4)
+        .unwrap_or(ROM_BASE)
 }
 
 /// Second-plane metatiles 0x00-0x25 collide like 0x0813E174[tileset][id] (0x080A06E8).
@@ -402,10 +472,20 @@ fn background(rom: &Rom, m: &mut Machine, scene: u8) -> Result<Option<Background
                 let ci = if sx & 1 == 1 { b >> 4 } else { b & 0xF };
                 if ci != 0 {
                     let o = ((ty * 8 + y) * w + tx * 8 + x) * 4;
-                    px[o..o + 4].copy_from_slice(&palette[e.palette as usize * 16 + ci as usize].to_rgba(255));
+                    px[o..o + 4].copy_from_slice(
+                        &palette[e.palette as usize * 16 + ci as usize].to_rgba(255),
+                    );
                 }
             }
         }
     }
-    Ok(Some(Background { scene, follow_y, image: Rgba { width: BACKGROUND_PX, height: BACKGROUND_PX, pixels: px } }))
+    Ok(Some(Background {
+        scene,
+        follow_y,
+        image: Rgba {
+            width: BACKGROUND_PX,
+            height: BACKGROUND_PX,
+            pixels: px,
+        },
+    }))
 }

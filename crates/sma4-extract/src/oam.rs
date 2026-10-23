@@ -87,7 +87,10 @@ fn capture(m: &mut Machine, rom: &[u8], pose: &Pose) -> Result<Vec<Obj>, Extract
     m.w32(OBJS + 8, (AT as u32) << 8)?;
     m.w16(OBJS + 0x18, pose.kind)?;
     m.w8(OBJS + 0x16, pose.state)?;
-    m.w8(OBJS + 0x21, rom[(PALETTES - 0x0800_0000) as usize + pose.kind as usize] & 7)?;
+    m.w8(
+        OBJS + 0x21,
+        rom[(PALETTES - 0x0800_0000) as usize + pose.kind as usize] & 7,
+    )?;
     m.w8(OBJS + 0xBD0, 0)?;
     m.w8(OBJS + 0xCCD, 0)?;
     m.w16(OBJS + 0xC96, (SLOT * 4) as u16)?;
@@ -158,7 +161,11 @@ fn compose(objs: &[Obj], chars: &[u8], palette: &[Bgr555]) -> Rgba {
             }
         }
     }
-    Rgba { width: CELL_W, height: CELL_H, pixels: px }
+    Rgba {
+        width: CELL_W,
+        height: CELL_H,
+        pixels: px,
+    }
 }
 
 /// Renders the poses side by side, one `CELL_W` x `CELL_H` cell each.
@@ -172,8 +179,13 @@ pub fn render(m: &mut Machine, rom: &[u8], poses: &[Pose]) -> Result<Rgba, Extra
         for y in 0..CELL_H {
             let src = (y * CELL_W * 4) as usize;
             let dst = ((y * w + i as u32 * CELL_W) * 4) as usize;
-            sheet[dst..dst + (CELL_W * 4) as usize].copy_from_slice(&cell.pixels[src..src + (CELL_W * 4) as usize]);
+            sheet[dst..dst + (CELL_W * 4) as usize]
+                .copy_from_slice(&cell.pixels[src..src + (CELL_W * 4) as usize]);
         }
     }
-    Ok(Rgba { width: w, height: CELL_H, pixels: sheet })
+    Ok(Rgba {
+        width: w,
+        height: CELL_H,
+        pixels: sheet,
+    })
 }

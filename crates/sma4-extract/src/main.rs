@@ -15,7 +15,8 @@ use std::path::PathBuf;
 use sma4_assets::{DEFAULT_DIR, Rgba, gfx_path, write_manifest};
 use sma4_rom::{Rom, gfx};
 
-const USAGE: &str = "usage: sma4-extract <rom.gba> [--out <dir>] [--level <id>:<tileset>:<enemies> ...]
+const USAGE: &str =
+    "usage: sma4-extract <rom.gba> [--out <dir>] [--level <id>:<tileset>:<enemies> ...]
   --out    output directory (default assets/extracted)
   --level  level to extract: hex level id, tileset, hex enemy-list id; repeatable
            (default: every course level of World 1's map, 1-1 first)
@@ -50,19 +51,29 @@ fn parse_args() -> Option<Args> {
             _ => rom = Some(a),
         }
     }
-    Some(Args { rom: rom?, out, levels })
+    Some(Args {
+        rom: rom?,
+        out,
+        levels,
+    })
 }
 
 /// Every LZ77 tile blob as a greyscale 4bpp sheet, for the in-game graphics viewer.
 fn extract_gfx(rom: &Rom, args: &Args) -> Result<usize, String> {
-    let grey: Vec<gfx::Bgr555> = (0..16u16).map(|i| gfx::Bgr555((i * 31 / 15) * 0x421)).collect();
+    let grey: Vec<gfx::Bgr555> = (0..16u16)
+        .map(|i| gfx::Bgr555((i * 31 / 15) * 0x421))
+        .collect();
     let blobs = rom.scan_lz77(256, gfx::TILE_BYTES_4BPP);
     for b in &blobs {
         let data = rom.decompress(b.addr).map_err(|e| e.to_string())?;
         let (pixels, w, h) = gfx::tile_sheet_rgba(&gfx::tiles_4bpp(&data), &grey, SHEET_COLS);
-        Rgba { width: w as u32, height: h as u32, pixels }
-            .write_png(&gfx_path(&args.out, b.addr))
-            .map_err(|e| e.to_string())?;
+        Rgba {
+            width: w as u32,
+            height: h as u32,
+            pixels,
+        }
+        .write_png(&gfx_path(&args.out, b.addr))
+        .map_err(|e| e.to_string())?;
     }
     Ok(blobs.len())
 }
@@ -95,11 +106,21 @@ fn run(args: &Args) -> Result<(), String> {
             Ok(a) => a,
             // A pipe's area that does not load is skipped (its pipe then stays shut).
             Err(e) if n >= course_levels => {
-                println!("  level {id:#x} ({:#010x}): {}, skipped", level::level_addr(&rom, id), e.0);
+                println!(
+                    "  level {id:#x} ({:#010x}): {}, skipped",
+                    level::level_addr(&rom, id),
+                    e.0
+                );
                 levels.remove(n);
                 continue;
             }
-            Err(e) => return Err(format!("level {id:#x} ({:#010x}): {}", level::level_addr(&rom, id), e.0)),
+            Err(e) => {
+                return Err(format!(
+                    "level {id:#x} ({:#010x}): {}",
+                    level::level_addr(&rom, id),
+                    e.0
+                ));
+            }
         };
         asset.write(&args.out).map_err(|e| e.to_string())?;
         // Areas behind pipes (the header's alternate level) are extracted too.
@@ -145,8 +166,10 @@ fn run(args: &Args) -> Result<(), String> {
     let sheets = extract_gfx(&rom, args)?;
     println!("  {sheets} graphics sheets");
 
-    let levels: Vec<String> =
-        levels.iter().map(|(id, ts, en)| format!("{id:#05x}:{ts}:{en:#04x}")).collect();
+    let levels: Vec<String> = levels
+        .iter()
+        .map(|(id, ts, en)| format!("{id:#05x}:{ts}:{en:#04x}"))
+        .collect();
     write_manifest(
         &args.out,
         &format!(

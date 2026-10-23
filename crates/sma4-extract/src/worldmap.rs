@@ -4,7 +4,8 @@
 //! sprite.
 
 use sma4_assets::{
-    MAP_ANIM_FRAMES, MAP_SPIN_PHASES, MAP_SPIN_SIZE, MAP_MARIO_FORMS, MAP_MARIO_H, MAP_MARIO_W, MapNode, Rgba, WorldMapAsset,
+    MAP_ANIM_FRAMES, MAP_MARIO_FORMS, MAP_MARIO_H, MAP_MARIO_W, MAP_SPIN_PHASES, MAP_SPIN_SIZE,
+    MapNode, Rgba, WorldMapAsset,
 };
 use sma4_rom::{Rom, gfx::parse_palette};
 
@@ -75,9 +76,12 @@ const GAME_OVER_KEEP: u32 = 0x0813_C12E;
 
 fn setup(m: &mut Machine, world: u8) -> Result<(), ExtractError> {
     m.clear_ram()?;
-    for (ptr, val) in
-        [(PLAYER_PTR, 0x0203_A000), (PLAYER_GFX_PTR, 0x0203_B000), (MAP_STATE_PTR, MAP_STATE), (OBJ_BASE_PTR, 0x0203_8000)]
-    {
+    for (ptr, val) in [
+        (PLAYER_PTR, 0x0203_A000),
+        (PLAYER_GFX_PTR, 0x0203_B000),
+        (MAP_STATE_PTR, MAP_STATE),
+        (OBJ_BASE_PTR, 0x0203_8000),
+    ] {
         m.w32(ptr, val)?;
     }
     m.w8(LANGUAGE, 0)?;
@@ -98,7 +102,10 @@ pub fn nodes(rom: &Rom, world: u8) -> Result<Vec<MapNode>, ExtractError> {
     let (enemies, levels) = (rom.ptr(NODE_ENEMIES + w)?, rom.ptr(NODE_LEVELS + w)?);
     // The per-screen start indices end the list: the last screen's index is the count.
     let starts = rom.ptr(NODE_START + w)?;
-    let count = (0..4).map(|s| rom.u8(starts + s).unwrap_or(0)).max().unwrap_or(0) as u32;
+    let count = (0..4)
+        .map(|s| rom.u8(starts + s).unwrap_or(0))
+        .max()
+        .unwrap_or(0) as u32;
     (0..count)
         .map(|i| {
             let (r, c) = (rom.u8(rows + i)?, rom.u8(cols + i)?);
@@ -161,10 +168,19 @@ fn render_grid(grid: &[u8], cols: usize, cells: &[Vec<u8>], origin: (i32, i32)) 
     px
 }
 
-pub fn extract_world_map(rom: &Rom, m: &mut Machine, world: u8, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+pub fn extract_world_map(
+    rom: &Rom,
+    m: &mut Machine,
+    world: u8,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     setup(m, world)?;
     let nodes = nodes(rom, world)?;
-    let screens = nodes.iter().map(|n| (n.x >> 8) as usize + 1).max().unwrap_or(1);
+    let screens = nodes
+        .iter()
+        .map(|n| (n.x >> 8) as usize + 1)
+        .max()
+        .unwrap_or(1);
     let grid = read_grid(m, rom, screens)?;
     let cols = COLS * screens;
     let t = m.read(THRESHOLDS, 4)?;
@@ -195,7 +211,8 @@ pub fn extract_world_map(rom: &Rom, m: &mut Machine, world: u8, out_dir: &std::p
         for (id, cell) in cells.iter().enumerate() {
             for y in 0..16 {
                 let dst = (((id as u32 * 16 + y) * aw + f * 16) * 4) as usize;
-                atlas[dst..dst + 64].copy_from_slice(&cell[(y * 64) as usize..(y * 64 + 64) as usize]);
+                atlas[dst..dst + 64]
+                    .copy_from_slice(&cell[(y * 64) as usize..(y * 64 + 64) as usize]);
             }
         }
         if f == 0 {
@@ -210,12 +227,27 @@ pub fn extract_world_map(rom: &Rom, m: &mut Machine, world: u8, out_dir: &std::p
         .flat_map(|oy| (-16..=16).map(move |ox| (ox, oy)))
         .max_by_key(|&o| {
             let ours = render_grid(&grid, cols, &frame0, o);
-            ours.as_chunks::<4>().0.iter().zip(view.pixels.as_chunks::<4>().0).filter(|(a, b)| a == b).count()
+            ours.as_chunks::<4>()
+                .0
+                .iter()
+                .zip(view.pixels.as_chunks::<4>().0)
+                .filter(|(a, b)| a == b)
+                .count()
         })
         .unwrap_or((0, 0));
     let ours = render_grid(&grid, cols, &frame0, origin);
-    let same = ours.as_chunks::<4>().0.iter().zip(view.pixels.as_chunks::<4>().0).filter(|(a, b)| a == b).count();
-    println!("  world map {} walk: grid {cols}x{ROWS}, origin {origin:?}, {same}/{} px as the ROM's view", world + 1, 240 * 160);
+    let same = ours
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(view.pixels.as_chunks::<4>().0)
+        .filter(|(a, b)| a == b)
+        .count();
+    println!(
+        "  world map {} walk: grid {cols}x{ROWS}, origin {origin:?}, {same}/{} px as the ROM's view",
+        world + 1,
+        240 * 160
+    );
 
     // Mario's map sprite per form and animation phase.
     let mut mario = Rgba {
@@ -233,8 +265,15 @@ pub fn extract_world_map(rom: &Rom, m: &mut Machine, world: u8, out_dir: &std::p
             m.w8(FRAME_COUNTER, (phase * 8) as u8)?;
             m.call(FN_DRAW_MARIO, &[])?;
             let lower = m.read(OAM_BUF + 69 * 8, 4)?;
-            let (ly, lx) = (lower[0] as i32, (u16::from_le_bytes([lower[2], lower[3]]) & 0x1FF) as i32);
-            let mut canvas = Rgba { width: 240, height: 160, pixels: vec![0; 240 * 160 * 4] };
+            let (ly, lx) = (
+                lower[0] as i32,
+                (u16::from_le_bytes([lower[2], lower[3]]) & 0x1FF) as i32,
+            );
+            let mut canvas = Rgba {
+                width: 240,
+                height: 160,
+                pixels: vec![0; 240 * 160 * 4],
+            };
             draw_oam(m, &mut canvas, MARIO_SLOTS)?;
             let cell = (i as u32 * 2 + phase) * MAP_MARIO_W;
             for y in 0..MAP_MARIO_H as i32 {
@@ -253,8 +292,11 @@ pub fn extract_world_map(rom: &Rom, m: &mut Machine, world: u8, out_dir: &std::p
 
     // Mario spinning after a game over, one cell per phase of +0x21 (the draw decrements it first).
     let hs = MAP_SPIN_SIZE;
-    let mut mario_spin =
-        Rgba { width: hs * MAP_SPIN_PHASES, height: hs, pixels: vec![0; (hs * MAP_SPIN_PHASES * hs * 4) as usize] };
+    let mut mario_spin = Rgba {
+        width: hs * MAP_SPIN_PHASES,
+        height: hs,
+        pixels: vec![0; (hs * MAP_SPIN_PHASES * hs * 4) as usize],
+    };
     m.w8(MAP_FORM, 0)?;
     m.w8(GAME_OVER_LOOK, 1)?;
     for phase in 0..MAP_SPIN_PHASES {
@@ -264,8 +306,15 @@ pub fn extract_world_map(rom: &Rom, m: &mut Machine, world: u8, out_dir: &std::p
         m.w8(SPIN_TIMER, (phase * 2 + 1) as u8)?;
         m.call(FN_DRAW_MARIO, &[])?;
         let lower = m.read(OAM_BUF + 69 * 8, 4)?;
-        let (ly, lx) = (lower[0] as i32, (u16::from_le_bytes([lower[2], lower[3]]) & 0x1FF) as i32);
-        let mut canvas = Rgba { width: 240, height: 160, pixels: vec![0; 240 * 160 * 4] };
+        let (ly, lx) = (
+            lower[0] as i32,
+            (u16::from_le_bytes([lower[2], lower[3]]) & 0x1FF) as i32,
+        );
+        let mut canvas = Rgba {
+            width: 240,
+            height: 160,
+            pixels: vec![0; 240 * 160 * 4],
+        };
         draw_oam(m, &mut canvas, LOWER_SLOT)?;
         for y in 0..hs as i32 {
             for x in 0..hs as i32 {
@@ -280,11 +329,13 @@ pub fn extract_world_map(rom: &Rom, m: &mut Machine, world: u8, out_dir: &std::p
         }
     }
     m.w8(GAME_OVER_LOOK, 0)?;
-    let game_over_keep =
-        (0..cols as u32).map(|c| rom.u8(GAME_OVER_KEEP + world as u32 * 0x40 + c)).collect::<Result<Vec<u8>, _>>()?;
+    let game_over_keep = (0..cols as u32)
+        .map(|c| rom.u8(GAME_OVER_KEEP + world as u32 * 0x40 + c))
+        .collect::<Result<Vec<u8>, _>>()?;
 
-    let anim_ticks: Vec<u8> =
-        (0..MAP_ANIM_FRAMES).map(|f| rom.u8(ANIM_TIMES + world as u32 * 4 + f).map(|t| t + 1)).collect::<Result<_, _>>()?;
+    let anim_ticks: Vec<u8> = (0..MAP_ANIM_FRAMES)
+        .map(|f| rom.u8(ANIM_TIMES + world as u32 * 4 + f).map(|t| t + 1))
+        .collect::<Result<_, _>>()?;
     WorldMapAsset {
         anim_ticks: [anim_ticks[0], anim_ticks[1], anim_ticks[2], anim_ticks[3]],
         cols,
@@ -294,7 +345,11 @@ pub fn extract_world_map(rom: &Rom, m: &mut Machine, world: u8, out_dir: &std::p
         thresholds,
         nodes,
         origin,
-        atlas: Rgba { width: aw, height: ah, pixels: atlas },
+        atlas: Rgba {
+            width: aw,
+            height: ah,
+            pixels: atlas,
+        },
         mario,
         game_over_keep,
         mario_spin,
@@ -312,19 +367,37 @@ const KINGS_CASTLE: u8 = 0xC9;
 /// The levels behind the world's enterable spots (course levels only: Toad houses and the
 /// spade game, whose ids have bit 15 set or tileset 15, are not levels, and the King's
 /// castle leads to the airship), first-seen order.
-pub fn course_levels(rom: &Rom, m: &mut Machine, world: u8) -> Result<Vec<(u16, u8, u16)>, ExtractError> {
+pub fn course_levels(
+    rom: &Rom,
+    m: &mut Machine,
+    world: u8,
+) -> Result<Vec<(u16, u8, u16)>, ExtractError> {
     setup(m, world)?;
     let nodes = nodes(rom, world)?;
-    let screens = nodes.iter().map(|n| (n.x >> 8) as usize + 1).max().unwrap_or(1);
+    let screens = nodes
+        .iter()
+        .map(|n| (n.x >> 8) as usize + 1)
+        .max()
+        .unwrap_or(1);
     let grid = read_grid(m, rom, screens)?;
     let t = m.read(THRESHOLDS, 4)?;
-    let always: Vec<u8> = (0..ENTER_ALWAYS_LEN).map(|i| rom.u8(ENTER_ALWAYS + i)).collect::<Result<_, _>>()?;
+    let always: Vec<u8> = (0..ENTER_ALWAYS_LEN)
+        .map(|i| rom.u8(ENTER_ALWAYS + i))
+        .collect::<Result<_, _>>()?;
     let mut out: Vec<(u16, u8, u16)> = Vec::new();
     for n in nodes {
-        let (row, col) = (((n.y as usize).wrapping_sub(0x10) >> 4) & 0xF, ((n.x >> 8) as usize) * COLS + (n.x as usize & 0xFF) / 16);
-        let Some(&tile) = grid.get(row * COLS * screens + col) else { continue };
+        let (row, col) = (
+            ((n.y as usize).wrapping_sub(0x10) >> 4) & 0xF,
+            ((n.x >> 8) as usize) * COLS + (n.x as usize & 0xFF) / 16,
+        );
+        let Some(&tile) = grid.get(row * COLS * screens + col) else {
+            continue;
+        };
         let enterable = always.contains(&tile) || tile >= t[(tile >> 6) as usize];
-        let course = n.level & 0x8000 == 0 && n.enemies & 0x8000 == 0 && n.tileset != 15 && tile != KINGS_CASTLE;
+        let course = n.level & 0x8000 == 0
+            && n.enemies & 0x8000 == 0
+            && n.tileset != 15
+            && tile != KINGS_CASTLE;
         if enterable && course && !out.iter().any(|l| l.0 == n.level) {
             out.push((n.level, n.tileset, n.enemies));
         }

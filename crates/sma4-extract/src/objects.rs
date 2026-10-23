@@ -2,8 +2,8 @@
 //! loaders leave them in the emulated machine.
 
 use sma4_assets::{
-    PLAYER_FRAMES, PLAYER_H, PLAYER_W, Rgba, leaf_path, coin_spin_path, growth_item_path, koopa_path, player_path, sparkle_path,
-    walker_path,
+    PLAYER_FRAMES, PLAYER_H, PLAYER_W, Rgba, coin_spin_path, growth_item_path, koopa_path,
+    leaf_path, player_path, sparkle_path, walker_path,
 };
 use sma4_rom::{Rom, gfx::parse_palette};
 
@@ -94,7 +94,17 @@ impl Sheet<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn tile_flip(&self, out: &mut [u8], w: u32, tile: u32, ox: u32, oy: u32, hflip: bool, vflip: bool, pal: u32) {
+    fn tile_flip(
+        &self,
+        out: &mut [u8],
+        w: u32,
+        tile: u32,
+        ox: u32,
+        oy: u32,
+        hflip: bool,
+        vflip: bool,
+        pal: u32,
+    ) {
         let t = &self.chars[(tile * 32) as usize..][..32];
         for y in 0..8 {
             for x in 0..8 {
@@ -116,21 +126,33 @@ impl Sheet<'_> {
 /// Debug: the whole OBJ VRAM as a 32x32-tile sheet, once per OBJ palette.
 pub fn dump_obj_vram(m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
     let chars = m.read(OBJ_VRAM, 0x8000)?;
-    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?) };
-    std::fs::write(out_dir.join("obj_pal.bin"), m.read(OBJ_PAL_BUFFER, 0x200)?).map_err(|e| ExtractError(e.to_string()))?;
+    let sheet = Sheet {
+        chars: &chars,
+        palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?),
+    };
+    std::fs::write(out_dir.join("obj_pal.bin"), m.read(OBJ_PAL_BUFFER, 0x200)?)
+        .map_err(|e| ExtractError(e.to_string()))?;
     // BG VRAM too (64 KiB = 2048 tiles), with the BG palettes.
     let bg = m.read(0x0600_0000, 0x1_0000)?;
-    let bg_sheet = Sheet { chars: &bg, palette: parse_palette(&m.read(0x0200_0000, 0x200)?) };
-    std::fs::write(out_dir.join("bg_pal.bin"), m.read(0x0200_0000, 0x200)?).map_err(|e| ExtractError(e.to_string()))?;
+    let bg_sheet = Sheet {
+        chars: &bg,
+        palette: parse_palette(&m.read(0x0200_0000, 0x200)?),
+    };
+    std::fs::write(out_dir.join("bg_pal.bin"), m.read(0x0200_0000, 0x200)?)
+        .map_err(|e| ExtractError(e.to_string()))?;
     for pal in 0..16 {
         let (w, h) = (256, 512);
         let mut px = vec![0u8; (w * h * 4) as usize];
         for t in 0..2048 {
             bg_sheet.tile(&mut px, w, t, (t % 32) * 8, (t / 32) * 8, false, pal);
         }
-        Rgba { width: w, height: h, pixels: px }
-            .write_png(&out_dir.join(format!("bg_vram_pal{pal:x}.png")))
-            .map_err(|e| ExtractError(e.to_string()))?;
+        Rgba {
+            width: w,
+            height: h,
+            pixels: px,
+        }
+        .write_png(&out_dir.join(format!("bg_vram_pal{pal:x}.png")))
+        .map_err(|e| ExtractError(e.to_string()))?;
     }
     let (w, h) = (256, 256);
     for pal in 0..16 {
@@ -138,9 +160,13 @@ pub fn dump_obj_vram(m: &Machine, out_dir: &std::path::Path) -> Result<(), Extra
         for t in 0..1024 {
             sheet.tile(&mut px, w, t, (t % 32) * 8, (t / 32) * 8, false, pal);
         }
-        Rgba { width: w, height: h, pixels: px }
-            .write_png(&out_dir.join(format!("obj_vram_pal{pal:x}.png")))
-            .map_err(|e| ExtractError(e.to_string()))?;
+        Rgba {
+            width: w,
+            height: h,
+            pixels: px,
+        }
+        .write_png(&out_dir.join(format!("obj_vram_pal{pal:x}.png")))
+        .map_err(|e| ExtractError(e.to_string()))?;
     }
     Ok(())
 }
@@ -158,25 +184,49 @@ const HUD_ICON: u32 = 0x0813_1E64;
 pub fn extract_hud(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
     use sma4_assets::{HUD_COLS, HUD_ROWS, HUD_TILE_BASE, HUD_TILES, HudAsset};
     let map = rom.decompress(HUD_TEMPLATE)?;
-    let template: Vec<u16> =
-        map.chunks_exact(2).take(HUD_COLS * HUD_ROWS).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+    let template: Vec<u16> = map
+        .chunks_exact(2)
+        .take(HUD_COLS * HUD_ROWS)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .collect();
     let digits = std::array::from_fn(|i| rom.u16(HUD_DIGITS + i as u32 * 2).unwrap_or(0xFF));
     let icon = [rom.u16(HUD_ICON)?, rom.u16(HUD_ICON + 2)?];
-    HudAsset { template, digits, icon }.write(out_dir).map_err(|e| ExtractError(e.to_string()))?;
+    HudAsset {
+        template,
+        digits,
+        icon,
+    }
+    .write(out_dir)
+    .map_err(|e| ExtractError(e.to_string()))?;
 
     let chars = m.read(BG_VRAM, 0x1_0000)?;
-    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(BG_PAL_BUFFER, 0x200)?) };
+    let sheet = Sheet {
+        chars: &chars,
+        palette: parse_palette(&m.read(BG_PAL_BUFFER, 0x200)?),
+    };
     let w = 8 * 2 * HUD_TILES as u32;
     let mut px = vec![0u8; (w * 8 * 4) as usize];
     for (half, pal) in [(0u32, 0u32), (1, 15)] {
         for i in 0..HUD_TILES as u32 {
             let cell = half * HUD_TILES as u32 + i;
-            sheet.tile(&mut px, w, HUD_TILE_BASE as u32 + i, cell * 8, 0, false, pal);
+            sheet.tile(
+                &mut px,
+                w,
+                HUD_TILE_BASE as u32 + i,
+                cell * 8,
+                0,
+                false,
+                pal,
+            );
         }
     }
-    Rgba { width: w, height: 8, pixels: px }
-        .write_png(&HudAsset::tiles_path(out_dir))
-        .map_err(|e| ExtractError(e.to_string()))?;
+    Rgba {
+        width: w,
+        height: 8,
+        pixels: px,
+    }
+    .write_png(&HudAsset::tiles_path(out_dir))
+    .map_err(|e| ExtractError(e.to_string()))?;
     println!("  status bar");
     Ok(())
 }
@@ -188,10 +238,17 @@ const POPUP_LEFT: u32 = 0x0817_1DA4;
 const POPUP_RIGHT: u32 = 0x0817_1DBE;
 const LIFE_POPUP_TILES: u32 = 0x0817_1DD8;
 
-pub fn extract_score_popups(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+pub fn extract_score_popups(
+    rom: &Rom,
+    m: &Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     use sma4_assets::{SCORE_POPUP_TYPES, score_popups_path};
     let chars = m.read(OBJ_VRAM, 0x8000)?;
-    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?) };
+    let sheet = Sheet {
+        chars: &chars,
+        palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?),
+    };
     let w = 16 * SCORE_POPUP_TYPES as u32;
     let mut px = vec![0u8; (w * 8 * 4) as usize];
     for t in 0..SCORE_POPUP_TYPES as u32 {
@@ -201,11 +258,23 @@ pub fn extract_score_popups(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -
             sheet.tile(&mut px, w, (left & 0x3FF) as u32, t * 16, 0, false, pal);
         }
         let right = rom.u16(POPUP_RIGHT + t * 2)?;
-        sheet.tile(&mut px, w, (right & 0x3FF) as u32, t * 16 + 8, 0, false, pal);
+        sheet.tile(
+            &mut px,
+            w,
+            (right & 0x3FF) as u32,
+            t * 16 + 8,
+            0,
+            false,
+            pal,
+        );
     }
-    Rgba { width: w, height: 8, pixels: px }
-        .write_png(&score_popups_path(out_dir))
-        .map_err(|e| ExtractError(e.to_string()))?;
+    Rgba {
+        width: w,
+        height: 8,
+        pixels: px,
+    }
+    .write_png(&score_popups_path(out_dir))
+    .map_err(|e| ExtractError(e.to_string()))?;
 
     use sma4_assets::{LIFE_POPUP_TYPES, life_popups_path};
     let w = 32 * LIFE_POPUP_TYPES as u32;
@@ -214,13 +283,25 @@ pub fn extract_score_popups(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -
         let tile = (rom.u16(LIFE_POPUP_TILES + t * 2)? & 0x3FF) as u32;
         for ty in 0..2 {
             for tx in 0..4 {
-                sheet.tile(&mut px, w, tile + ty * TILES_PER_ROW + tx, t * 32 + tx * 8, ty * 8, false, 1);
+                sheet.tile(
+                    &mut px,
+                    w,
+                    tile + ty * TILES_PER_ROW + tx,
+                    t * 32 + tx * 8,
+                    ty * 8,
+                    false,
+                    1,
+                );
             }
         }
     }
-    Rgba { width: w, height: 16, pixels: px }
-        .write_png(&life_popups_path(out_dir))
-        .map_err(|e| ExtractError(e.to_string()))?;
+    Rgba {
+        width: w,
+        height: 16,
+        pixels: px,
+    }
+    .write_png(&life_popups_path(out_dir))
+    .map_err(|e| ExtractError(e.to_string()))?;
     println!("  score popups");
     Ok(())
 }
@@ -244,33 +325,59 @@ pub fn extract_brick_debris(m: &Machine, out_dir: &std::path::Path) -> Result<()
 
 pub fn extract_sparkle(m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
     let chars = m.read(OBJ_VRAM, 0x8000)?;
-    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?) };
+    let sheet = Sheet {
+        chars: &chars,
+        palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?),
+    };
     let w = 8 * SPARKLE_TILES;
     let mut px = vec![0u8; (w * 8 * 4) as usize];
     for i in 0..SPARKLE_TILES {
-        sheet.tile(&mut px, w, SPARKLE_TILE + i, i * 8, 0, false, SPARKLE_PALETTE);
+        sheet.tile(
+            &mut px,
+            w,
+            SPARKLE_TILE + i,
+            i * 8,
+            0,
+            false,
+            SPARKLE_PALETTE,
+        );
     }
-    Rgba { width: w, height: 8, pixels: px }
-        .write_png(&sparkle_path(out_dir))
-        .map_err(|e| ExtractError(e.to_string()))?;
+    Rgba {
+        width: w,
+        height: 8,
+        pixels: px,
+    }
+    .write_png(&sparkle_path(out_dir))
+    .map_err(|e| ExtractError(e.to_string()))?;
     println!("  sparkle: {SPARKLE_TILES} frames");
     Ok(())
 }
 
 /// Skid dust frames side by side in 8x8 cells.
-pub fn extract_skid_dust(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+pub fn extract_skid_dust(
+    rom: &Rom,
+    m: &Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     use sma4_assets::{SKID_DUST_FRAMES, skid_dust_path};
     let chars = m.read(OBJ_VRAM, 0x8000)?;
-    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?) };
+    let sheet = Sheet {
+        chars: &chars,
+        palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?),
+    };
     let w = 8 * SKID_DUST_FRAMES;
     let mut px = vec![0u8; (w * 8 * 4) as usize];
     for i in 0..SKID_DUST_FRAMES {
         let tile = (rom.u16(SKID_DUST_TILES + i * 2)? & 0x3FF) as u32;
         sheet.tile(&mut px, w, tile, i * 8, 0, false, 0);
     }
-    Rgba { width: w, height: 8, pixels: px }
-        .write_png(&skid_dust_path(out_dir))
-        .map_err(|e| ExtractError(e.to_string()))?;
+    Rgba {
+        width: w,
+        height: 8,
+        pixels: px,
+    }
+    .write_png(&skid_dust_path(out_dir))
+    .map_err(|e| ExtractError(e.to_string()))?;
     println!("  skid dust: {SKID_DUST_FRAMES} frames");
     Ok(())
 }
@@ -288,7 +395,11 @@ const FN_DRAW_SHELL: u32 = 0x0804_3060;
 const FN_DRAW_SPIN: u32 = 0x0804_2E2C;
 const SPIN_COUNTER: u32 = 0x0300_3CF6;
 
-pub fn extract_koopas(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+pub fn extract_koopas(
+    rom: &Rom,
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     for kind in [0x6Cu16, 0x6D] {
         let walk = |f: u8| [(0x17, f)];
         let (w0, w1) = (walk(0), walk(1));
@@ -296,22 +407,63 @@ pub fn extract_koopas(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> 
         let waking = [(0x17, 2), (0x34, 0x02)];
         let spin: Vec<[(u32, u8); 1]> = (0..4).map(|k| [(SPIN_COUNTER, k * 2)]).collect();
         let mut poses = vec![
-            Pose { kind, state: 2, draw: FN_DRAW_WALKER, bytes: &w0, globals: &[] },
-            Pose { kind, state: 2, draw: FN_DRAW_WALKER, bytes: &w1, globals: &[] },
-            Pose { kind, state: 3, draw: FN_DRAW_SHELL, bytes: &shell, globals: &[] },
-            Pose { kind, state: 3, draw: FN_DRAW_SHELL, bytes: &waking, globals: &[] },
+            Pose {
+                kind,
+                state: 2,
+                draw: FN_DRAW_WALKER,
+                bytes: &w0,
+                globals: &[],
+            },
+            Pose {
+                kind,
+                state: 2,
+                draw: FN_DRAW_WALKER,
+                bytes: &w1,
+                globals: &[],
+            },
+            Pose {
+                kind,
+                state: 3,
+                draw: FN_DRAW_SHELL,
+                bytes: &shell,
+                globals: &[],
+            },
+            Pose {
+                kind,
+                state: 3,
+                draw: FN_DRAW_SHELL,
+                bytes: &waking,
+                globals: &[],
+            },
         ];
         for g in &spin {
-            poses.push(Pose { kind, state: 5, draw: FN_DRAW_SPIN, bytes: &[], globals: g });
+            poses.push(Pose {
+                kind,
+                state: 5,
+                draw: FN_DRAW_SPIN,
+                bytes: &[],
+                globals: g,
+            });
         }
         oam::render(m, rom.bytes(), &poses)?
             .write_png(&koopa_path(out_dir, kind))
             .map_err(|e| ExtractError(e.to_string()))?;
         println!("  koopa {kind:#x}: {} frames", poses.len());
     }
-    let para: Vec<[(u32, u8); 2]> = [0u8, 2, 4, 6].iter().map(|&c| [(0x17, (c >> 2) & 1), (0x3A, c)]).collect();
-    let poses: Vec<Pose> =
-        para.iter().map(|b| Pose { kind: 0x6E, state: 2, draw: FN_DRAW_WALKER, bytes: b, globals: &[] }).collect();
+    let para: Vec<[(u32, u8); 2]> = [0u8, 2, 4, 6]
+        .iter()
+        .map(|&c| [(0x17, (c >> 2) & 1), (0x3A, c)])
+        .collect();
+    let poses: Vec<Pose> = para
+        .iter()
+        .map(|b| Pose {
+            kind: 0x6E,
+            state: 2,
+            draw: FN_DRAW_WALKER,
+            bytes: b,
+            globals: &[],
+        })
+        .collect();
     oam::render(m, rom.bytes(), &poses)?
         .write_png(&koopa_path(out_dir, 0x6E))
         .map_err(|e| ExtractError(e.to_string()))?;
@@ -385,16 +537,36 @@ const PIRANHA_Y: u8 = 64 - 16;
 const PIRANHA_OUT: u8 = PIRANHA_Y + 0x21;
 const PIRANHA_LOW: u8 = PIRANHA_Y + 5;
 
-pub fn extract_piranhas(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+pub fn extract_piranhas(
+    rom: &Rom,
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     use sma4_assets::{PIRANHA_FRAMES, piranha_path};
     for kind in [0xA0u16, 0xA2] {
-        debug_assert_eq!(oam::ORIGIN.1 - sma4_assets::PIRANHA_ORIGIN.1, 64 - PIRANHA_Y as i32);
-        let bytes: Vec<[(u32, u8); 4]> = [(PIRANHA_OUT, 0), (PIRANHA_OUT, 8), (PIRANHA_LOW, 0), (PIRANHA_LOW, 8)]
+        debug_assert_eq!(
+            oam::ORIGIN.1 - sma4_assets::PIRANHA_ORIGIN.1,
+            64 - PIRANHA_Y as i32
+        );
+        let bytes: Vec<[(u32, u8); 4]> = [
+            (PIRANHA_OUT, 0),
+            (PIRANHA_OUT, 8),
+            (PIRANHA_LOW, 0),
+            (PIRANHA_LOW, 8),
+        ]
+        .iter()
+        .map(|&(home, chomp)| [(0x09, PIRANHA_Y), (0x3A, home), (0x1C, 0x11), (0x3C, chomp)])
+        .collect();
+        let poses: Vec<Pose> = bytes
             .iter()
-            .map(|&(home, chomp)| [(0x09, PIRANHA_Y), (0x3A, home), (0x1C, 0x11), (0x3C, chomp)])
+            .map(|b| Pose {
+                kind,
+                state: 2,
+                draw: FN_DRAW_PIRANHA,
+                bytes: b,
+                globals: &[],
+            })
             .collect();
-        let poses: Vec<Pose> =
-            bytes.iter().map(|b| Pose { kind, state: 2, draw: FN_DRAW_PIRANHA, bytes: b, globals: &[] }).collect();
         debug_assert_eq!(poses.len(), PIRANHA_FRAMES as usize);
         oam::render(m, rom.bytes(), &poses)?
             .write_png(&piranha_path(out_dir, kind))
@@ -414,23 +586,52 @@ const PLAYER_Y_BYTE: u32 = PLAYER_SCRATCH + 5;
 const ABOVE: u8 = 0;
 const BELOW: u8 = 0xA0;
 
-fn extract_fire_piranha(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+fn extract_fire_piranha(
+    rom: &Rom,
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     use sma4_assets::{FIRE_PIRANHA_LOOKS, PIRANHA_FRAMES, fire_piranha_cell, piranha_path};
     let mut bytes = Vec::new();
     let mut globals = Vec::new();
     for look in 0..FIRE_PIRANHA_LOOKS as usize {
         let (right, up) = (look & 1 != 0, look & 2 != 0);
-        for (home, chomp) in [(PIRANHA_OUT, 0), (PIRANHA_OUT, 8), (PIRANHA_LOW, 0), (PIRANHA_LOW, 8)] {
-            debug_assert_eq!(fire_piranha_cell(right, up, bytes.len() % PIRANHA_FRAMES as usize), bytes.len());
-            bytes.push([(0x09, PIRANHA_Y), (0x3A, home), (0x1C, 0x11), (0x3C, chomp), (0x1A, if right { 0x40 } else { 0 })]);
+        for (home, chomp) in [
+            (PIRANHA_OUT, 0),
+            (PIRANHA_OUT, 8),
+            (PIRANHA_LOW, 0),
+            (PIRANHA_LOW, 8),
+        ] {
+            debug_assert_eq!(
+                fire_piranha_cell(right, up, bytes.len() % PIRANHA_FRAMES as usize),
+                bytes.len()
+            );
+            bytes.push([
+                (0x09, PIRANHA_Y),
+                (0x3A, home),
+                (0x1C, 0x11),
+                (0x3C, chomp),
+                (0x1A, if right { 0x40 } else { 0 }),
+            ]);
             let y = if up { ABOVE } else { BELOW };
-            globals.push([(PLAYER_Y_BYTE - 1, 0), (PLAYER_Y_BYTE, y), (PLAYER_Y_BYTE + 1, 0), (PLAYER_Y_BYTE + 2, 0)]);
+            globals.push([
+                (PLAYER_Y_BYTE - 1, 0),
+                (PLAYER_Y_BYTE, y),
+                (PLAYER_Y_BYTE + 1, 0),
+                (PLAYER_Y_BYTE + 2, 0),
+            ]);
         }
     }
     let poses: Vec<Pose> = bytes
         .iter()
         .zip(&globals)
-        .map(|(b, g)| Pose { kind: FIRE_PIRANHA, state: 2, draw: FN_DRAW_PIRANHA, bytes: b, globals: g })
+        .map(|(b, g)| Pose {
+            kind: FIRE_PIRANHA,
+            state: 2,
+            draw: FN_DRAW_PIRANHA,
+            bytes: b,
+            globals: g,
+        })
         .collect();
     oam::render(m, rom.bytes(), &poses)?
         .write_png(&piranha_path(out_dir, FIRE_PIRANHA))
@@ -448,7 +649,11 @@ const FIREBALL_OAM: u8 = 0x20;
 /// 0x03003AE1 makes 0x08088EAC report "paused" and skip the draw.
 const PAUSED: u32 = 0x0300_3AE1;
 
-fn extract_fireball(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+fn extract_fireball(
+    rom: &Rom,
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     use sma4_assets::{FIREBALL_FRAMES, fireball_path};
     let mut bytes = Vec::new();
     for vx in [0x000Bu16, 0xFFF5] {
@@ -468,10 +673,24 @@ fn extract_fireball(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Re
         }
     }
     // The draw also runs the player touch test (0x0808CC9C): keep the player far away.
-    let globals = [(PAUSED, 0), (PLAYER_SCRATCH + 1, 0), (PLAYER_SCRATCH + 2, 0x08)];
-    let poses: Vec<Pose> =
-        bytes.iter().map(|b| Pose { kind: 0, state: 0, draw: FN_DRAW_FIREBALL, bytes: b, globals: &globals }).collect();
-    oam::render(m, rom.bytes(), &poses)?.write_png(&fireball_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
+    let globals = [
+        (PAUSED, 0),
+        (PLAYER_SCRATCH + 1, 0),
+        (PLAYER_SCRATCH + 2, 0x08),
+    ];
+    let poses: Vec<Pose> = bytes
+        .iter()
+        .map(|b| Pose {
+            kind: 0,
+            state: 0,
+            draw: FN_DRAW_FIREBALL,
+            bytes: b,
+            globals: &globals,
+        })
+        .collect();
+    oam::render(m, rom.bytes(), &poses)?
+        .write_png(&fireball_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))?;
     println!("  fireball: {} frames", poses.len());
     Ok(())
 }
@@ -542,12 +761,24 @@ pub fn extract_micro_goomba(
 const FN_PUFF: u32 = 0x0804_4550;
 const PUFF_STATE: u8 = 8;
 
-pub fn extract_puff(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+pub fn extract_puff(
+    rom: &Rom,
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     use sma4_assets::{PUFF_FRAMES, puff_path};
-    let timers: Vec<[(u32, u8); 1]> = (0..PUFF_FRAMES as u8).map(|i| [(0x23, 0x1F - i * 8)]).collect();
+    let timers: Vec<[(u32, u8); 1]> = (0..PUFF_FRAMES as u8)
+        .map(|i| [(0x23, 0x1F - i * 8)])
+        .collect();
     let poses: Vec<Pose> = timers
         .iter()
-        .map(|b| Pose { kind: 0xA0, state: PUFF_STATE, draw: FN_PUFF, bytes: b, globals: &[(SPIN_COUNTER, 0)] })
+        .map(|b| Pose {
+            kind: 0xA0,
+            state: PUFF_STATE,
+            draw: FN_PUFF,
+            bytes: b,
+            globals: &[(SPIN_COUNTER, 0)],
+        })
         .collect();
     let cells = oam::render(m, rom.bytes(), &poses)?;
     // Cut each 16x16 out of its cell (sprites at the object's y, as 0x08044550 draws them).
@@ -561,7 +792,13 @@ pub fn extract_puff(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Re
             px[dst..dst + 64].copy_from_slice(&cells.pixels[src..src + 64]);
         }
     }
-    Rgba { width: w, height: 16, pixels: px }.write_png(&puff_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
+    Rgba {
+        width: w,
+        height: 16,
+        pixels: px,
+    }
+    .write_png(&puff_path(out_dir))
+    .map_err(|e| ExtractError(e.to_string()))?;
     println!("  puff: {PUFF_FRAMES} frames");
     Ok(())
 }
@@ -574,15 +811,35 @@ const GOAL: u16 = 0x41;
 const FN_DRAW_GOAL: u32 = 0x0806_7708;
 const FN_DRAW_GOAL_BOX: u32 = 0x0806_75D0;
 
-pub fn extract_goal(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+pub fn extract_goal(
+    rom: &Rom,
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     use sma4_assets::{GOAL_FRAMES, goal_path};
     let frames: Vec<[(u32, u8); 1]> = (0..GOAL_FRAMES as u8 - 1).map(|f| [(0x17, f)]).collect();
-    let mut poses: Vec<Pose> =
-        frames.iter().map(|b| Pose { kind: GOAL, state: 2, draw: FN_DRAW_GOAL, bytes: b, globals: &[] }).collect();
+    let mut poses: Vec<Pose> = frames
+        .iter()
+        .map(|b| Pose {
+            kind: GOAL,
+            state: 2,
+            draw: FN_DRAW_GOAL,
+            bytes: b,
+            globals: &[],
+        })
+        .collect();
     let at = oam::AT as u8;
     let box_bytes = [(0x3D, 0xFF), (0x46, at), (0x47, 0), (0x4A, at), (0x4B, 0)];
-    poses.push(Pose { kind: GOAL, state: 2, draw: FN_DRAW_GOAL_BOX, bytes: &box_bytes, globals: &[] });
-    oam::render(m, rom.bytes(), &poses)?.write_png(&goal_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
+    poses.push(Pose {
+        kind: GOAL,
+        state: 2,
+        draw: FN_DRAW_GOAL_BOX,
+        bytes: &box_bytes,
+        globals: &[],
+    });
+    oam::render(m, rom.bytes(), &poses)?
+        .write_png(&goal_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))?;
     println!("  goal card: {} frames", poses.len());
     Ok(())
 }
@@ -603,8 +860,19 @@ const CLEAR_FONTS: u32 = 0x0816_EFA8;
 const TEXT_MAP: u32 = 0xA000;
 
 /// Applies one 0x0802AAE0 write list to a 32x32 map of (tile, palette, hflip, vflip).
-fn apply_text(rom: &Rom, mut p: u32, map: &mut [Option<(u32, u32, bool, bool)>]) -> Result<(), ExtractError> {
-    let decode = |v: u16| ((v & 0x3FF) as u32, ((v >> 10) & 7) as u32, v & 0x4000 != 0, v & 0x8000 != 0);
+fn apply_text(
+    rom: &Rom,
+    mut p: u32,
+    map: &mut [Option<(u32, u32, bool, bool)>],
+) -> Result<(), ExtractError> {
+    let decode = |v: u16| {
+        (
+            (v & 0x3FF) as u32,
+            ((v >> 10) & 7) as u32,
+            v & 0x4000 != 0,
+            v & 0x8000 != 0,
+        )
+    };
     while rom.u16(p)? != 0xFFFF {
         let cell = (rom.u16(p)? as u32 - TEXT_MAP) / 2;
         let n = rom.u16(p + 2)?;
@@ -621,9 +889,14 @@ fn apply_text(rom: &Rom, mut p: u32, map: &mut [Option<(u32, u32, bool, bool)>])
     Ok(())
 }
 
-pub fn extract_course_clear(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+pub fn extract_course_clear(
+    rom: &Rom,
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     use sma4_assets::{
-        CARD_GOT_AT, CARD_GOT_TILES, COURSE_CLEAR_AT, COURSE_CLEAR_TILES, card_got_path, course_clear_path,
+        CARD_GOT_AT, CARD_GOT_TILES, COURSE_CLEAR_AT, COURSE_CLEAR_TILES, card_got_path,
+        course_clear_path,
     };
     // The level's status-bar font fills tiles 0x280-0x2CF; tiles 0x2D0-0x2EF still hold
     // the world map's font (0x08015F10: LZ77 0x08140CD8[lang], its 4 KiB at +0x3000 copied
@@ -634,8 +907,14 @@ pub fn extract_course_clear(rom: &Rom, m: &mut Machine, out_dir: &std::path::Pat
     chars[to..to + 32 * 32].copy_from_slice(&map_font[from..from + 32 * 32]);
     let font = rom.decompress(rom.ptr(CLEAR_FONTS + LANG * 4)?)?;
     chars[0x5600..0x5600 + font.len()].copy_from_slice(&font);
-    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(BG_PAL_BUFFER, 0x200)?) };
-    let render = |ids: &[u32], (cx, cy): (u32, u32), (w, h): (u32, u32), path: std::path::PathBuf| {
+    let sheet = Sheet {
+        chars: &chars,
+        palette: parse_palette(&m.read(BG_PAL_BUFFER, 0x200)?),
+    };
+    let render = |ids: &[u32],
+                  (cx, cy): (u32, u32),
+                  (w, h): (u32, u32),
+                  path: std::path::PathBuf| {
         let mut map = vec![None; 32 * 32];
         for &id in ids {
             apply_text(rom, rom.ptr(TEXTS + (LANG * 3 + id - 0xAE) * 4)?, &mut map)?;
@@ -648,9 +927,20 @@ pub fn extract_course_clear(rom: &Rom, m: &mut Machine, out_dir: &std::path::Pat
                 }
             }
         }
-        Rgba { width: w * 8, height: h * 8, pixels: px }.write_png(&path).map_err(|e| ExtractError(e.to_string()))
+        Rgba {
+            width: w * 8,
+            height: h * 8,
+            pixels: px,
+        }
+        .write_png(&path)
+        .map_err(|e| ExtractError(e.to_string()))
     };
-    render(&[0xAF], COURSE_CLEAR_AT, COURSE_CLEAR_TILES, course_clear_path(out_dir))?;
+    render(
+        &[0xAF],
+        COURSE_CLEAR_AT,
+        COURSE_CLEAR_TILES,
+        course_clear_path(out_dir),
+    )?;
     render(&[0xB0], CARD_GOT_AT, CARD_GOT_TILES, card_got_path(out_dir))?;
     println!("  course clear texts");
     Ok(())
@@ -661,8 +951,18 @@ pub fn extract_course_clear(rom: &Rom, m: &mut Machine, out_dir: &std::path::Pat
 const GROWTH_ITEM: u16 = 0x0D;
 const FN_DRAW_ITEM: u32 = 0x0804_75D4;
 
-pub fn extract_growth_item(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
-    let pose = Pose { kind: GROWTH_ITEM, state: 2, draw: FN_DRAW_ITEM, bytes: &[], globals: &[] };
+pub fn extract_growth_item(
+    rom: &Rom,
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
+    let pose = Pose {
+        kind: GROWTH_ITEM,
+        state: 2,
+        draw: FN_DRAW_ITEM,
+        bytes: &[],
+        globals: &[],
+    };
     let cell = oam::render(m, rom.bytes(), &[pose])?;
     // Cut the object's 16x16 box out of the cell; object sprites sit 1 px below the box
     // (OAM y = y + 1 in 0x0804821C and friends).
@@ -672,17 +972,28 @@ pub fn extract_growth_item(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path
         let o = ((y * cell.width + ox) * 4) as usize;
         px.extend_from_slice(&cell.pixels[o..o + 16 * 4]);
     }
-    Rgba { width: 16, height: 16, pixels: px }
-        .write_png(&growth_item_path(out_dir))
-        .map_err(|e| ExtractError(e.to_string()))?;
+    Rgba {
+        width: 16,
+        height: 16,
+        pixels: px,
+    }
+    .write_png(&growth_item_path(out_dir))
+    .map_err(|e| ExtractError(e.to_string()))?;
     println!("  growth item");
     Ok(())
 }
 
 /// Walker frames side by side in 16x16 cells.
-pub fn extract_walker(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+pub fn extract_walker(
+    rom: &Rom,
+    m: &Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     let chars = m.read(OBJ_VRAM, 0x8000)?;
-    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?) };
+    let sheet = Sheet {
+        chars: &chars,
+        palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?),
+    };
     let tiles = rom.ptr(OBJ_FRAME_TILES + WALKER * 4)?;
     let pal = (rom.u8(OBJ_PALETTES + WALKER)? & 7) as u32;
     let (w, h) = (16 * WALKER_FRAMES.len() as u32, 16);
@@ -692,13 +1003,25 @@ pub fn extract_walker(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Resu
         for half in 0..2 {
             let tile = (rom.u16(tiles + f * 4 + half * 2)? & 0x3FF) as u32;
             for dy in 0..2 {
-                sheet.tile(&mut px, w, tile + dy * TILES_PER_ROW, ox + half * 8, dy * 8, half == 1, pal);
+                sheet.tile(
+                    &mut px,
+                    w,
+                    tile + dy * TILES_PER_ROW,
+                    ox + half * 8,
+                    dy * 8,
+                    half == 1,
+                    pal,
+                );
             }
         }
     }
-    Rgba { width: w, height: h, pixels: px }
-        .write_png(&walker_path(out_dir))
-        .map_err(|e| ExtractError(e.to_string()))?;
+    Rgba {
+        width: w,
+        height: h,
+        pixels: px,
+    }
+    .write_png(&walker_path(out_dir))
+    .map_err(|e| ExtractError(e.to_string()))?;
     println!("  walker: {} frames", WALKER_FRAMES.len());
     Ok(())
 }
@@ -907,8 +1230,18 @@ pub fn extract_flower_and_star(
     Ok(())
 }
 
-pub fn extract_leaf(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
-    let pose = Pose { kind: LEAF, state: 2, draw: FN_DRAW_LEAF, bytes: &[], globals: &[] };
+pub fn extract_leaf(
+    rom: &Rom,
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
+    let pose = Pose {
+        kind: LEAF,
+        state: 2,
+        draw: FN_DRAW_LEAF,
+        bytes: &[],
+        globals: &[],
+    };
     let cell = oam::render(m, rom.bytes(), &[pose])?;
     let (ox, oy) = (oam::ORIGIN.0 as u32, oam::ORIGIN.1 as u32 + 1);
     let mut px = Vec::with_capacity(16 * 16 * 4);
@@ -916,9 +1249,13 @@ pub fn extract_leaf(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Re
         let o = ((y * cell.width + ox) * 4) as usize;
         px.extend_from_slice(&cell.pixels[o..o + 16 * 4]);
     }
-    Rgba { width: 16, height: 16, pixels: px }
-        .write_png(&leaf_path(out_dir))
-        .map_err(|e| ExtractError(e.to_string()))?;
+    Rgba {
+        width: 16,
+        height: 16,
+        pixels: px,
+    }
+    .write_png(&leaf_path(out_dir))
+    .map_err(|e| ExtractError(e.to_string()))?;
     println!("  leaf");
     Ok(())
 }
@@ -927,7 +1264,10 @@ pub fn extract_leaf(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Re
 /// game draws them (16-wide frame at x - 4, 8-wide frames at x).
 pub fn extract_coin(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
     let chars = m.read(OBJ_VRAM, 0x8000)?;
-    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?) };
+    let sheet = Sheet {
+        chars: &chars,
+        palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?),
+    };
     let (w, h) = (16 * COIN_FRAMES, 16);
     let mut px = vec![0u8; (w * h * 4) as usize];
     for f in 0..COIN_FRAMES {
@@ -936,17 +1276,37 @@ pub fn extract_coin(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Result
         let ox = f * 16;
         if f == 0 {
             for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                sheet.tile(&mut px, w, tile + dx + dy * TILES_PER_ROW, ox + dx * 8, dy * 8, false, 0);
+                sheet.tile(
+                    &mut px,
+                    w,
+                    tile + dx + dy * TILES_PER_ROW,
+                    ox + dx * 8,
+                    dy * 8,
+                    false,
+                    0,
+                );
             }
         } else {
             for dy in 0..2 {
-                sheet.tile(&mut px, w, tile + dy * TILES_PER_ROW, ox + 4, dy * 8, flip, 0);
+                sheet.tile(
+                    &mut px,
+                    w,
+                    tile + dy * TILES_PER_ROW,
+                    ox + 4,
+                    dy * 8,
+                    flip,
+                    0,
+                );
             }
         }
     }
-    Rgba { width: w, height: h, pixels: px }
-        .write_png(&coin_spin_path(out_dir))
-        .map_err(|e| ExtractError(e.to_string()))?;
+    Rgba {
+        width: w,
+        height: h,
+        pixels: px,
+    }
+    .write_png(&coin_spin_path(out_dir))
+    .map_err(|e| ExtractError(e.to_string()))?;
     println!("  coin spin: {COIN_FRAMES} frames");
     Ok(())
 }

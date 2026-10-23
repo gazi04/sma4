@@ -33,28 +33,34 @@ impl Machine {
         let mut uc = Unicorn::new(Arch::ARM, Mode::THUMB).map_err(err)?;
         for (base, size) in [
             (0x0000_0000u64, 0x4000u64), // BIOS
-            (0x0200_0000, 0x4_0000),      // EWRAM
-            (0x0300_0000, 0x8000),        // IWRAM
-            (0x0400_0000, 0x1000),        // IO
-            (0x0500_0000, 0x1000),        // palette
-            (0x0600_0000, 0x1_8000),      // VRAM
-            (0x0700_0000, 0x1000),        // OAM
-            (0x0E00_0000, 0x1_0000),      // SRAM
+            (0x0200_0000, 0x4_0000),     // EWRAM
+            (0x0300_0000, 0x8000),       // IWRAM
+            (0x0400_0000, 0x1000),       // IO
+            (0x0500_0000, 0x1000),       // palette
+            (0x0600_0000, 0x1_8000),     // VRAM
+            (0x0700_0000, 0x1000),       // OAM
+            (0x0E00_0000, 0x1_0000),     // SRAM
         ] {
             uc.mem_map(base, size, Prot::ALL).map_err(err)?;
         }
         let rom_size = (rom.len() as u64 + 0xFFF) & !0xFFF;
-        uc.mem_map(ROM_BASE as u64, rom_size, Prot::ALL).map_err(err)?;
+        uc.mem_map(ROM_BASE as u64, rom_size, Prot::ALL)
+            .map_err(err)?;
         uc.mem_write(ROM_BASE as u64, rom).map_err(err)?;
         // Null entries in generator tables jump to 0 and slide to 0x08: ARM "movs pc, lr".
-        uc.mem_write(0x08, &0xE1B0_F00Eu32.to_le_bytes()).map_err(err)?;
+        uc.mem_write(0x08, &0xE1B0_F00Eu32.to_le_bytes())
+            .map_err(err)?;
         uc.add_intr_hook(swi).map_err(err)?;
         Ok(Self { uc })
     }
 
     pub fn clear_ram(&mut self) -> Result<()> {
-        self.uc.mem_write(0x0200_0000, &vec![0; 0x4_0000]).map_err(err)?;
-        self.uc.mem_write(0x0300_0000, &vec![0; 0x8000]).map_err(err)
+        self.uc
+            .mem_write(0x0200_0000, &vec![0; 0x4_0000])
+            .map_err(err)?;
+        self.uc
+            .mem_write(0x0300_0000, &vec![0; 0x8000])
+            .map_err(err)
     }
 
     pub fn w8(&mut self, addr: u32, v: u8) -> Result<()> {
@@ -62,11 +68,15 @@ impl Machine {
     }
 
     pub fn w16(&mut self, addr: u32, v: u16) -> Result<()> {
-        self.uc.mem_write(addr as u64, &v.to_le_bytes()).map_err(err)
+        self.uc
+            .mem_write(addr as u64, &v.to_le_bytes())
+            .map_err(err)
     }
 
     pub fn w32(&mut self, addr: u32, v: u32) -> Result<()> {
-        self.uc.mem_write(addr as u64, &v.to_le_bytes()).map_err(err)
+        self.uc
+            .mem_write(addr as u64, &v.to_le_bytes())
+            .map_err(err)
     }
 
     pub fn r32(&self, addr: u32) -> Result<u32> {
@@ -85,7 +95,12 @@ impl Machine {
         uc.reg_write(RegisterARM::CPSR, 0x3F).map_err(err)?; // system mode, Thumb
         uc.reg_write(RegisterARM::SP, STACK_TOP).map_err(err)?;
         uc.reg_write(RegisterARM::LR, STOP | 1).map_err(err)?;
-        let regs = [RegisterARM::R0, RegisterARM::R1, RegisterARM::R2, RegisterARM::R3];
+        let regs = [
+            RegisterARM::R0,
+            RegisterARM::R1,
+            RegisterARM::R2,
+            RegisterARM::R3,
+        ];
         for (r, &a) in regs.iter().zip(args) {
             uc.reg_write(*r, a as u64).map_err(err)?;
         }
@@ -93,7 +108,9 @@ impl Machine {
             .map_err(|e| EmuError(format!("{e:?} in {func:#010x}")))?;
         let pc = uc.reg_read(RegisterARM::PC).map_err(err)?;
         if pc & !1 != STOP {
-            return Err(EmuError(format!("{func:#010x} did not return (pc {pc:#x})")));
+            return Err(EmuError(format!(
+                "{func:#010x} did not return (pc {pc:#x})"
+            )));
         }
         Ok(())
     }
@@ -103,8 +120,15 @@ impl Machine {
 fn swi(uc: &mut Unicorn<'_, ()>, _intno: u32) {
     let reg = |uc: &Unicorn<'_, ()>, r| uc.reg_read(r).unwrap_or(0) as u32;
     let pc = reg(uc, RegisterARM::PC);
-    let num = uc.mem_read_as_vec(pc as u64 - 2, 1).map(|b| b[0]).unwrap_or(0xFF);
-    let (r0, r1, r2) = (reg(uc, RegisterARM::R0), reg(uc, RegisterARM::R1), reg(uc, RegisterARM::R2));
+    let num = uc
+        .mem_read_as_vec(pc as u64 - 2, 1)
+        .map(|b| b[0])
+        .unwrap_or(0xFF);
+    let (r0, r1, r2) = (
+        reg(uc, RegisterARM::R0),
+        reg(uc, RegisterARM::R1),
+        reg(uc, RegisterARM::R2),
+    );
     match num {
         0x06 => {
             // Div: r0 / r1 -> r0 quotient, r1 remainder, r3 |quotient|
@@ -117,7 +141,11 @@ fn swi(uc: &mut Unicorn<'_, ()>, _intno: u32) {
         0x0B | 0x0C => {
             // CpuSet / CpuFastSet
             let count = (r2 & 0x1F_FFFF) as usize;
-            let unit = if num == 0x0C || r2 & (1 << 26) != 0 { 4 } else { 2 };
+            let unit = if num == 0x0C || r2 & (1 << 26) != 0 {
+                4
+            } else {
+                2
+            };
             let data = if r2 & (1 << 24) != 0 {
                 uc.mem_read_as_vec(r0 as u64, unit).map(|v| v.repeat(count))
             } else {
@@ -129,7 +157,9 @@ fn swi(uc: &mut Unicorn<'_, ()>, _intno: u32) {
         }
         0x11 | 0x12 | 0x14 | 0x15 => {
             // LZ77 / RLE decompression (WRAM and VRAM variants behave the same here).
-            let Ok(head) = uc.mem_read_as_vec(r0 as u64, 4) else { return };
+            let Ok(head) = uc.mem_read_as_vec(r0 as u64, 4) else {
+                return;
+            };
             let size = u32::from_le_bytes([head[1], head[2], head[3], 0]) as usize;
             // Worst-case packed size, clamped to the end of the source memory region.
             let region_end: u32 = match r0 >> 24 {
@@ -139,8 +169,14 @@ fn swi(uc: &mut Unicorn<'_, ()>, _intno: u32) {
                 _ => r0 + 4,
             };
             let len = (size * 2 + 0x400).min(region_end.saturating_sub(r0) as usize);
-            let Ok(src) = uc.mem_read_as_vec(r0 as u64, len) else { return };
-            let out = if num < 0x13 { decompress::lz77(&src) } else { decompress::rle(&src) };
+            let Ok(src) = uc.mem_read_as_vec(r0 as u64, len) else {
+                return;
+            };
+            let out = if num < 0x13 {
+                decompress::lz77(&src)
+            } else {
+                decompress::rle(&src)
+            };
             if let Ok(out) = out {
                 let _ = uc.mem_write(r1 as u64, &out);
             }

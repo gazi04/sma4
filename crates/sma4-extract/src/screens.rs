@@ -3,7 +3,9 @@
 //! and reading back VRAM, the BG maps and OAM (see docs/re-notes.md, "World map screen"
 //! and "Game over").
 
-use sma4_assets::{MapScreenAsset, Rgba, game_over_cursor_path, game_over_menu_path, game_over_path};
+use sma4_assets::{
+    MapScreenAsset, Rgba, game_over_cursor_path, game_over_menu_path, game_over_path,
+};
 use sma4_rom::gfx::{Bgr555, parse_palette};
 
 use crate::emu::Machine;
@@ -22,8 +24,12 @@ const OBJ_PAL_BUFFER: u32 = 0x0200_0200;
 const VRAM: u32 = 0x0600_0000;
 const OBJ_VRAM: u32 = 0x0601_0000;
 /// BG scroll shadows written to the registers in VBlank (0x0800092C, 0x08000DD0).
-const SCROLL: [(u32, u32); 4] =
-    [(0x0300_3748, 0x0300_374C), (0x0300_3750, 0x0300_3754), (0x0300_3758, 0x0300_375C), (0x0300_3760, 0x0300_3764)];
+const SCROLL: [(u32, u32); 4] = [
+    (0x0300_3748, 0x0300_374C),
+    (0x0300_3750, 0x0300_3754),
+    (0x0300_3758, 0x0300_375C),
+    (0x0300_3760, 0x0300_3764),
+];
 
 /// World-map init 0x0800BE48 (-> 0x0800B648: graphics, palettes, status bar, map, panel),
 /// then one pass of map sub-states 0x11-0x13, which draws the panel's sprites.
@@ -42,7 +48,12 @@ fn color(pal: &[Bgr555], p: u32, i: u8) -> [u8; 4] {
 
 /// One 8x8 tile of 4bpp `chars` as RGBA, with the map entry's flips and palette.
 pub(crate) fn bg_tile(chars: &[u8], pal: &[Bgr555], entry: u16) -> [u8; 256] {
-    let (t, hf, vf, p) = ((entry & 0x3FF) as usize, entry & 0x400 != 0, entry & 0x800 != 0, (entry >> 12) as u32);
+    let (t, hf, vf, p) = (
+        (entry & 0x3FF) as usize,
+        entry & 0x400 != 0,
+        entry & 0x800 != 0,
+        (entry >> 12) as u32,
+    );
     let mut out = [0u8; 256];
     let d = &chars[(t * 32) % chars.len()..][..32];
     for y in 0..8 {
@@ -59,7 +70,12 @@ pub(crate) fn bg_tile(chars: &[u8], pal: &[Bgr555], entry: u16) -> [u8; 256] {
 }
 
 fn read_u16s(m: &Machine, addr: u32, n: usize) -> Result<Vec<u16>, ExtractError> {
-    Ok(m.read(addr, n * 2)?.as_chunks::<2>().0.iter().map(|&b| u16::from_le_bytes(b)).collect())
+    Ok(m.read(addr, n * 2)?
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&b| u16::from_le_bytes(b))
+        .collect())
 }
 
 /// A BG layer as read back: map entries (row-major, full width), char data, scroll.
@@ -92,7 +108,13 @@ pub(crate) fn layer_width(m: &Machine, bg: u32) -> Result<usize, ExtractError> {
 }
 
 /// Renders the 240x160 screen view of one BG layer (its scroll applied).
-pub(crate) fn render_view(map: &[u16], width: usize, chars: &[u8], pal: &[Bgr555], scroll: (u16, u16)) -> Rgba {
+pub(crate) fn render_view(
+    map: &[u16],
+    width: usize,
+    chars: &[u8],
+    pal: &[Bgr555],
+    scroll: (u16, u16),
+) -> Rgba {
     let height = map.len() / width;
     let mut px = vec![0u8; 240 * 160 * 4];
     for y in 0..160 {
@@ -106,11 +128,19 @@ pub(crate) fn render_view(map: &[u16], width: usize, chars: &[u8], pal: &[Bgr555
             }
         }
     }
-    Rgba { width: 240, height: 160, pixels: px }
+    Rgba {
+        width: 240,
+        height: 160,
+        pixels: px,
+    }
 }
 
 /// Draws all visible OAM entries onto `canvas` (240x160).
-pub(crate) fn draw_oam(m: &Machine, canvas: &mut Rgba, slots: std::ops::Range<u32>) -> Result<(), ExtractError> {
+pub(crate) fn draw_oam(
+    m: &Machine,
+    canvas: &mut Rgba,
+    slots: std::ops::Range<u32>,
+) -> Result<(), ExtractError> {
     const SIZES: [[(u32, u32); 4]; 3] = [
         [(8, 8), (16, 16), (32, 32), (64, 64)],
         [(16, 8), (32, 8), (32, 16), (64, 32)],
@@ -136,7 +166,10 @@ pub(crate) fn draw_oam(m: &Machine, canvas: &mut Rgba, slots: std::ops::Range<u3
                 let d = &chars[(tile * 32) as usize % chars.len()..][..32];
                 let b = d[((sy % 8) * 4 + (sx % 8) / 2) as usize];
                 let c = if sx & 1 == 1 { b >> 4 } else { b & 0xF };
-                let (cx, cy) = (x + if hf { (w - 1 - sx) as i32 } else { sx as i32 }, y + sy as i32);
+                let (cx, cy) = (
+                    x + if hf { (w - 1 - sx) as i32 } else { sx as i32 },
+                    y + sy as i32,
+                );
                 if c != 0 && (0..240).contains(&cx) && (0..160).contains(&cy) {
                     let o = ((cy * 240 + cx) * 4) as usize;
                     canvas.pixels[o..o + 4].copy_from_slice(&color(&pal, p, c));
@@ -149,9 +182,12 @@ pub(crate) fn draw_oam(m: &Machine, canvas: &mut Rgba, slots: std::ops::Range<u3
 
 fn setup(m: &mut Machine) -> Result<(), ExtractError> {
     m.clear_ram()?;
-    for (ptr, val) in
-        [(PLAYER_PTR, 0x0203_A000), (PLAYER_GFX_PTR, 0x0203_B000), (MAP_STATE_PTR, 0x0203_C000), (OBJ_BASE_PTR, 0x0203_8000)]
-    {
+    for (ptr, val) in [
+        (PLAYER_PTR, 0x0203_A000),
+        (PLAYER_GFX_PTR, 0x0203_B000),
+        (MAP_STATE_PTR, 0x0203_C000),
+        (OBJ_BASE_PTR, 0x0203_8000),
+    ] {
         m.w32(ptr, val)?;
     }
     m.w8(LANGUAGE, 0)?;
@@ -162,7 +198,11 @@ fn setup(m: &mut Machine) -> Result<(), ExtractError> {
 }
 
 /// World map of `world` (0 = World 1): map layer, status bar, panel and panel sprites.
-pub fn extract_map(m: &mut Machine, world: u8, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+pub fn extract_map(
+    m: &mut Machine,
+    world: u8,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     setup(m)?;
     m.w8(WORLD, world)?;
     m.call(FN_MAP_INIT, &[])?;
@@ -178,7 +218,9 @@ pub fn extract_map(m: &mut Machine, world: u8, out_dir: &std::path::Path) -> Res
     // BG0: status bar (vertical scroll -120 puts its top rows at the screen bottom).
     let (bar_full, bar_chars, bar_scroll) = layer(m, 0)?;
     let bar_w = layer_width(m, 0)?;
-    let bar: Vec<u16> = (0..32).flat_map(|r| bar_full[r * bar_w..r * bar_w + 32].to_vec()).collect();
+    let bar: Vec<u16> = (0..32)
+        .flat_map(|r| bar_full[r * bar_w..r * bar_w + 32].to_vec())
+        .collect();
     // BG3: the panel.
     let (panel, panel_chars, panel_scroll) = layer(m, 3)?;
 
@@ -212,12 +254,17 @@ pub fn extract_map(m: &mut Machine, world: u8, out_dir: &std::path::Path) -> Res
         let chars = if layer == 0 { &bar_chars } else { &panel_chars };
         let tile = bg_tile(chars, &pal, e);
         for y in 0..8 {
-            atlas[(y * keys.len() * 8 + i * 8) * 4..][..32].copy_from_slice(&tile[y * 32..y * 32 + 32]);
+            atlas[(y * keys.len() * 8 + i * 8) * 4..][..32]
+                .copy_from_slice(&tile[y * 32..y * 32 + 32]);
         }
     }
 
     // The panel's sprites (Mario's face, the "L" hint) as an overlay.
-    let mut sprites = Rgba { width: 240, height: 160, pixels: vec![0; 240 * 160 * 4] };
+    let mut sprites = Rgba {
+        width: 240,
+        height: 160,
+        pixels: vec![0; 240 * 160 * 4],
+    };
     draw_oam(m, &mut sprites, 0..128)?;
 
     MapScreenAsset {
@@ -227,7 +274,11 @@ pub fn extract_map(m: &mut Machine, world: u8, out_dir: &std::path::Path) -> Res
         panel,
         panel_scroll,
         keys,
-        tiles: Rgba { width: 8 * (atlas.len() / 256) as u32, height: 8, pixels: atlas },
+        tiles: Rgba {
+            width: 8 * (atlas.len() / 256) as u32,
+            height: 8,
+            pixels: atlas,
+        },
         sprites,
     }
     .write(out_dir, world)
@@ -247,7 +298,10 @@ const CURSOR_SLOT: u32 = 72;
 
 /// The menu screen (map + panel, no status bar; with the panel's Mario head) and the
 /// cursor sprite.
-pub fn extract_game_over_menu(m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+pub fn extract_game_over_menu(
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     setup(m)?;
     m.w8(PLAYERS, 1)?;
     m.w16(LIVES, 0xFFFF)?;
@@ -255,7 +309,11 @@ pub fn extract_game_over_menu(m: &mut Machine, out_dir: &std::path::Path) -> Res
     m.w8(MENU_CURSOR, 0x58)?;
     m.call(FN_MENU_CURSOR, &[])?;
     let pal = parse_palette(&m.read(BG_PAL_BUFFER, 0x200)?);
-    let mut screen = Rgba { width: 240, height: 160, pixels: vec![0; 240 * 160 * 4] };
+    let mut screen = Rgba {
+        width: 240,
+        height: 160,
+        pixels: vec![0; 240 * 160 * 4],
+    };
     // Backdrop, then BG1 (map, priority 3) and BG3 (panel, priority 1).
     for px in screen.pixels.as_chunks_mut::<4>().0 {
         *px = pal[0].to_rgba(255);
@@ -263,7 +321,13 @@ pub fn extract_game_over_menu(m: &mut Machine, out_dir: &std::path::Path) -> Res
     for bg in [1, 3] {
         let (map, chars, scroll) = layer(m, bg)?;
         let view = render_view(&map, layer_width(m, bg)?, &chars, &pal, scroll);
-        for (dst, src) in screen.pixels.as_chunks_mut::<4>().0.iter_mut().zip(view.pixels.as_chunks::<4>().0) {
+        for (dst, src) in screen
+            .pixels
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(view.pixels.as_chunks::<4>().0)
+        {
             if src[3] != 0 {
                 *dst = *src;
             }
@@ -274,7 +338,11 @@ pub fn extract_game_over_menu(m: &mut Machine, out_dir: &std::path::Path) -> Res
     m.w16(OAM_BUF + CURSOR_SLOT * 8, 0xA0)?;
     draw_oam(m, &mut screen, 0..128)?;
     m.w16(OAM_BUF + CURSOR_SLOT * 8, cursor[0])?;
-    let mut only_cursor = Rgba { width: 240, height: 160, pixels: vec![0; 240 * 160 * 4] };
+    let mut only_cursor = Rgba {
+        width: 240,
+        height: 160,
+        pixels: vec![0; 240 * 160 * 4],
+    };
     draw_oam(m, &mut only_cursor, CURSOR_SLOT..CURSOR_SLOT + 1)?;
     let (cx, cy) = ((cursor[1] & 0x1FF) as u32, (cursor[0] & 0xFF) as u32);
     let mut cell = vec![0u8; 8 * 8 * 4];
@@ -282,17 +350,27 @@ pub fn extract_game_over_menu(m: &mut Machine, out_dir: &std::path::Path) -> Res
         let o = (((cy + y) * 240 + cx) * 4) as usize;
         cell[(y * 32) as usize..][..32].copy_from_slice(&only_cursor.pixels[o..o + 32]);
     }
-    screen.write_png(&game_over_menu_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
-    Rgba { width: 8, height: 8, pixels: cell }
-        .write_png(&game_over_cursor_path(out_dir))
+    screen
+        .write_png(&game_over_menu_path(out_dir))
         .map_err(|e| ExtractError(e.to_string()))?;
+    Rgba {
+        width: 8,
+        height: 8,
+        pixels: cell,
+    }
+    .write_png(&game_over_cursor_path(out_dir))
+    .map_err(|e| ExtractError(e.to_string()))?;
     println!("  game over menu (cursor x {cx}, y {cy})");
     Ok(())
 }
 
 /// Game-over pieces: 10 letter cells (8x16, slots 1-10 = tiles 0x100-0x109) then the
 /// Mario head (16x16), in one 96x16 strip.
-pub fn extract_game_over(rom: &[u8], m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+pub fn extract_game_over(
+    rom: &[u8],
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+) -> Result<(), ExtractError> {
     setup(m)?;
     m.call(FN_GAME_OVER_INIT, &[])?;
     let chars = m.read(OBJ_VRAM, 0x8000)?;
@@ -310,7 +388,8 @@ pub fn extract_game_over(rom: &[u8], m: &mut Machine, out_dir: &std::path::Path)
                 let b = d[((sy % 8) * 4 + (sx % 8) / 2) as usize];
                 let c = if sx & 1 == 1 { b >> 4 } else { b & 0xF };
                 if c != 0 {
-                    px[((sy * 96 + ox + sx) * 4) as usize..][..4].copy_from_slice(&color(&pal, pal_no, c));
+                    px[((sy * 96 + ox + sx) * 4) as usize..][..4]
+                        .copy_from_slice(&color(&pal, pal_no, c));
                 }
             }
         }
@@ -318,12 +397,21 @@ pub fn extract_game_over(rom: &[u8], m: &mut Machine, out_dir: &std::path::Path)
     // OAM slot s (1-10) gets letter index 10 - s: slot 10 is drawn first with index 0.
     for slot in 1..=10u32 {
         let index = (10 - slot) as usize;
-        put(GAME_OVER_LETTERS | order[index] as u32, (slot - 1) * 8, 8, 1);
+        put(
+            GAME_OVER_LETTERS | order[index] as u32,
+            (slot - 1) * 8,
+            8,
+            1,
+        );
     }
     put(GAME_OVER_HEAD, 80, 16, 7);
-    Rgba { width: 96, height: 16, pixels: px }
-        .write_png(&game_over_path(out_dir))
-        .map_err(|e| ExtractError(e.to_string()))?;
+    Rgba {
+        width: 96,
+        height: 16,
+        pixels: px,
+    }
+    .write_png(&game_over_path(out_dir))
+    .map_err(|e| ExtractError(e.to_string()))?;
     println!("  game over");
     Ok(())
 }
