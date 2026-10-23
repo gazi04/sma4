@@ -213,11 +213,11 @@ impl Game {
         }
     }
 
-    /// Spawns the goal card when the player comes near and runs it; touching it starts the
+    /// Spawns the goal card when its column comes up (`enemies::Spawner`) and runs it; touching it starts the
     /// course clear (0x080684D4).
     fn step_goal(&mut self) {
         if let Some((x, y)) = self.goal_spawn
-            && (x + 8 - self.player.centre().0).abs() <= enemies::SPAWN_DISTANCE
+            && self.spawner.take_goal()
         {
             self.goal = Some(Goal::spawn(x, y, &self.player, self.frame));
             self.goal_spawn = None;
@@ -553,7 +553,8 @@ impl Game {
         }
 
         self.invulnerable = self.invulnerable.saturating_sub(1);
-        self.spawner.spawn_near(&self.player, &mut self.enemies, &mut self.goomba_pipes);
+        let camera_x = self.camera().0;
+        self.spawner.spawn(camera_x, &self.player, &mut self.enemies, &mut self.goomba_pipes);
         // Generators run before the objects (0x08090448).
         for i in 0..self.goomba_pipes.len() {
             let room = self.enemies.iter().filter(|e| e.from_pipe).count() < enemies::PIPE_GOOMBA_SLOTS;
@@ -940,7 +941,7 @@ mod tests {
         for x in 0..w {
             kinds[(h - 1) * w + x] = TileKind::Solid;
         }
-        let list = [sma4_assets::EnemySpawn { kind: goal::GOAL, col: 6, row: 8 }];
+        let list = [sma4_assets::EnemySpawn { kind: goal::GOAL, col: 6, row: 8, ..Default::default() }];
         g.play(Level::from_kinds(w, h, &kinds), (6 * TILE_PX, 9 * TILE_PX - 16), &list, 0);
         assert_eq!(g.screen, Screen::Level);
         let mut frames = 0;
@@ -971,7 +972,7 @@ mod tests {
             level.set(x, 7, 0x80);
         }
         let mut g = Game::new();
-        let list = [sma4_assets::EnemySpawn { kind: goal::GOAL, col: 1, row: 6 }];
+        let list = [sma4_assets::EnemySpawn { kind: goal::GOAL, col: 1, row: 6, ..Default::default() }];
         g.enter_level(level, (TILE_PX, 7 * TILE_PX - 16), &list);
         g.set_time_limit(100);
         g.screen = Screen::Level;
@@ -995,7 +996,7 @@ mod tests {
         }
         let mut g = Game::new();
         let ground = 9 * TILE_PX - 16;
-        let list = [sma4_assets::EnemySpawn { kind: goal::GOAL, col: 6, row: 8 }];
+        let list = [sma4_assets::EnemySpawn { kind: goal::GOAL, col: 6, row: 8, ..Default::default() }];
         g.enter_level(Level::from_kinds(w, h, &kinds), (6 * TILE_PX, ground), &list);
         g.set_time_limit(100);
         g.screen = Screen::Level;
@@ -1057,7 +1058,7 @@ mod tests {
     /// A level with a floor and one Goomba to the right of the player.
     fn goomba_ahead() -> Game {
         let mut g = Game::new();
-        let list = [sma4_assets::EnemySpawn { kind: enemies::WALKER, col: 10, row: 8 }];
+        let list = [sma4_assets::EnemySpawn { kind: enemies::WALKER, col: 10, row: 8, ..Default::default() }];
         g.enter_level(block_level((20, 2)), (2 * TILE_PX, 9 * TILE_PX - 16), &list);
         g.screen = Screen::Level;
         g

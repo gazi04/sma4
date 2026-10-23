@@ -186,7 +186,7 @@ fn main() -> AppExit {
                 .unwrap_or(1);
             // Piranha Plants are listed at the top row of their pipe.
             let row = if sma4_core::enemies::PIRANHA_TYPES.contains(&kind) { row } else { row - 1 };
-            level.enemies.push(EnemySpawn { kind, col, row: row as u8 });
+            level.enemies.push(EnemySpawn { kind, col, row: row as u8, ..Default::default() });
         }
         if let Some(spec) = &args.script {
             let Some(script) = input::Script::parse(spec, args.screenshot.clone()) else {

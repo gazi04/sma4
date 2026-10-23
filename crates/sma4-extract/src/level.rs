@@ -288,6 +288,7 @@ pub fn extract(
             kind: e.kind,
             col: e.col as u16,
             row: e.row,
+            extra: e.extra.map(|b| b.unwrap_or(0)),
         })
         .collect::<Vec<_>>();
 

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub const METATILE: u32 = 16;
 pub const DEFAULT_DIR: &str = "assets/extracted";
 
-const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV13";
+const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV14";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssetError {
@@ -290,13 +290,14 @@ impl Default for BlockRules {
     }
 }
 
-/// One entry of a level's enemy list (ROM table 0x08136B14): object type and the
-/// metatile column/row it stands in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One entry of a level's enemy list (ROM table 0x08136B14): object type, the metatile
+/// column/row it stands in and the record's extra bytes (0 when it has none), in list order.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EnemySpawn {
     pub kind: u16,
     pub col: u16,
     pub row: u8,
+    pub extra: [u8; 2],
 }
 
 /// Where a pipe of this area leads (level header bytes 0-3 and 6, loader 0x08014F20; the
@@ -418,6 +419,7 @@ impl LevelAsset {
             out.extend_from_slice(&e.kind.to_le_bytes());
             out.extend_from_slice(&e.col.to_le_bytes());
             out.push(e.row);
+            out.extend_from_slice(&e.extra);
         }
         out.extend_from_slice(&self.time_limit.to_le_bytes());
         out.extend_from_slice(&self.start_y.to_le_bytes());
@@ -485,18 +487,20 @@ impl LevelAsset {
         let rules = BlockRules::read(&body[cells..enemies_at]);
         let count = u16::from_le_bytes([body[enemies_at], body[enemies_at + 1]]) as usize;
         let list = &body[enemies_at + 2..];
-        if list.len() < count * 5 + 4 + HIGH_IDS + 2 {
+        let n = count * ENEMY_BYTES;
+        if list.len() < n + 4 + HIGH_IDS + 2 {
             return Err(bad());
         }
-        let high_at = count * 5 + 4;
-        let time_limit = u16::from_le_bytes([list[count * 5], list[count * 5 + 1]]);
-        let start_y = u16::from_le_bytes([list[count * 5 + 2], list[count * 5 + 3]]);
-        let enemies = list[..count * 5]
-            .chunks_exact(5)
+        let high_at = n + 4;
+        let time_limit = u16::from_le_bytes([list[n], list[n + 1]]);
+        let start_y = u16::from_le_bytes([list[n + 2], list[n + 3]]);
+        let enemies = list[..n]
+            .chunks_exact(ENEMY_BYTES)
             .map(|e| EnemySpawn {
                 kind: u16::from_le_bytes([e[0], e[1]]),
                 col: u16::from_le_bytes([e[2], e[3]]),
                 row: e[4],
+                extra: [e[5], e[6]],
             })
             .collect();
         let (junction, camera_x, slopes, scene) = read_area(&list[high_at + HIGH_IDS..]).ok_or_else(bad)?;
@@ -536,6 +540,8 @@ impl LevelAsset {
 }
 
 const EXIT_BYTES: usize = 8;
+/// An enemy-list entry in the level file: kind, column, row, two extra bytes.
+const ENEMY_BYTES: usize = 7;
 
 /// The level file's tail: the junction, the camera limits, the slopes and the background
 /// scene (id, follows y).
@@ -1125,7 +1131,10 @@ mod tests {
                 bounce: [-1, 2, -3, 4, -5, 6, -7, 8, -9, 10, -11],
                 ..BlockRules::default()
             },
-            enemies: vec![EnemySpawn { kind: 0x72, col: 14, row: 25 }, EnemySpawn { kind: 0x6E, col: 300, row: 3 }],
+            enemies: vec![
+                EnemySpawn { kind: 0x72, col: 14, row: 25, extra: [0; 2] },
+                EnemySpawn { kind: 0xC8, col: 300, row: 3, extra: [0x85, 0x50] },
+            ],
             time_limit: 300,
             start_y: 0x140,
             junction: Some(Junction {

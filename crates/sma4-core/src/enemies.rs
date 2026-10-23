@@ -193,10 +193,15 @@ const FIRE_KNOCKOUT: i32 = -0x34 * 16;
 const FIRE_DRIFT: i32 = 0x0C * 16;
 const FIRE_BOX: (i32, i32, i32, i32) = (1, 13, 2, 8);
 
-/// Enemies spawn once they are this close to the player horizontally: half the GBA screen
-/// plus a margin, so they appear just outside the view.
-// TODO(re): use the ROM's spawn window (object loader keyed on the camera).
-pub const SPAWN_DISTANCE: i32 = 120 + 32;
+/// Spawn column by scroll direction (0x08169DD0[0x03003AFE]): 0x110 px right of the camera
+/// while it scrolls right, 0x30 px left of it while it scrolls left (0x0804BC6C).
+const SPAWN_AHEAD: i32 = 0x110;
+const SPAWN_BEHIND: i32 = -0x30;
+/// Level start (0x0804C440): the camera stepped from camera - 0x10 to camera + 0x140 in
+/// 16 px steps with the left-scroll offset, i.e. every column from camera - 0x40 to
+/// camera + 0x110.
+const START_FIRST: i32 = -0x10;
+const START_LAST: i32 = 0x140;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnemyState {
@@ -1231,36 +1236,67 @@ impl Enemy {
     }
 }
 
-/// Enemy list of a level, spawning entries as the player gets near them.
+/// Enemy list of a level, spawning entries as the camera reaches their column (0x0804C92C
+/// -> 0x0804BC6C, every frame).
 #[derive(Debug, Clone, Default)]
 pub struct Spawner {
     pending: Vec<EnemySpawn>,
+    /// Camera x last frame; `None` until the level-start sweep has run.
+    camera_x: Option<i32>,
+    /// Scrolling left (0x03003AFE = 1; set by the camera update 0x0809869C).
+    left: bool,
+    /// The goal card's column was reached.
+    goal: bool,
 }
 
 impl Spawner {
     pub fn new(list: &[EnemySpawn]) -> Self {
         // TODO(re): other enemy types.
-        let wanted = |k: &u16| SUPPORTED.contains(k) || *k == GOOMBA_PIPE;
-        Self { pending: list.iter().copied().filter(|e| wanted(&e.kind)).collect() }
+        let wanted = |k: &u16| SUPPORTED.contains(k) || [GOOMBA_PIPE, crate::goal::GOAL].contains(k);
+        Self { pending: list.iter().copied().filter(|e| wanted(&e.kind)).collect(), ..Self::default() }
     }
 
-    /// Moves list entries that came within range into `active`, Goomba pipes into `pipes`
-    /// (0x0804B460 shifts the eight generator slots and puts the new one first).
-    pub fn spawn_near(&mut self, player: &Player, active: &mut Vec<Enemy>, pipes: &mut Vec<GoombaPipe>) {
-        let cx = player.centre().0;
+    /// The columns (left edge, px) whose entries spawn this frame: on the first frame
+    /// everything from camera - 0x40 to camera + 0x110 (0x0804C440), then the one column at
+    /// the edge the camera scrolls toward. Entries match their column exactly (x & 0xFFF0).
+    fn columns(&mut self, camera_x: i32) -> Vec<i32> {
+        let Some(last) = self.camera_x.replace(camera_x) else {
+            let (first, end) = ((camera_x + START_FIRST) & !0xF, (camera_x + START_LAST) & !0xF);
+            return (first..=end).step_by(16).map(|c| c + SPAWN_BEHIND).collect();
+        };
+        if camera_x != last {
+            self.left = camera_x < last;
+        }
+        vec![(camera_x + if self.left { SPAWN_BEHIND } else { SPAWN_AHEAD }) & !0xF]
+    }
+
+    /// Moves list entries whose column came up into `active`, Goomba pipes into `pipes`
+    /// (0x0804B460 shifts the eight generator slots and puts the new one first). Columns
+    /// left of the level never spawn anything (the page test fails on them).
+    pub fn spawn(&mut self, camera_x: i32, player: &Player, active: &mut Vec<Enemy>, pipes: &mut Vec<GoombaPipe>) {
+        let columns = self.columns(camera_x);
+        let mut goal = false;
         self.pending.retain(|s| {
-            let ex = s.col as i32 * TILE_PX + SIZE / 2;
-            if (ex - cx).abs() > SPAWN_DISTANCE {
+            let x = s.col as i32 * TILE_PX;
+            if !columns.contains(&x) {
                 return true;
             }
-            if s.kind == GOOMBA_PIPE {
-                pipes.insert(0, GoombaPipe::new(s));
-                pipes.truncate(GENERATOR_SLOTS);
-            } else {
-                active.push(Enemy::spawn(s, player));
+            match s.kind {
+                GOOMBA_PIPE => {
+                    pipes.insert(0, GoombaPipe::new(s));
+                    pipes.truncate(GENERATOR_SLOTS);
+                }
+                crate::goal::GOAL => goal = true,
+                _ => active.push(Enemy::spawn(s, player)),
             }
             false
         });
+        self.goal |= goal;
+    }
+
+    /// The goal card's column came up (once).
+    pub fn take_goal(&mut self) -> bool {
+        std::mem::take(&mut self.goal)
     }
 }
 
@@ -1506,7 +1542,7 @@ mod tests {
     }
 
     fn enemy(kind: u16, col: u16) -> EnemySpawn {
-        EnemySpawn { kind, col, row: 6 }
+        EnemySpawn { kind, col, row: 6, ..Default::default() }
     }
 
     fn far_player() -> Player {
@@ -1645,7 +1681,7 @@ mod tests {
 
     /// Red Piranha Plant in a pipe whose top is row 6, columns 10-11.
     fn red_plant() -> Enemy {
-        Enemy::spawn(&EnemySpawn { kind: RED_PIRANHA, col: 10, row: 6 }, &far_player())
+        Enemy::spawn(&EnemySpawn { kind: RED_PIRANHA, col: 10, row: 6, ..Default::default() }, &far_player())
     }
 
     fn phase(e: &Enemy) -> u8 {
@@ -1748,7 +1784,7 @@ mod tests {
     fn fire_plant_waits_0x60_and_spits_once_with_its_mouth_shut() {
         let lvl = level();
         let p = far_player();
-        let mut e = Enemy::spawn(&EnemySpawn { kind: FIRE_PIRANHA, col: 10, row: 6 }, &p);
+        let mut e = Enemy::spawn(&EnemySpawn { kind: FIRE_PIRANHA, col: 10, row: 6, ..Default::default() }, &p);
         let mut f = 0;
         while phase(&e) != 2 {
             e.step(&lvl, &p, f);
@@ -1792,7 +1828,7 @@ mod tests {
     fn fire_plant_spits_twice_after_world_1() {
         let lvl = level();
         let p = far_player();
-        let mut e = Enemy::spawn(&EnemySpawn { kind: FIRE_PIRANHA, col: 10, row: 6 }, &p);
+        let mut e = Enemy::spawn(&EnemySpawn { kind: FIRE_PIRANHA, col: 10, row: 6, ..Default::default() }, &p);
         e.spits_twice = true;
         let mut spits = 0;
         for f in 0..0x100 {
@@ -1869,14 +1905,22 @@ mod tests {
     }
 
     #[test]
-    fn spawner_releases_supported_enemies_near_the_player_once() {
-        let mut sp = Spawner::new(&[enemy(WALKER, 5), enemy(WALKER, 28), enemy(0xA6, 6), enemy(KOOPA, 7)]);
+    fn spawner_releases_supported_enemies_in_view_at_the_start_then_at_the_edge_once() {
+        // Columns 5, 0x11 (x 0x110: the last one of the start), 0x12, 0x40; 0xA6 unsupported.
+        let mut sp = Spawner::new(&[enemy(WALKER, 5), enemy(WALKER, 0x12), enemy(0xA6, 6), enemy(KOOPA, 0x11), enemy(WALKER, 0x40)]);
         let player = Player::spawn(0, 0);
         let mut active = Vec::new();
-        sp.spawn_near(&player, &mut active, &mut Vec::new());
+        sp.spawn(0, &player, &mut active, &mut Vec::new());
         assert_eq!(active.len(), 2);
-        sp.spawn_near(&player, &mut active, &mut Vec::new());
+        sp.spawn(0, &player, &mut active, &mut Vec::new());
+        assert_eq!(active.len(), 2, "the camera has not moved");
+        // Scrolling right: column 0x12 comes up at camera 0x10 (0x10 + 0x110 = 0x120).
+        sp.spawn(0x0F, &player, &mut active, &mut Vec::new());
         assert_eq!(active.len(), 2);
+        sp.spawn(0x10, &player, &mut active, &mut Vec::new());
+        assert_eq!(active.len(), 3);
+        sp.spawn(0x10, &player, &mut active, &mut Vec::new());
+        assert_eq!(active.len(), 3, "once");
     }
 
     /// A player standing on the floor of `level()` with the left of its frame at `x`.
@@ -2015,7 +2059,7 @@ mod tests {
 
     #[test]
     fn goomba_pipe_sends_goombas_out_three_times_in_four_while_the_player_is_right() {
-        let pipe = EnemySpawn { kind: GOOMBA_PIPE, col: 4, row: 5 };
+        let pipe = EnemySpawn { kind: GOOMBA_PIPE, col: 4, row: 5, ..Default::default() };
         let mut g = GoombaPipe::new(&pipe);
         let right = player_at(12 * TILE_PX);
         let mut out = Vec::new();
@@ -2040,7 +2084,7 @@ mod tests {
     fn a_goomba_from_a_pipe_slides_out_for_0x28_frames_then_falls_and_walks() {
         let lvl = level();
         let p = player_at(20 * TILE_PX);
-        let mut g = GoombaPipe::new(&EnemySpawn { kind: GOOMBA_PIPE, col: 4, row: 4 });
+        let mut g = GoombaPipe::new(&EnemySpawn { kind: GOOMBA_PIPE, col: 4, row: 4, ..Default::default() });
         let mut e = (0..0x100).find_map(|_| g.step(&p, true)).unwrap();
         let (x0, y0) = e.px();
         for f in 0..PIPE_EMERGE as u32 {
