@@ -140,6 +140,7 @@ impl Game {
         self.fireballs.clear();
         self.micro_goombas.clear();
         self.player_fireballs.clear();
+        self.debris.clear();
         self.goomba_pipes.clear();
         self.invulnerable = 0;
         self.spawn = spawn;
@@ -179,7 +180,6 @@ impl Game {
     /// Top-left of a GBA-sized view following the player, clamped to the level (the view
     /// `sma4-bevy` centres on the player).
     pub fn camera(&self) -> (i32, i32) {
-        self.debris.clear();
         let (cx, cy) = self.player.centre();
         let (w, h) = (SCREEN_W as i32, SCREEN_H as i32);
         let (min_x, max_x) = self.level.camera_x.unwrap_or((0, (self.level.pixel_width() - w).max(0)));
@@ -243,6 +243,24 @@ impl Game {
         for i in self.items.drain(..) {
             let (x, y) = i.px();
             self.end_coins.push(EndCoin::new(x, y));
+        }
+    }
+
+    /// Coins and debris from a block hit.
+    fn block_outcome(&mut self, tx: i32, ty: i32, outcome: HitOutcome) {
+        let coin = match outcome {
+            HitOutcome::Coin => true,
+            HitOutcome::Broken { coin } => {
+                // 0x080A0024: 10 points (0x030038AC = 1) and the pieces.
+                self.status.add_score(1);
+                self.debris.push(blocks::BrickDebris::new(tx, ty));
+                coin
+            }
+            HitOutcome::Item | HitOutcome::Nothing => false,
+        };
+        if coin {
+            self.status.add_coin();
+            self.coin_pops.push(CoinPop::new(tx, ty));
         }
     }
 
@@ -346,24 +364,6 @@ impl Game {
     }
 
     /// Back to the map: with the "WORLD n" panel or straight to walking.
-    /// Coins and debris from a block hit.
-    fn block_outcome(&mut self, tx: i32, ty: i32, outcome: HitOutcome) {
-        let coin = match outcome {
-            HitOutcome::Coin => true,
-            HitOutcome::Broken { coin } => {
-                // 0x080A0024: 10 points (0x030038AC = 1) and the pieces.
-                self.status.add_score(1);
-                self.debris.push(blocks::BrickDebris::new(tx, ty));
-                coin
-            }
-            HitOutcome::Item | HitOutcome::Nothing => false,
-        };
-        if coin {
-            self.status.add_coin();
-            self.coin_pops.push(CoinPop::new(tx, ty));
-        }
-    }
-
     fn to_map(&mut self, intro: bool) {
         if let Some(map) = &mut self.world_map {
             map.show(intro);
@@ -496,7 +496,6 @@ impl Game {
                     }
                     self.bumps.push(bump);
                 }
-                self.bumps.push(bump);
             }
         }
         // Level coins: one coin and 50 points each (0x08094780).
@@ -506,6 +505,7 @@ impl Game {
             self.sparkles.push(Sparkle::new(tx, ty));
         }
 
+        let view = self.camera();
         let (level, player) = (&mut self.level, &mut self.player);
         let a_pressed = self.input.pressed.contains(Buttons::A);
         let mut spawned = Vec::new();
@@ -527,6 +527,9 @@ impl Game {
         });
         let frame = self.frame;
         self.sparkles.retain_mut(|s| s.step(frame));
+        self.debris.retain_mut(|d| d.step(frame, view));
+        // 0x08094780: the multi-coin block's timer.
+        self.level.coin_timer = self.level.coin_timer.saturating_sub(1);
 
         // Touching an item: the mushroom makes a small player big, the leaf gives the
         // raccoon form (power-up request +0x50, form = request - 1).
@@ -675,7 +678,6 @@ impl Game {
         }
         // Falling out of the level costs a life straight away.
         if self.player.px().1 > self.level.pixel_height() + 32 {
-        let view = self.camera();
             self.lose_life();
         }
     }
@@ -697,9 +699,6 @@ mod tests {
         g.step(Buttons::empty());
         assert!(g.input.pressed.is_empty());
     }
-        self.debris.retain_mut(|d| d.step(frame, view));
-        // 0x08094780: the multi-coin block's timer.
-        self.level.coin_timer = self.level.coin_timer.saturating_sub(1);
 
     /// Full loop: jump into a question block, wait for the item, walk into it, grow.
     #[test]
@@ -755,106 +754,6 @@ mod tests {
     }
 
     /// Flat level with a question block, using the ROM's tileset-1 rules.
-    #[test]
-    fn a_micro_goomba_on_the_player_holds_its_speed_down_until_shaken_off() {
-        let mut g = Game::new();
-        g.enter_level(block_level((40, 2)), (2 * TILE_PX, 9 * TILE_PX - 16), &[]);
-        g.step(Buttons::empty());
-        let (fx, fy) = g.player.frame();
-        // Dropped right onto the player.
-        g.micro_goombas = vec![enemies::MicroGoomba::new((fx + 4) * 256, (fy + 14) * 256)];
-        let run = Buttons::RIGHT | Buttons::B;
-        for _ in 0..90 {
-            g.step(run);
-        }
-        assert_eq!(g.player.stuck, 1);
-        assert_eq!(g.player.vx / 16, 0x16, "0x08172C8A[1]: below the walk speed, no running");
-        assert_eq!(g.player.p_meter, 0, "no P-meter while carrying it");
-        // Each new press of a button loosens it (it tightens again every 16 frames): five
-        // and then some shake it off.
-        for _ in 0..8 {
-            g.step(run | Buttons::A);
-            g.step(run);
-        }
-        assert_eq!(g.player.stuck, 0);
-        for _ in 0..60 {
-            g.step(run);
-        }
-        assert!(g.player.vx / 16 > 0x18, "runs again: {:#x}", g.player.vx / 16);
-    }
-
-    /// A level with a floor and one Goomba to the right of the player.
-    fn goomba_ahead() -> Game {
-        let mut g = Game::new();
-        let list = [sma4_assets::EnemySpawn { kind: enemies::WALKER, col: 10, row: 8 }];
-        g.enter_level(block_level((20, 2)), (2 * TILE_PX, 9 * TILE_PX - 16), &list);
-        g.screen = Screen::Level;
-        g
-    }
-
-    #[test]
-    fn fire_mario_throws_two_fireballs_at_most_and_they_knock_out_a_goomba() {
-        let mut g = goomba_ahead();
-        g.player.set_form(Form::Fire);
-        g.step(Buttons::empty());
-        assert_eq!(g.enemies.len(), 1);
-        for _ in 0..3 {
-            g.step(Buttons::B);
-            g.step(Buttons::empty());
-        }
-        assert_eq!(g.player_fireballs.len(), 2, "two slots");
-        let score = g.status.score;
-        let mut killed = false;
-        for _ in 0..150 {
-            g.step(Buttons::empty());
-            killed |= g.enemies.first().is_some_and(|e| e.state == EnemyState::Dead);
-        }
-        assert!(killed, "knocked out");
-        assert_eq!(g.status.score, score + 10, "100 points");
-    }
-
-    #[test]
-    fn with_the_star_touching_an_enemy_knocks_it_out_and_hits_do_not_count() {
-        let mut g = goomba_ahead();
-        g.player.starman();
-        let mut killed = false;
-        for _ in 0..200 {
-            g.step(Buttons::RIGHT);
-            killed |= g.enemies.iter().any(|e| e.state == EnemyState::Dead);
-        }
-        assert!(killed, "the Goomba was knocked out");
-        assert_eq!(g.player.star_chain, 1);
-        assert_eq!(g.player.form, Form::Small, "no hit taken");
-        assert!(g.dying.is_none());
-    }
-
-    #[test]
-    fn a_fire_flower_from_a_block_makes_a_big_player_fire_mario() {
-        let block = (4, 5);
-        let mut g = Game::new();
-        let mut level = block_level(block);
-        level.rules.item_types[2] = blocks::FIRE_FLOWER;
-        level.rules.bump_behaviour[0x61] = 1;
-        g.enter_level(level, (block.0 as i32 * TILE_PX + 2, 9 * TILE_PX - 16), &[]);
-        g.screen = Screen::Level;
-        g.player.set_form(Form::Big);
-        for _ in 0..60 {
-            g.step(Buttons::empty());
-        }
-        for f in 0..120 {
-            g.step(if f < 12 { Buttons::A } else { Buttons::empty() });
-        }
-        // It rose out of the block and stays on top of it.
-        let flower = g.items.first().copied().expect("a flower");
-        assert_eq!(flower.kind, blocks::FIRE_FLOWER);
-        assert_eq!(flower.px(), (block.0 as i32 * TILE_PX, (block.1 as i32 - 1) * TILE_PX));
-        // Stand on the block next to it.
-        g.player = Player::spawn(flower.px().0 + 4, flower.px().1 + 16 - Form::Big.height());
-        g.player.set_form(Form::Big);
-        g.step(Buttons::empty());
-        assert_eq!((g.player.form, g.player.flash), (Form::Fire, player::FIRE_FLASH));
-    }
-
     fn block_level(block: (usize, usize)) -> Level {
         let (w, h) = (24, 10);
         let mut m = vec![SKY; w * h];
@@ -1125,6 +1024,106 @@ mod tests {
         e.state = EnemyState::Plant { phase: 2, timer: 0x30 };
         e.y = (y - 0x19) * player::SUB;
         e
+    }
+
+    #[test]
+    fn a_micro_goomba_on_the_player_holds_its_speed_down_until_shaken_off() {
+        let mut g = Game::new();
+        g.enter_level(block_level((40, 2)), (2 * TILE_PX, 9 * TILE_PX - 16), &[]);
+        g.step(Buttons::empty());
+        let (fx, fy) = g.player.frame();
+        // Dropped right onto the player.
+        g.micro_goombas = vec![enemies::MicroGoomba::new((fx + 4) * 256, (fy + 14) * 256)];
+        let run = Buttons::RIGHT | Buttons::B;
+        for _ in 0..90 {
+            g.step(run);
+        }
+        assert_eq!(g.player.stuck, 1);
+        assert_eq!(g.player.vx / 16, 0x16, "0x08172C8A[1]: below the walk speed, no running");
+        assert_eq!(g.player.p_meter, 0, "no P-meter while carrying it");
+        // Each new press of a button loosens it (it tightens again every 16 frames): five
+        // and then some shake it off.
+        for _ in 0..8 {
+            g.step(run | Buttons::A);
+            g.step(run);
+        }
+        assert_eq!(g.player.stuck, 0);
+        for _ in 0..60 {
+            g.step(run);
+        }
+        assert!(g.player.vx / 16 > 0x18, "runs again: {:#x}", g.player.vx / 16);
+    }
+
+    /// A level with a floor and one Goomba to the right of the player.
+    fn goomba_ahead() -> Game {
+        let mut g = Game::new();
+        let list = [sma4_assets::EnemySpawn { kind: enemies::WALKER, col: 10, row: 8 }];
+        g.enter_level(block_level((20, 2)), (2 * TILE_PX, 9 * TILE_PX - 16), &list);
+        g.screen = Screen::Level;
+        g
+    }
+
+    #[test]
+    fn fire_mario_throws_two_fireballs_at_most_and_they_knock_out_a_goomba() {
+        let mut g = goomba_ahead();
+        g.player.set_form(Form::Fire);
+        g.step(Buttons::empty());
+        assert_eq!(g.enemies.len(), 1);
+        for _ in 0..3 {
+            g.step(Buttons::B);
+            g.step(Buttons::empty());
+        }
+        assert_eq!(g.player_fireballs.len(), 2, "two slots");
+        let score = g.status.score;
+        let mut killed = false;
+        for _ in 0..150 {
+            g.step(Buttons::empty());
+            killed |= g.enemies.first().is_some_and(|e| e.state == EnemyState::Dead);
+        }
+        assert!(killed, "knocked out");
+        assert_eq!(g.status.score, score + 10, "100 points");
+    }
+
+    #[test]
+    fn with_the_star_touching_an_enemy_knocks_it_out_and_hits_do_not_count() {
+        let mut g = goomba_ahead();
+        g.player.starman();
+        let mut killed = false;
+        for _ in 0..200 {
+            g.step(Buttons::RIGHT);
+            killed |= g.enemies.iter().any(|e| e.state == EnemyState::Dead);
+        }
+        assert!(killed, "the Goomba was knocked out");
+        assert_eq!(g.player.star_chain, 1);
+        assert_eq!(g.player.form, Form::Small, "no hit taken");
+        assert!(g.dying.is_none());
+    }
+
+    #[test]
+    fn a_fire_flower_from_a_block_makes_a_big_player_fire_mario() {
+        let block = (4, 5);
+        let mut g = Game::new();
+        let mut level = block_level(block);
+        level.rules.item_types[2] = blocks::FIRE_FLOWER;
+        level.rules.bump_behaviour[0x61] = 1;
+        g.enter_level(level, (block.0 as i32 * TILE_PX + 2, 9 * TILE_PX - 16), &[]);
+        g.screen = Screen::Level;
+        g.player.set_form(Form::Big);
+        for _ in 0..60 {
+            g.step(Buttons::empty());
+        }
+        for f in 0..120 {
+            g.step(if f < 12 { Buttons::A } else { Buttons::empty() });
+        }
+        // It rose out of the block and stays on top of it.
+        let flower = g.items.first().copied().expect("a flower");
+        assert_eq!(flower.kind, blocks::FIRE_FLOWER);
+        assert_eq!(flower.px(), (block.0 as i32 * TILE_PX, (block.1 as i32 - 1) * TILE_PX));
+        // Stand on the block next to it.
+        g.player = Player::spawn(flower.px().0 + 4, flower.px().1 + 16 - Form::Big.height());
+        g.player.set_form(Form::Big);
+        g.step(Buttons::empty());
+        assert_eq!((g.player.form, g.player.flash), (Form::Fire, player::FIRE_FLASH));
     }
 
     #[test]

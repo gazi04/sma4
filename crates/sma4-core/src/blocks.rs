@@ -195,9 +195,39 @@ pub fn hit_block(level: &mut Level, player: &Player, tx: i32, ty: i32, from: Hit
         2 => (if small { 5 } else { 3 }, HitOutcome::Item),
         // 0x0809FF94: star (result 4, 0x03003D04 = 0x80).
         3 => (4, HitOutcome::Item),
-        // 0x0809FFAC: coin block (0x080A03A8 gives the coin), result 1.
-        4 => (1, HitOutcome::Coin),
-        // TODO(re): other behaviours (bricks, vines, multi-coin...).
+        // 0x0809FFAC: coin block (0x080A03A8 gives the coin), result 1. The multi-coin
+        // block's cell keeps its own result while its timer runs (block index 0x17).
+        4 => {
+            if level.coin_block == Some((tx, ty)) && level.coin_timer != 0 {
+                hi = level.coin_hi;
+            }
+            (1, HitOutcome::Coin)
+        }
+        // 0x080A0024: brick. A coin on top of it is knocked out (0x080A03E0). A small player
+        // only bumps it; anything else breaks it: no bump object (0x0804C8B8 needs a
+        // result), the cell empties (tile change kind 2).
+        6 => {
+            let above = level.metatile(tx, ty - 1);
+            let coin = above == Some(crate::coins::COIN);
+            if coin {
+                level.set(tx, ty - 1, crate::level::SKY);
+            }
+            if small && from == HitFrom::Below {
+                (1, if coin { HitOutcome::Coin } else { HitOutcome::Nothing })
+            } else {
+                level.set(tx, ty, crate::level::SKY);
+                return Some((None, HitOutcome::Broken { coin }));
+            }
+        }
+        // 0x080A0154: multi-coin block: notes its cell (0x03003D00) and starts the timer
+        // (0x03003CFE = 200), then gives a coin like a coin block.
+        8 => {
+            level.coin_block = Some((tx, ty));
+            level.coin_timer = MULTI_COIN_TIME;
+            level.coin_hi = hi;
+            (1, HitOutcome::Coin)
+        }
+        // TODO(re): other behaviours (stars, vines, 1-ups, P-switch...).
         _ => return None,
     };
     let result = low | hi;
@@ -459,6 +489,9 @@ mod tests {
     const COIN_BLOCK: u16 = 0x63;
     const USED: u16 = 0x5F;
     const NOTE: u16 = 0x2E;
+    const BRICK: u16 = 0x67;
+    const MULTI: u16 = 0x6D;
+    const MULTI_ON: u16 = 0x6B;
     const NOTE_LEAF: u16 = 0x30;
     const GROUND: u16 = 0x53;
 
@@ -483,6 +516,18 @@ mod tests {
         }
         r.final_kind[4] = 5;
         r.final_metatile[4] = NOTE;
+        // Brick (behaviour 6, hi 0x30 -> kind 7 -> itself), multi-coin brick (8, hi 0x60 ->
+        // kind 11 -> 0x6B) and the coin block it turns into (4, hi 0x20 -> used block).
+        r.bump_behaviour[BRICK as usize] = 6;
+        r.result_hi[BRICK as usize] = 0x30;
+        r.final_kind[3] = 7;
+        r.final_metatile[6] = BRICK;
+        r.bump_behaviour[MULTI as usize] = 8;
+        r.result_hi[MULTI as usize] = 0x60;
+        r.final_kind[6] = 11;
+        r.final_metatile[10] = MULTI_ON;
+        r.bump_behaviour[MULTI_ON as usize] = 4;
+        r.result_hi[MULTI_ON as usize] = 0x20;
         r
     }
 
@@ -497,9 +542,6 @@ mod tests {
         Level::new(w, h, m, TEST_SOLIDITY, rules())
     }
 
-    const BRICK: u16 = 0x67;
-    const MULTI: u16 = 0x6D;
-    const MULTI_ON: u16 = 0x6B;
     #[test]
     fn question_block_releases_growth_item_and_becomes_used() {
         let mut lvl = level(QBLOCK);
@@ -524,18 +566,6 @@ mod tests {
         assert_eq!(lvl.at(5, 4), TileKind::Solid);
     }
 
-        // Brick (behaviour 6, hi 0x30 -> kind 7 -> itself), multi-coin brick (8, hi 0x60 ->
-        // kind 11 -> 0x6B) and the coin block it turns into (4, hi 0x20 -> used block).
-        r.bump_behaviour[BRICK as usize] = 6;
-        r.result_hi[BRICK as usize] = 0x30;
-        r.final_kind[3] = 7;
-        r.final_metatile[6] = BRICK;
-        r.bump_behaviour[MULTI as usize] = 8;
-        r.result_hi[MULTI as usize] = 0x60;
-        r.final_kind[6] = 11;
-        r.final_metatile[10] = MULTI_ON;
-        r.bump_behaviour[MULTI_ON as usize] = 4;
-        r.result_hi[MULTI_ON as usize] = 0x20;
     #[test]
     fn big_player_gets_a_different_result() {
         let mut lvl = level(QBLOCK);
@@ -688,7 +718,6 @@ mod tests {
         while !bump.step(&mut lvl, &mut player, false).1 {}
         assert_eq!(lvl.metatile(5, 4), Some(NOTE));
     }
-}
 
     #[test]
     fn a_small_player_bumps_a_brick_and_a_big_one_breaks_it() {
@@ -754,3 +783,4 @@ mod tests {
         assert_eq!(r.0 - l.0, 8 + 2 * f as i32 + 2);
         assert!(bl.1 > l.1, "the bottom pair falls faster");
     }
+}

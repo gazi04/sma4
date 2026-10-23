@@ -26,16 +26,16 @@ pub struct Level {
     pub camera_y: Option<i32>,
     /// Slope collision, in tilesets with slopes.
     pub slopes: Option<Slopes>,
-}
-
-impl Level {
-    pub fn new(width: usize, height: usize, metatiles: Vec<u16>, solidity: Solidity, rules: BlockRules) -> Self {
-        assert_eq!(metatiles.len(), width * height);
     /// The multi-coin block in use (0x03003D00), its timer (0x03003CFE: 200 frames from the
     /// first hit) and its result high nibble.
     pub coin_block: Option<(i32, i32)>,
     pub coin_timer: u8,
     pub coin_hi: u8,
+}
+
+impl Level {
+    pub fn new(width: usize, height: usize, metatiles: Vec<u16>, solidity: Solidity, rules: BlockRules) -> Self {
+        assert_eq!(metatiles.len(), width * height);
         Self {
             width,
             height,
@@ -48,6 +48,9 @@ impl Level {
             camera_x: None,
             camera_y: None,
             slopes: None,
+            coin_block: None,
+            coin_timer: 0,
+            coin_hi: 0,
         }
     }
 
@@ -59,9 +62,6 @@ impl Level {
     /// The area's id, pipe destination and camera limits.
     pub fn with_area(mut self, id: u16, junction: Option<Junction>, camera_x: Option<(i32, i32)>) -> Self {
         self.id = id;
-            coin_block: None,
-            coin_timer: 0,
-            coin_hi: 0,
         self.junction = junction;
         self.camera_x = camera_x;
         self
