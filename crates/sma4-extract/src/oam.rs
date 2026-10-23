@@ -135,7 +135,13 @@ fn capture(m: &mut Machine, rom: &[u8], pose: &Pose) -> Result<Vec<Obj>, Extract
 }
 
 fn compose(objs: &[Obj], chars: &[u8], palette: &[Bgr555]) -> Rgba {
-    let mut px = vec![0u8; (CELL_W * CELL_H * 4) as usize];
+    compose_in(objs, chars, palette, (CELL_W, CELL_H), ORIGIN)
+}
+
+/// `compose` into a `cell` (w, h) with the object's position at `origin`.
+fn compose_in(objs: &[Obj], chars: &[u8], palette: &[Bgr555], cell: (u32, u32), origin: (i32, i32)) -> Rgba {
+    let (cell_w, cell_h) = cell;
+    let mut px = vec![0u8; (cell_w * cell_h * 4) as usize];
     for o in objs {
         for sy in 0..o.h {
             for sx in 0..o.w {
@@ -150,22 +156,29 @@ fn compose(objs: &[Obj], chars: &[u8], palette: &[Bgr555]) -> Rgba {
                 }
                 let dx = if o.hflip { o.w - 1 - sx } else { sx } as i32;
                 let dy = if o.vflip { o.h - 1 - sy } else { sy } as i32;
-                let cx = o.x + dx - AT + ORIGIN.0;
-                let cy = o.y + dy - AT + ORIGIN.1;
-                if !(0..CELL_W as i32).contains(&cx) || !(0..CELL_H as i32).contains(&cy) {
+                let cx = o.x + dx - AT + origin.0;
+                let cy = o.y + dy - AT + origin.1;
+                if !(0..cell_w as i32).contains(&cx) || !(0..cell_h as i32).contains(&cy) {
                     continue;
                 }
                 let c = palette[(o.pal * 16 + ci as u32) as usize].to_rgba(255);
-                let i = ((cy as u32 * CELL_W + cx as u32) * 4) as usize;
+                let i = ((cy as u32 * cell_w + cx as u32) * 4) as usize;
                 px[i..i + 4].copy_from_slice(&c);
             }
         }
     }
     Rgba {
-        width: CELL_W,
-        height: CELL_H,
+        width: cell_w,
+        height: cell_h,
         pixels: px,
     }
+}
+
+/// One pose in a cell of its own size, the object's position at `origin`.
+pub fn render_one(m: &mut Machine, rom: &[u8], pose: &Pose, cell: (u32, u32), origin: (i32, i32)) -> Result<Rgba, ExtractError> {
+    let chars = m.read(OBJ_VRAM, 0x8000)?;
+    let palette = parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?);
+    Ok(compose_in(&capture(m, rom, pose)?, &chars, &palette, cell, origin))
 }
 
 /// Renders the poses side by side, one `CELL_W` x `CELL_H` cell each.

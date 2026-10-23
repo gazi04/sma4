@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub const METATILE: u32 = 16;
 pub const DEFAULT_DIR: &str = "assets/extracted";
 
-const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV14";
+const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV15";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssetError {
@@ -368,6 +368,16 @@ pub struct LevelAsset {
     /// Player start y (top of the 32 px frame, px): 0x0813789A[header byte 4 >> 5]
     /// (0x08014F20).
     pub start_y: u16,
+    /// Camera y at the start (0x03003754 = 0x0813600E[header byte 4 >> 5], 0x08014F20).
+    pub start_camera_y: u16,
+    /// Pipe flags of the tileset's class (0x08172E44[0x08172BCC[tileset]], 0x0809B598): bit
+    /// 7 makes 0xBD / 0xBE pipe ends lead to the world's end room.
+    pub pipe_flags: u8,
+    /// Water: per id quadrant (id >> 6), the ids above this one are water unless they
+    /// collide (0x0813DD04[class * 4 + quadrant], 0x080A1E60).
+    pub water: [u8; 4],
+    /// The vertical scroll's settings (0x08136F30[level id], loaded by 0x08014F20).
+    pub camera: CameraParams,
     /// The pipe destination area, if the header names one.
     pub junction: Option<Junction>,
     /// Horizontal camera limits (min, max x of the view), when the ROM sets them for this
@@ -463,6 +473,10 @@ impl LevelAsset {
                 b.image.write_png(&Self::background_path(dir, self.level_id))?;
             }
         }
+        out.extend_from_slice(&self.start_camera_y.to_le_bytes());
+        out.push(self.pipe_flags);
+        out.extend_from_slice(&self.water);
+        self.camera.write(&mut out);
         write(&bin, &out)?;
         self.atlas.write_png(&png)
     }
@@ -503,7 +517,8 @@ impl LevelAsset {
                 extra: [e[5], e[6]],
             })
             .collect();
-        let (junction, camera_x, slopes, scene) = read_area(&list[high_at + HIGH_IDS..]).ok_or_else(bad)?;
+        let (junction, camera_x, slopes, scene, start_camera_y, pipe_flags, water, camera) =
+            read_area(&list[high_at + HIGH_IDS..]).ok_or_else(bad)?;
         let background = match scene {
             None => None,
             Some((scene, follow_y)) => {
@@ -530,6 +545,10 @@ impl LevelAsset {
             enemies,
             time_limit,
             start_y,
+            start_camera_y,
+            pipe_flags,
+            water,
+            camera,
             junction,
             camera_x,
             slopes,
@@ -539,13 +558,50 @@ impl LevelAsset {
     }
 }
 
+/// A level's vertical scroll settings (u16s of 0x08136F30[level id], 0x08014F20).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CameraParams {
+    /// +0: the level's last pixel row (player +0xCA); the camera stops at this - 0x9F.
+    pub bottom: u16,
+    /// +2: bit 15 set, a fixed camera y (player +0xC8).
+    pub fixed: u16,
+    /// +4 / +6 (+0xD0 / +0xD4) and +0x16 / +0x18 (+0xD2 / +0xD6): the dead zone (player y
+    /// less the camera y) the camera does not follow inside, normally and while flying.
+    pub dead_zone: [u16; 2],
+    pub dead_zone_flying: [u16; 2],
+    /// +0x1E (+0xDA): the highest camera y.
+    pub top: u16,
+}
+
+impl CameraParams {
+    fn write(&self, out: &mut Vec<u8>) {
+        let [d0, d1] = self.dead_zone;
+        let [f0, f1] = self.dead_zone_flying;
+        for v in [self.bottom, self.fixed, d0, d1, f0, f1, self.top] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+
+    fn read(d: &[u8]) -> Option<Self> {
+        let w = |i: usize| Some(u16::from_le_bytes([*d.get(i * 2)?, *d.get(i * 2 + 1)?]));
+        Some(Self {
+            bottom: w(0)?,
+            fixed: w(1)?,
+            dead_zone: [w(2)?, w(3)?],
+            dead_zone_flying: [w(4)?, w(5)?],
+            top: w(6)?,
+        })
+    }
+}
+
 const EXIT_BYTES: usize = 8;
 /// An enemy-list entry in the level file: kind, column, row, two extra bytes.
 const ENEMY_BYTES: usize = 7;
 
-/// The level file's tail: the junction, the camera limits, the slopes and the background
-/// scene (id, follows y).
-type Area = (Option<Junction>, Option<(u16, u16)>, Option<Slopes>, Option<(u8, bool)>);
+/// The level file's tail: the junction, the camera limits, the slopes, the background
+/// scene (id, follows y), the start camera y, the pipe flags and the water thresholds.
+type Area =
+    (Option<Junction>, Option<(u16, u16)>, Option<Slopes>, Option<(u8, bool)>, u16, u8, [u8; 4], CameraParams);
 
 fn read_area(d: &[u8]) -> Option<Area> {
     let u16_at = |o: usize| Some(u16::from_le_bytes([*d.get(o)?, *d.get(o + 1)?]));
@@ -584,7 +640,9 @@ fn read_area(d: &[u8]) -> Option<Area> {
         0 => None,
         _ => Some((*d.get(p + 1)?, *d.get(p + 2)? != 0)),
     };
-    Some((junction, camera_x, slopes, scene))
+    p += if scene.is_some() { 3 } else { 1 };
+    let camera = CameraParams::read(d.get(p + 7..)?)?;
+    Some((junction, camera_x, slopes, scene, u16_at(p)?, *d.get(p + 2)?, d.get(p + 3..p + 7)?.try_into().ok()?, camera))
 }
 
 /// Status bar (BG0 in levels): the template map the level loader 0x08016434 decompresses
@@ -1155,6 +1213,10 @@ mod tests {
             ],
             time_limit: 300,
             start_y: 0x140,
+            start_camera_y: 0xF0,
+            pipe_flags: 0x80,
+            water: [0xFF, 0xFF, 0xFF, 0xC1],
+            camera: CameraParams { bottom: 0x1AF, fixed: 0, dead_zone: [0x10, 0x30], dead_zone_flying: [0x10, 0x30], top: 7 },
             junction: Some(Junction {
                 level: 0x23,
                 enemies: 2,
@@ -1227,4 +1289,139 @@ pub const TOAD_RAISE: i32 = 16;
 /// The open chest's lid, 16x16 BG tiles drawn over the level at the chest.
 pub fn chest_lid_path(dir: &Path) -> PathBuf {
     dir.join("objects").join("chest_open.png")
+}
+
+/// One autoscroll script: per entry a command (bits 3-2 / 1-0: x / y speed step index, high
+/// nibble: sub-script + 1) and a duration (steps of 4 frames, or the sub-script's repeat
+/// count), and the sub-script + 1 to loop at the end (0: stop).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScrollScript {
+    pub commands: Vec<u8>,
+    pub durations: Vec<u8>,
+    pub then: u8,
+}
+
+/// Autoscroll scripts (object 0x1A7: 0x0804B0A4 starts one, 0x080925B4 runs it), read
+/// from the ROM: speed steps 0x08170E14, scripts 0x08170F4C / 0x081710E0 / 0x081711F1,
+/// sub-scripts 0x08171170 / 0x081711C4.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AutoscrollScripts {
+    /// Speed change per step index (1/16 px per frame).
+    pub steps: [i8; 4],
+    pub scripts: Vec<ScrollScript>,
+    /// Sub-scripts (`then` unused).
+    pub subs: Vec<ScrollScript>,
+}
+
+pub fn autoscroll_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("autoscroll.bin")
+}
+
+impl AutoscrollScripts {
+    pub fn write(&self, dir: &Path) -> Result<()> {
+        let mut out: Vec<u8> = self.steps.iter().map(|&s| s as u8).collect();
+        for list in [&self.scripts, &self.subs] {
+            out.push(list.len() as u8);
+            for s in list.iter() {
+                out.push(s.commands.len() as u8);
+                out.extend_from_slice(&s.commands);
+                out.extend_from_slice(&s.durations);
+                out.push(s.then);
+            }
+        }
+        write(&autoscroll_path(dir), &out)
+    }
+
+    pub fn read(dir: &Path) -> Result<Self> {
+        let path = autoscroll_path(dir);
+        let d = read(&path)?;
+        let parse = || -> Option<Self> {
+            let mut p = 4;
+            let mut lists = [Vec::new(), Vec::new()];
+            for list in &mut lists {
+                let n = *d.get(p)? as usize;
+                p += 1;
+                for _ in 0..n {
+                    let len = *d.get(p)? as usize;
+                    let commands = d.get(p + 1..p + 1 + len)?.to_vec();
+                    let durations = d.get(p + 1 + len..p + 1 + 2 * len)?.to_vec();
+                    let then = *d.get(p + 1 + 2 * len)?;
+                    p += 2 + 2 * len;
+                    list.push(ScrollScript { commands, durations, then });
+                }
+            }
+            let [scripts, subs] = lists;
+            Some(Self { steps: std::array::from_fn(|i| d[i] as i8), scripts, subs })
+        };
+        if d.len() < 4 {
+            return Err(AssetError::BadLevel(path));
+        }
+        parse().ok_or(AssetError::BadLevel(path))
+    }
+}
+
+#[cfg(test)]
+mod autoscroll_tests {
+    use super::*;
+
+    #[test]
+    fn autoscroll_scripts_round_trip() {
+        let dir = std::env::temp_dir().join(format!("sma4-autoscroll-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("objects")).unwrap();
+        let s = AutoscrollScripts {
+            steps: [0, 1, -1, -1],
+            scripts: vec![ScrollScript { commands: vec![4, 0x10, 0], durations: vec![8, 3, 0x86], then: 0 }],
+            subs: vec![ScrollScript { commands: vec![0], durations: vec![0xFF], then: 0 }],
+        };
+        s.write(&dir).unwrap();
+        assert_eq!(AutoscrollScripts::read(&dir).unwrap(), s);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// World 1-4's falling lift (type 0x36): one `LIFT_CELL` image, the object's position at
+/// `LIFT_ORIGIN`.
+pub fn lift_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("lift.png")
+}
+pub const LIFT_CELL: (u32, u32) = (64, 32);
+pub const LIFT_ORIGIN: (i32, i32) = (8, 8);
+
+/// Where each world's end-of-level pipes lead (transition 4, 0x080056A0): level
+/// 0x08131EDA[world], enemy list 0x08131EEA[world], tileset 0x08131EFA[world]; the player
+/// comes up out of a pipe there with its frame at `END_ROOM_ARRIVAL`, camera y 0xF0.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EndRoom {
+    pub level: u16,
+    pub enemies: u16,
+    pub tileset: u8,
+}
+pub const END_ROOM_ARRIVAL: (u16, u16) = (0x28, 0x180);
+pub const END_ROOM_CAMERA_Y: u16 = 0xF0;
+pub const WORLDS: usize = 8;
+
+pub fn end_rooms_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("end_rooms.bin")
+}
+
+pub fn write_end_rooms(dir: &Path, rooms: &[EndRoom; WORLDS]) -> Result<()> {
+    let mut out = Vec::new();
+    for r in rooms {
+        out.extend_from_slice(&r.level.to_le_bytes());
+        out.extend_from_slice(&r.enemies.to_le_bytes());
+        out.push(r.tileset);
+    }
+    write(&end_rooms_path(dir), &out)
+}
+
+pub fn read_end_rooms(dir: &Path) -> Result<[EndRoom; WORLDS]> {
+    let path = end_rooms_path(dir);
+    let d = read(&path)?;
+    if d.len() < WORLDS * 5 {
+        return Err(AssetError::BadLevel(path));
+    }
+    Ok(std::array::from_fn(|i| {
+        let e = &d[i * 5..i * 5 + 5];
+        EndRoom { level: u16::from_le_bytes([e[0], e[1]]), enemies: u16::from_le_bytes([e[2], e[3]]), tileset: e[4] }
+    }))
 }

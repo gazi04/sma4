@@ -80,6 +80,8 @@ fn extract_gfx(rom: &Rom, args: &Args) -> Result<usize, String> {
 
 /// World 1-3 (level 0x0C), whose object graphics include the Boomerang Bro.
 const BOOMERANG_BRO_LEVEL: u16 = 0x0C;
+/// World 1-4 (level 0xD2), with the falling lifts and the red Paratroopa.
+const LIFT_LEVEL: u16 = 0xD2;
 /// World 1-3's hidden Toad House: level 0x106, tileset 7, enemy list 0x0816BA52.
 const TOAD_HOUSE_1_3: u16 = 0x106;
 const TOAD_HOUSE_TILESET: u8 = 7;
@@ -106,6 +108,13 @@ fn run(args: &Args) -> Result<(), String> {
     };
     let course_levels = levels.len();
     let mut levels = levels;
+    // Where end-of-level pipes lead (0x080056A0), and World 1's end room with the areas.
+    let rooms = level::end_rooms(&rom).map_err(|e| e.0)?;
+    sma4_assets::write_end_rooms(&args.out, &rooms).map_err(|e| e.to_string())?;
+    let r = rooms[0];
+    if !levels.iter().any(|l| l.0 == r.level) {
+        levels.push((r.level, r.tileset, r.enemies));
+    }
     let mut n = 0;
     while n < levels.len() {
         let (id, tileset, enemies) = levels[n];
@@ -136,6 +145,10 @@ fn run(args: &Args) -> Result<(), String> {
         {
             levels.push((j.level, j.tileset, j.enemies));
         }
+        // World 1-4 loads the lift's graphics.
+        if id == LIFT_LEVEL {
+            objects::extract_lift(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+        }
         // World 1-3 loads the Boomerang Bro's graphics.
         if id == BOOMERANG_BRO_LEVEL {
             objects::extract_boomerang_bro(&rom, &mut m, &args.out).map_err(|e| e.0)?;
@@ -154,6 +167,7 @@ fn run(args: &Args) -> Result<(), String> {
             objects::extract_brick_debris(&m, &args.out).map_err(|e| e.0)?;
             objects::extract_skid_dust(&rom, &m, &args.out).map_err(|e| e.0)?;
             objects::extract_hud(&rom, &m, &args.out).map_err(|e| e.0)?;
+            objects::extract_autoscroll(&rom, &args.out).map_err(|e| e.0)?;
             objects::extract_score_popups(&rom, &m, &args.out).map_err(|e| e.0)?;
             objects::extract_koopas(&rom, &mut m, &args.out).map_err(|e| e.0)?;
             objects::extract_paragoomba(&rom, &mut m, &args.out).map_err(|e| e.0)?;

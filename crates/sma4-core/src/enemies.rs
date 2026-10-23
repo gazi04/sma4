@@ -40,6 +40,8 @@ pub const KOOPA: u16 = 0x6C;
 pub const RED_KOOPA: u16 = 0x6D;
 /// Green Koopa Paratroopa: hops; loses its wings when stomped.
 pub const PARATROOPA: u16 = 0x6E;
+/// Red Paratroopa (World 1-4): flies up and down in place (main 0x08053CDC).
+pub const RED_PARATROOPA: u16 = 0x6F;
 /// Paragoomba: hops and flutters; loses its wings when stomped.
 pub const PARAGOOMBA: u16 = 0x73;
 /// Brown Paragoomba that drops Micro-Goombas (World 1-2).
@@ -59,11 +61,12 @@ pub const FIRE_PIRANHA: u16 = 0xA4;
 /// 0xA5 / 0xA7 and the red Venus Fire Trap 0xA6 are not ported yet).
 pub const PIRANHA_TYPES: [u16; 3] = [PIRANHA, RED_PIRANHA, FIRE_PIRANHA];
 /// Enemy types implemented so far.
-pub const SUPPORTED: [u16; 10] = [
+pub const SUPPORTED: [u16; 11] = [
     WALKER,
     KOOPA,
     RED_KOOPA,
     PARATROOPA,
+    RED_PARATROOPA,
     PARAGOOMBA,
     MICRO_PARAGOOMBA,
     BOOMERANG_BRO,
@@ -113,6 +116,9 @@ const MAX_FALL: i32 = 64 * 16;
 /// frame in the air it is lowered by one more (gravity 2 instead of 3).
 const HOP_SPEED: i32 = -48 * 16;
 const HOP_LIFT: i32 = 16;
+/// Red Paratroopa top speed (0x0816E57A: speed byte +/-0x10) and the hold at each end.
+const FLY_SPEED: i32 = 0x10 * 16;
+const FLY_HOLD: u8 = 0x30;
 /// Paragoomba (0x08053E9C): on the ground with timer +0x23 at 0, it hops (speed byte
 /// 0xF0) and counts the hop in +0x3B; the fourth is high (0xD0), resets the count and
 /// sets the timer to 0x50. Gravity is the Paratroopa's (+3 - 1).
@@ -483,7 +489,7 @@ impl Enemy {
     }
 
     pub fn is_koopa(&self) -> bool {
-        matches!(self.kind, KOOPA | RED_KOOPA | PARATROOPA)
+        matches!(self.kind, KOOPA | RED_KOOPA | PARATROOPA | RED_PARATROOPA)
     }
 
     /// Can hurt, be stomped or be knocked out.
@@ -506,6 +512,7 @@ impl Enemy {
                 return t > 1;
             }
             EnemyState::Walking if self.kind == RED_KOOPA => self.walk_red(level),
+            EnemyState::Walking if self.kind == RED_PARATROOPA => self.fly_up_and_down(),
             EnemyState::Walking if self.kind == PARAGOOMBA => self.step_paragoomba(level, player),
             EnemyState::Walking if self.kind == MICRO_PARAGOOMBA => self.step_micro_paragoomba(level, player),
             EnemyState::Walking if self.kind == BOOMERANG_BRO => self.step_bro(level, player, frame),
@@ -675,6 +682,28 @@ impl Enemy {
         self.walk_acc = acc;
         if !landed {
             self.walk_count = 1;
+        }
+    }
+
+    /// Red Paratroopa main 0x08053CDC: +0x3A counts frames; y += speed (0x08049E80); with
+    /// the timer +0x23 out, every 4th frame (+0x3B) the speed byte steps by
+    /// 0x0816E578[+0x3C & 1] (+1 / -1) and on reaching 0x0816E57A[+0x3C & 1] (0x10 / -0x10)
+    /// the direction flips and the timer is 0x30, during which it keeps that speed.
+    fn fly_up_and_down(&mut self) {
+        self.walk_count = self.walk_count.wrapping_add(1);
+        self.y += self.vy;
+        self.hop_timer = self.hop_timer.saturating_sub(1);
+        if self.hop_timer != 0 {
+            return;
+        }
+        self.hops = self.hops.wrapping_add(1);
+        if self.hops & 3 == 0 {
+            let up = self.wings & 1 != 0;
+            self.vy += if up { -16 } else { 16 };
+            if self.vy == if up { -FLY_SPEED } else { FLY_SPEED } {
+                self.wings = self.wings.wrapping_add(1);
+                self.hop_timer = FLY_HOLD;
+            }
         }
     }
 
@@ -1103,6 +1132,11 @@ impl Enemy {
                         self.kind = KOOPA;
                         self.vy = 0;
                     }
+                    // 0x0816966C[0x6F] = 0x6D.
+                    RED_PARATROOPA => {
+                        self.kind = RED_KOOPA;
+                        self.vy = 0;
+                    }
                     // 0x08048B3C: 0x0816966C[0x73] = 0x72, speed byte 0; the palette stays.
                     PARAGOOMBA => {
                         self.kind = WALKER;
@@ -1174,6 +1208,9 @@ impl Enemy {
         if self.is_koopa() {
             if self.kind == PARATROOPA {
                 self.kind = KOOPA;
+            }
+            if self.kind == RED_PARATROOPA {
+                self.kind = RED_KOOPA;
             }
             self.state = EnemyState::Shell(SHELL_TIMER);
             self.flipped = true;
@@ -1247,6 +1284,9 @@ impl Enemy {
             (EnemyState::Puff(t), _) => (PUFF_FRAMES as usize - 1).saturating_sub((t >> 3) as usize),
             (EnemyState::Squished(_), _) => WALKER_SQUISHED,
             (EnemyState::Walking, PARATROOPA) => ((self.age >> 2) & 3) as usize,
+            // 0x08053CDC / 0x080539E8: cells by +0x3A >> 1 (body (+0x3A >> 3) & 1, wing by
+            // (+0x3A + 2) & 4).
+            (EnemyState::Walking, RED_PARATROOPA) => ((self.walk_count >> 1) & 7) as usize,
             // 0x08053E9C: body frame (frame counter >> 3) & 1; 0x08053D88 wings 0x107 while
             // +0x3C bit 3 is set, else 0x108.
             (EnemyState::Walking, PARAGOOMBA) => {
@@ -1377,12 +1417,19 @@ pub struct Spawner {
     left: bool,
     /// The goal card's column was reached.
     goal: bool,
+    /// An autoscroll entry's column was reached: its row.
+    autoscroll: Option<u8>,
+    /// Lifts whose column was reached.
+    lifts: Vec<EnemySpawn>,
 }
 
 impl Spawner {
     pub fn new(list: &[EnemySpawn]) -> Self {
         // TODO(re): other enemy types.
-        let wanted = |k: &u16| SUPPORTED.contains(k) || [GOOMBA_PIPE, crate::goal::GOAL].contains(k);
+        let wanted = |k: &u16| {
+            SUPPORTED.contains(k)
+                || [GOOMBA_PIPE, crate::goal::GOAL, crate::autoscroll::AUTOSCROLL, crate::lifts::LIFT].contains(k)
+        };
         Self { pending: list.iter().copied().filter(|e| wanted(&e.kind)).collect(), ..Self::default() }
     }
 
@@ -1406,6 +1453,8 @@ impl Spawner {
     pub fn spawn(&mut self, camera_x: i32, player: &Player, active: &mut Vec<Enemy>, pipes: &mut Vec<GoombaPipe>) {
         let columns = self.columns(camera_x);
         let mut goal = false;
+        let mut autoscroll = None;
+        let lifts = &mut self.lifts;
         self.pending.retain(|s| {
             let x = s.col as i32 * TILE_PX;
             if !columns.contains(&x) {
@@ -1417,11 +1466,24 @@ impl Spawner {
                     pipes.truncate(GENERATOR_SLOTS);
                 }
                 crate::goal::GOAL => goal = true,
+                crate::autoscroll::AUTOSCROLL => autoscroll = Some(s.row),
+                crate::lifts::LIFT => lifts.push(*s),
                 _ => active.push(Enemy::spawn(s, player)),
             }
             false
         });
         self.goal |= goal;
+        self.autoscroll = self.autoscroll.or(autoscroll);
+    }
+
+    /// Lifts whose column came up.
+    pub fn take_lifts(&mut self) -> Vec<EnemySpawn> {
+        std::mem::take(&mut self.lifts)
+    }
+
+    /// An autoscroll entry's column came up (once): its row.
+    pub fn take_autoscroll(&mut self) -> Option<u8> {
+        self.autoscroll.take()
     }
 
     /// The goal card's column came up (once).

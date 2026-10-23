@@ -50,7 +50,7 @@ struct EnemySprite;
 fn load_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMut<Assets<Image>>) {
     let mut art = HashMap::new();
     art.insert(enemies::WALKER, load_cells(&walker_path(&dir.0), 16, 16, &mut images));
-    for kind in [enemies::KOOPA, enemies::RED_KOOPA, enemies::PARATROOPA] {
+    for kind in [enemies::KOOPA, enemies::RED_KOOPA, enemies::PARATROOPA, enemies::RED_PARATROOPA] {
         art.insert(kind, load_cells(&koopa_path(&dir.0, kind), KOOPA_CELL_W, KOOPA_CELL_H, &mut images));
     }
     for kind in [enemies::PARAGOOMBA, enemies::MICRO_PARAGOOMBA] {
@@ -59,6 +59,9 @@ fn load_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMu
     for kind in enemies::PIRANHA_TYPES {
         art.insert(kind, load_cells(&piranha_path(&dir.0, kind), KOOPA_CELL_W, KOOPA_CELL_H, &mut images));
     }
+    // World 1-4's lift: one cell.
+    let (lw, lh) = sma4_assets::LIFT_CELL;
+    art.insert(sma4_core::lifts::LIFT, load_cells(&sma4_assets::lift_path(&dir.0), lw, lh, &mut images));
     let puff = load_cells(&puff_path(&dir.0), 16, 16, &mut images);
     let fireball = load_cells(&fireball_path(&dir.0), KOOPA_CELL_W, KOOPA_CELL_H, &mut images);
     if fireball.is_empty() {
@@ -125,6 +128,15 @@ fn sync_enemies(mut commands: Commands, game: Res<GameRes>, art: Res<Art>, old: 
             let (w, h) = (KOOPA_CELL_W as i32, KOOPA_CELL_H as i32);
             let (cx, cy) = (x - KOOPA_ORIGIN.0 + w / 2, y - KOOPA_ORIGIN.1 + h / 2);
             commands.spawn((EnemySprite, Sprite::from_image(image.clone()), Transform::from_xyz(cx as f32, -(cy as f32), Z_MICRO)));
+        }
+    }
+    // Lifts: the object's position at LIFT_ORIGIN in the cell.
+    if let Some(image) = art.0.get(&sma4_core::lifts::LIFT).and_then(|c| c.first()) {
+        let ((w, h), (ox, oy)) = (sma4_assets::LIFT_CELL, sma4_assets::LIFT_ORIGIN);
+        for l in &game.0.lifts {
+            let (x, y) = l.px();
+            let (cx, cy) = (x - ox + w as i32 / 2, y - oy + h as i32 / 2);
+            commands.spawn((EnemySprite, Sprite::from_image(image.clone()), Transform::from_xyz(cx as f32, -(cy as f32), Z_ENEMY)));
         }
     }
     for e in &game.0.enemies {

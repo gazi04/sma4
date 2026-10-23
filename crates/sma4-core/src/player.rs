@@ -22,7 +22,7 @@ use crate::level::{Level, TILE_PX};
 /// Fixed-point scale: 1 pixel = 256 units.
 pub const SUB: i32 = 256;
 /// One ROM speed unit (1/16 px per frame) in 1/256 px.
-const UNIT: i32 = 16;
+pub const UNIT: i32 = 16;
 
 /// Target speeds (1/16 px per frame): walk 0x08172C82, run (B) 0x08172C84, run with a full
 /// P-meter 0x08172C86.

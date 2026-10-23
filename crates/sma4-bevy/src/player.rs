@@ -194,12 +194,14 @@ fn follow_camera(
     let mut x = c.x.clamp(half_w, (level_w - half_w).max(half_w));
     // Bottom of the level stays at the bottom of the view; taller views show more sky.
     let mut y = c.y.clamp(-(level_h - half_h), (-half_h).max(-(level_h - half_h)));
-    // Areas where the ROM sets the camera limits (the coin room): the core's camera.
+    // Areas where the ROM sets the camera limits (the coin room) and autoscrolling levels:
+    // the core's camera.
     let (gx, gy) = game.0.camera();
-    if map.camera_x.is_some() {
+    let scrolling = game.0.autoscroll.is_some();
+    if map.camera_x.is_some() || scrolling {
         x = (gx + SCREEN_W as i32 / 2) as f32;
     }
-    if map.camera_y.is_some() {
+    if map.camera_y.is_some() || scrolling {
         y = -((gy + SCREEN_H as i32 / 2) as f32);
     }
     transform.translation.x = x.round();

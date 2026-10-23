@@ -24,6 +24,11 @@ pub struct Level {
     /// Camera limits the ROM sets for this area: x (min, max), and a fixed y.
     pub camera_x: Option<(i32, i32)>,
     pub camera_y: Option<i32>,
+    /// The ROM's camera y at the start (0x0813600E[header byte 4 >> 5]); an autoscroll
+    /// starting on the first frame keeps it.
+    pub start_camera_y: Option<i32>,
+    /// Pipe flags of the tileset's class (`sma4_assets::LevelAsset::pipe_flags`).
+    pub pipe_flags: u8,
     /// Slope collision, in tilesets with slopes.
     pub slopes: Option<Slopes>,
     /// The multi-coin block in use (0x03003D00), its timer (0x03003CFE: 200 frames from the
@@ -47,11 +52,23 @@ impl Level {
             junction: None,
             camera_x: None,
             camera_y: None,
+            start_camera_y: None,
+            pipe_flags: 0,
             slopes: None,
             coin_block: None,
             coin_timer: 0,
             coin_hi: 0,
         }
+    }
+
+    pub fn with_pipe_flags(mut self, flags: u8) -> Self {
+        self.pipe_flags = flags;
+        self
+    }
+
+    pub fn with_start_camera_y(mut self, y: i32) -> Self {
+        self.start_camera_y = Some(y);
+        self
     }
 
     pub fn with_slopes(mut self, slopes: Option<Slopes>) -> Self {

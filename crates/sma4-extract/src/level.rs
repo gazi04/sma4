@@ -71,6 +71,15 @@ fn animates(gfx_set: u8) -> bool {
 
 /// Time limit hundreds by header byte 8 >> 6 (0x08014F20): 3, 4, 2, none.
 const TIME_LIMITS: u32 = 0x0813_6016;
+/// Pipe flags per tileset class (0x0809B598) and the class of each tileset (0x08094780).
+const PIPE_FLAGS: u32 = 0x0817_2E44;
+const TILESET_CLASS: u32 = 0x0817_2BCC;
+/// Vertical scroll settings per level id (0x08014F20, the classic game's table).
+const CAMERA_PARAMS: u32 = 0x0813_6F30;
+/// Water ids per tileset class and id quadrant (0x080A1E60).
+const WATER_IDS: u32 = 0x0813_DD04;
+/// Camera start y per header byte 4 >> 5 (0x08014F20 -> 0x03003754).
+const START_CAMERA_Y: u32 = 0x0813_600E;
 /// Player start y per header byte 4 >> 5 (0x08014F20).
 const START_Y: u32 = 0x0813_789A;
 
@@ -327,6 +336,27 @@ pub fn extract_at(
         enemies,
         time_limit: rom.u8(TIME_LIMITS + (hdr[8] >> 6) as u32)? as u16 * 100,
         start_y: rom.u16(START_Y + (hdr[4] >> 5) as u32 * 2)?,
+        start_camera_y: rom.u8(START_CAMERA_Y + (hdr[4] >> 5) as u32)? as u16,
+        pipe_flags: rom.u8(PIPE_FLAGS + rom.u8(TILESET_CLASS + tileset as u32)? as u32)?,
+        camera: {
+            let t = rom.ptr(CAMERA_PARAMS + level_id as u32 * 4)?;
+            let w = |i: u32| rom.u16(t + i);
+            sma4_assets::CameraParams {
+                bottom: w(0)?,
+                fixed: w(2)?,
+                dead_zone: [w(4)?, w(6)?],
+                dead_zone_flying: [w(0x16)?, w(0x18)?],
+                top: w(0x1E)?,
+            }
+        },
+        water: {
+            let class = rom.u8(TILESET_CLASS + tileset as u32)? as u32;
+            let mut w = [0; 4];
+            for (q, b) in w.iter_mut().enumerate() {
+                *b = rom.u8(WATER_IDS + class * 4 + q as u32)?;
+            }
+            w
+        },
         junction: junction(rom, &hdr, &pointers)?,
         camera_x: (data == BONUS_ROOM_1_1).then_some(BONUS_ROOM_CAMERA),
         slopes: slopes(rom, tileset, solidity.top)?,
@@ -503,4 +533,22 @@ fn background(rom: &Rom, m: &mut Machine, scene: u8) -> Result<Option<Background
             pixels: px,
         },
     }))
+}
+
+/// End rooms per world (transition 4, 0x080056A0).
+const END_LEVELS: u32 = 0x0813_1EDA;
+const END_LISTS: u32 = 0x0813_1EEA;
+const END_TILESETS: u32 = 0x0813_1EFA;
+
+pub fn end_rooms(rom: &Rom) -> Result<[sma4_assets::EndRoom; sma4_assets::WORLDS]> {
+    let mut out = [sma4_assets::EndRoom::default(); sma4_assets::WORLDS];
+    for (w, r) in out.iter_mut().enumerate() {
+        let w = w as u32;
+        *r = sma4_assets::EndRoom {
+            level: rom.u16(END_LEVELS + w * 2)?,
+            enemies: rom.u16(END_LISTS + w * 2)?,
+            tileset: rom.u8(END_TILESETS + w)?,
+        };
+    }
+    Ok(out)
 }

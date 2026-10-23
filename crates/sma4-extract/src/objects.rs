@@ -1488,3 +1488,69 @@ fn extract_house_item(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Resu
         .write_png(&sma4_assets::house_item_path(out_dir))
         .map_err(|e| ExtractError(e.to_string()))
 }
+
+/// Autoscroll scripts: 23 scripts (pointers 0x08170F4C, each ending where the next starts,
+/// the last at the table), 9 sub-scripts (0x08171170, likewise).
+const SCROLL_STEPS: u32 = 0x0817_0E14;
+const SCROLL_COMMANDS: u32 = 0x0817_0F4C;
+const SCROLL_DURATIONS: u32 = 0x0817_10E0;
+const SCROLL_THEN: u32 = 0x0817_11F1;
+const SCROLL_SCRIPTS: u32 = 23;
+const SUB_COMMANDS: u32 = 0x0817_1170;
+const SUB_DURATIONS: u32 = 0x0817_11C4;
+const SUB_SCRIPTS: u32 = 9;
+
+pub fn extract_autoscroll(rom: &Rom, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{AutoscrollScripts, ScrollScript};
+    let read = |cmds: u32, durs: u32, then: Option<u32>, n: u32| -> Result<Vec<ScrollScript>, ExtractError> {
+        (0..n)
+            .map(|i| {
+                let start = rom.ptr(cmds + i * 4)?;
+                let end = if i + 1 < n { rom.ptr(cmds + (i + 1) * 4)? } else { cmds };
+                let len = (end - start) as usize;
+                Ok(ScrollScript {
+                    commands: rom.slice(start, len)?.to_vec(),
+                    durations: rom.slice(rom.ptr(durs + i * 4)?, len)?.to_vec(),
+                    then: match then {
+                        Some(t) => rom.u8(t + i)?,
+                        None => 0,
+                    },
+                })
+            })
+            .collect()
+    };
+    let s = AutoscrollScripts {
+        steps: std::array::from_fn(|i| rom.u8(SCROLL_STEPS + i as u32).unwrap_or(0) as i8),
+        scripts: read(SCROLL_COMMANDS, SCROLL_DURATIONS, Some(SCROLL_THEN), SCROLL_SCRIPTS)?,
+        subs: read(SUB_COMMANDS, SUB_DURATIONS, None, SUB_SCRIPTS)?,
+    };
+    s.write(out_dir).map_err(|e| ExtractError(e.to_string()))?;
+    println!("  autoscroll: {} scripts, {} sub-scripts", s.scripts.len(), s.subs.len());
+    Ok(())
+}
+
+/// The falling lift of World 1-4 (type 0x36, draw 0x0806B310): six 8x16 OBJs side by side,
+/// tiles 0x0816B4A0[0x36] (0x9A, 0x9B x 4, 0x9C).
+const LIFT: u16 = 0x36;
+const FN_DRAW_LIFT: u32 = 0x0806_B310;
+
+pub fn extract_lift(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{LIFT_CELL, LIFT_ORIGIN, lift_path};
+    let pose = Pose { kind: LIFT, state: 2, draw: FN_DRAW_LIFT, bytes: &[], globals: &[] };
+    oam::render_one(m, rom.bytes(), &pose, LIFT_CELL, LIFT_ORIGIN)?
+        .write_png(&lift_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))?;
+    // Red Paratroopa (0x6F, main 0x08053CDC, draw 0x080539E8): body frame +0x17 =
+    // (+0x3A >> 3) & 1, wing tile 0x107 / 0x108 by (+0x3A + 2) & 4; cell k for +0x3A = 2k.
+    let bytes: Vec<[(u32, u8); 2]> = (0..RED_PARATROOPA_CELLS).map(|k| [(0x17, ((2 * k) >> 3) & 1), (0x3A, 2 * k)]).collect();
+    let poses: Vec<Pose> =
+        bytes.iter().map(|b| Pose { kind: RED_PARATROOPA, state: 2, draw: FN_DRAW_WALKER, bytes: b, globals: &[] }).collect();
+    oam::render(m, rom.bytes(), &poses)?
+        .write_png(&koopa_path(out_dir, RED_PARATROOPA))
+        .map_err(|e| ExtractError(e.to_string()))?;
+    println!("  lift, red paratroopa");
+    Ok(())
+}
+
+const RED_PARATROOPA: u16 = 0x6F;
+const RED_PARATROOPA_CELLS: u8 = 8;

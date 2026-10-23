@@ -201,10 +201,13 @@ fn core_level(level: &LevelAsset) -> Level {
     Level::new(level.width, level.height, level.metatiles.clone(), level.solidity, level.rules.clone())
         .with_area(level.level_id, level.junction.clone(), camera_x)
         .with_slopes(level.slopes.clone())
+        .with_start_camera_y(level.start_camera_y as i32)
+        .with_pipe_flags(level.pipe_flags)
 }
 
 fn spawn_level(
     mut commands: Commands,
+    dir: Res<crate::AssetDir>,
     level: Res<LevelRes>,
     spawn_col: Option<Res<SpawnColumn>>,
     start: Option<Res<StartOptions>>,
@@ -212,6 +215,16 @@ fn spawn_level(
     mut images: ResMut<Assets<Image>>,
 ) {
     let level = &level.0;
+    // Autoscroll scripts (World 1-4); without them levels just don't scroll by themselves.
+    match sma4_assets::AutoscrollScripts::read(&dir.0) {
+        Ok(s) => game.0.autoscroll_scripts = Some(s),
+        Err(e) => warn!("{e} (re-run sma4-extract for autoscrolling levels)"),
+    }
+    // Where end-of-level pipes lead (World 1-5).
+    match sma4_assets::read_end_rooms(&dir.0) {
+        Ok(r) => game.0.end_rooms = Some(r),
+        Err(e) => warn!("{e} (re-run sma4-extract for end-of-level pipes)"),
+    }
     spawn_tilemaps(&mut commands, &mut images, level);
     let core_level = core_level(level);
     let spawn = match spawn_col.map(|c| (c.0, c.1)) {

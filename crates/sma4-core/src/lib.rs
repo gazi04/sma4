@@ -1,6 +1,7 @@
 //! Deterministic game logic. No Bevy, no floats, no wall-clock time: the same input
 //! sequence must always produce the same state so it can be diffed against an emulator.
 
+pub mod autoscroll;
 pub mod blocks;
 pub mod coins;
 pub mod dust;
@@ -9,6 +10,7 @@ pub mod fire;
 pub mod goal;
 pub mod input;
 pub mod level;
+pub mod lifts;
 pub mod pipes;
 pub mod player;
 pub mod rng;
@@ -119,6 +121,17 @@ pub struct Game {
     freeze: u8,
     /// Items got (0x03002C2E, inventory item ids; not usable yet).
     pub inventory: Vec<u8>,
+    /// Autoscroll scripts from the ROM (`sma4_assets::AutoscrollScripts`); without them a
+    /// level's autoscroll never starts.
+    pub autoscroll_scripts: Option<sma4_assets::AutoscrollScripts>,
+    /// The running autoscroll, which the camera follows.
+    pub autoscroll: Option<autoscroll::Autoscroll>,
+    /// Falling lifts (World 1-4).
+    pub lifts: Vec<lifts::Lift>,
+    /// Each world's end room (`sma4_assets::read_end_rooms`), where end-of-level pipes lead.
+    pub end_rooms: Option<[sma4_assets::EndRoom; sma4_assets::WORLDS]>,
+    /// The pipe the player is in is an end-of-level pipe.
+    pipe_to_end: bool,
 }
 
 // TODO(re): the ROM's post-hit invulnerability length (player flashing) is not decoded yet.
@@ -178,6 +191,8 @@ impl Game {
         self.pending_house = None;
         self.house = None;
         self.freeze = 0;
+        self.autoscroll = None;
+        self.lifts.clear();
     }
 
     /// Arrives through a pipe in the other area of the level (0x08005690): its objects
@@ -189,10 +204,11 @@ impl Game {
         self.start = start;
         self.player = player;
         // The camera the ROM sets on arrival (0x08005290); a room with fixed camera limits
-        // keeps it.
+        // keeps it, and an autoscroll starting there starts from it.
         if self.level.camera_x.is_some() {
             self.level.camera_y = Some(to.exit.camera_y as i32);
         }
+        self.level.start_camera_y = Some(to.exit.camera_y as i32);
         pipes::place(&mut self.player, &to.exit);
         self.pipe = Some(Pipe::exit(to.exit.dir));
         self.level_generation = self.level_generation.wrapping_add(1);
@@ -222,6 +238,10 @@ impl Game {
     pub fn camera(&self) -> (i32, i32) {
         let (cx, cy) = self.player.centre();
         let (w, h) = (SCREEN_W as i32, SCREEN_H as i32);
+        if let Some(a) = &self.autoscroll {
+            let (x, y) = a.camera();
+            return (x, y.clamp(0, (self.level.pixel_height() - h).max(0)));
+        }
         let (min_x, max_x) = self.level.camera_x.unwrap_or((0, (self.level.pixel_width() - w).max(0)));
         let x = (cx - w / 2).clamp(min_x, max_x);
         let y = match self.level.camera_y {
@@ -340,6 +360,24 @@ impl Game {
         self.status.step_popups(self.frame);
         if leave {
             self.finish_level();
+        }
+    }
+
+    /// 0x08092214: at the screen's edges (frame screen x < 5 or > 0xDF) the player moves at
+    /// least (left edge) or at most (right edge) as fast as the scroll, `speed`.
+    fn push_along(&mut self, speed: i32) {
+        let sx = self.player.frame().0 - self.camera().0;
+        let p = &mut self.player;
+        let push = (sx < autoscroll::EDGE_LEFT && p.vx < speed) || (sx > autoscroll::EDGE_RIGHT && p.vx > speed);
+        // TODO(re): 0x08092214 also clears byte +0 of the player struct when the speeds
+        // have the same sign; done to this port's x fraction it would stop the push.
+        if push {
+            p.vx = speed;
+        }
+        // TODO(re): the ROM's clamp at the screen's left edge is not located; friction
+        // between pushes would otherwise let the player drift off it.
+        if sx < 0 {
+            p.x -= sx * player::SUB;
         }
     }
 
@@ -517,7 +555,12 @@ impl Game {
         if let Some(pipe) = self.pipe {
             self.pipe = pipe.step(&mut self.player);
             if pipe != Pipe::Switching && self.pipe == Some(Pipe::Switching) {
-                self.pending_area = pipes::destination(&self.level, &self.player);
+                let world = (self.status.world as usize).saturating_sub(1);
+                self.pending_area = if self.pipe_to_end {
+                    self.end_rooms.and_then(|r| r.get(world).map(pipes::end_room))
+                } else {
+                    pipes::destination(&self.level, &self.player)
+                };
                 if self.pending_area.is_none() {
                     self.pipe = None;
                 }
@@ -547,9 +590,10 @@ impl Game {
             self.player.throw = player::THROW_TIME;
         }
         if !self.player.transforming()
-            && let Some(dir) = pipes::entry(&self.level, &self.player, held)
+            && let Some((dir, to_end)) = pipes::entry(&self.level, &self.player, held)
         {
             self.pipe = Some(Pipe::enter(dir));
+            self.pipe_to_end = to_end;
             return;
         }
         if self.player.p_meter & 0x40 != 0 {
@@ -631,8 +675,25 @@ impl Game {
 
         self.invulnerable = self.invulnerable.saturating_sub(1);
         let before = self.enemies.len();
+        // Autoscroll (0x08092BF0, after the player and the objects): held while the player
+        // is busy (transforming).
+        if !self.player.transforming()
+            && let (Some(a), Some(scripts)) = (&mut self.autoscroll, &self.autoscroll_scripts)
+        {
+            a.step(scripts);
+            let speed = a.vx * player::UNIT;
+            self.push_along(speed);
+        }
         let camera_x = self.camera().0;
         self.spawner.spawn(camera_x, &self.player, &mut self.enemies, &mut self.goomba_pipes);
+        if let Some(row) = self.spawner.take_autoscroll() {
+            let camera_y = self.level.start_camera_y.unwrap_or(self.camera().1);
+            self.autoscroll = autoscroll::Autoscroll::start(row, camera_y);
+        }
+        self.lifts.extend(self.spawner.take_lifts().iter().map(lifts::Lift::spawn));
+        let (camera, level_h) = (self.camera(), self.level.pixel_height());
+        let player = &mut self.player;
+        self.lifts.retain_mut(|l| l.step(player, camera, level_h).0);
         for (i, e) in self.enemies.iter_mut().enumerate().skip(before) {
             e.init_random(self.rng.byte(i));
         }
@@ -1118,6 +1179,42 @@ mod tests {
         assert_eq!(g.inventory, [WARP_WHISTLE]);
         assert_eq!(lid, Some((0x68, 0x160)), "the chest opens");
         assert_eq!(g.player.frame().0, 0x68, "held while the item is out");
+    }
+
+    #[test]
+    fn world_1_4_scrolls_by_itself_pushes_the_player_and_its_lifts_fall_when_stood_on() {
+        // Ground on the last row; the autoscroll entry at column 0 and a lift over a gap.
+        let (w, h) = (60, 12);
+        let mut kinds = vec![TileKind::Empty; w * h];
+        kinds[(h - 1) * w..(h - 1) * w + 12].fill(TileKind::Solid);
+        let list = [
+            sma4_assets::EnemySpawn { kind: autoscroll::AUTOSCROLL, col: 0, row: 0, ..Default::default() },
+            sma4_assets::EnemySpawn { kind: lifts::LIFT, col: 20, row: 8, ..Default::default() },
+        ];
+        let mut g = Game::new();
+        g.autoscroll_scripts = Some(autoscroll::tests::scripts());
+        g.enter_level(Level::from_kinds(w, h, &kinds), (2 * TILE_PX, 11 * TILE_PX - 16), &list);
+        for _ in 0..300 {
+            g.step(Buttons::empty());
+        }
+        let (cx, _) = g.camera();
+        assert!(cx > 100, "the camera moved on its own: {cx}");
+        assert!(g.player.frame().0 >= cx, "the player is pushed along, not left behind");
+        assert!(g.lifts[0].px().0 < 20 * TILE_PX - 50, "the lift drifts left");
+        assert!(!g.lifts[0].falling());
+        // Stand on it: it falls, carrying the player.
+        let (lx, ly) = g.lifts[0].px();
+        g.player = Player::spawn(lx + 16, ly - 16 - 4);
+        let mut rode = 0;
+        for _ in 0..20 {
+            g.step(Buttons::empty());
+            if g.player.on_ground && g.player.frame().1 == g.lifts[0].px().1 - 0x1F {
+                rode += 1;
+            }
+        }
+        assert!(g.lifts[0].falling());
+        assert!(g.lifts[0].px().1 > ly + 5);
+        assert!(rode > 10, "the player rides it down ({rode} frames)");
     }
 
     #[test]

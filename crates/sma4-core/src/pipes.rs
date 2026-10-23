@@ -9,18 +9,26 @@
 //!   the area (0x03003AE7 + 1 -> 0x08005690).
 //! * Area switch 0x0800515C / 0x08005290: the header's alternate level; the player's
 //!   position from the old area's pointer for the page the pipe was entered on.
+//! * End pipes (kind 4): where the tileset's class has pipe flag bit 7 (0x08172E44), the
+//!   ends 0xBD / 0xBE lead to the world's end room (transition 4, 0x080056A0: level
+//!   0x08131EDA[world], list 0x08131EEA, tileset 0x08131EFA; frame (0x28, 0x180), up out
+//!   of a pipe, camera y 0xF0). Seen in mGBA on World 1-5's last pipe: +0x4A = 0x13.
 //! * Exit 0x0809F2B8 -> 0x080A866C: up (0x080A86F4: 0x3F frames at -8) or down (0x080A8764:
 //!   7 frames at +8, then falling at 0x38).
 
-use sma4_assets::PipeExit;
+use sma4_assets::{EndRoom, PipeExit};
 
 use crate::Buttons;
 use crate::level::{Level, TILE_PX};
 use crate::player::{Form, Player};
 
 /// Pipe-end metatiles that lead to the other area (0x0809B598: 0xB0 - id >> 1 == 1).
-const PIPE_LEFT: u16 = 0xAD;
-const PIPE_RIGHT: u16 = 0xAE;
+const PIPE_LEFT: u8 = 0xAD;
+const PIPE_RIGHT: u8 = 0xAE;
+/// End-of-level pipe ends, and the class flag that enables them.
+const END_LEFT: u8 = 0xBD;
+const END_RIGHT: u8 = 0xBE;
+pub const END_PIPES: u8 = 0x80;
 /// Entry timer (0x0809BCB8: +0x64 = 0x3C).
 pub const ENTER_FRAMES: u8 = 0x3C;
 /// Exit timers 0x08173018[dir]: up 0x3F, down 7.
@@ -58,8 +66,13 @@ pub struct AreaRequest {
     pub exit: PipeExit,
 }
 
-fn is_pipe_end(level: &Level, tx: i32, ty: i32) -> bool {
-    level.metatile(tx, ty) == Some(PIPE_LEFT) && level.metatile(tx + 1, ty) == Some(PIPE_RIGHT)
+/// The pipe end at `(tx, ty)` (its left column): Some(true) for an end-of-level pipe.
+fn pipe_end(level: &Level, tx: i32, ty: i32) -> Option<bool> {
+    match (level.collision_id(tx, ty)?, level.collision_id(tx + 1, ty)?) {
+        (PIPE_LEFT, PIPE_RIGHT) if level.junction.is_some() => Some(false),
+        (END_LEFT, END_RIGHT) if level.pipe_flags & END_PIPES != 0 => Some(true),
+        _ => None,
+    }
 }
 
 /// Left edge of the player's 16 px frame (`Player::frame`, the ROM's x).
@@ -69,29 +82,36 @@ fn frame_x(p: &Player) -> i32 {
 
 /// The pipe the player is lined up with: its left column, if the frame's left edge is
 /// within `window` px of the pipe's left edge.
-fn lined_up(level: &Level, p: &Player, ty: i32, window: std::ops::RangeInclusive<i32>) -> bool {
+fn lined_up(level: &Level, p: &Player, ty: i32, window: std::ops::RangeInclusive<i32>) -> Option<bool> {
     let x = frame_x(p);
     let tx = (x - window.start()).div_euclid(TILE_PX);
-    window.contains(&(x - tx * TILE_PX)) && is_pipe_end(level, tx, ty)
+    if window.contains(&(x - tx * TILE_PX)) { pipe_end(level, tx, ty) } else { None }
 }
 
-/// 0x0809B598: down held standing on a pipe end, or up held with the head against one.
-/// Only areas with somewhere to go have working pipes.
-pub fn entry(level: &Level, p: &Player, held: Buttons) -> Option<u8> {
-    level.junction.as_ref()?;
+/// 0x0809B598: down held standing on a pipe end, or up held with the head against one:
+/// the direction, and whether it is an end-of-level pipe. Only areas with somewhere to go
+/// have working junction pipes.
+pub fn entry(level: &Level, p: &Player, held: Buttons) -> Option<(u8, bool)> {
     let (_, py) = p.px();
     if p.on_ground && held.contains(Buttons::DOWN) {
         let feet = (py + p.height()).div_euclid(TILE_PX);
-        return lined_up(level, p, feet, DOWN_WINDOW).then_some(DOWN);
+        return lined_up(level, p, feet, DOWN_WINDOW).map(|end| (DOWN, end));
     }
     // The head against the tile above (+0x72): `Player::move_y` stops it on the tile
     // boundary, and it stays in that pixel for the first frames of the fall, so up may
     // come a little after the jump.
     if !p.on_ground && held.contains(Buttons::UP) && py.rem_euclid(TILE_PX) == 0 {
         let head = py.div_euclid(TILE_PX) - 1;
-        return lined_up(level, p, head, UP_WINDOW).then_some(UP);
+        return lined_up(level, p, head, UP_WINDOW).map(|end| (UP, end));
     }
     None
+}
+
+/// Where an end-of-level pipe leads: the world's end room (0x080056A0).
+pub fn end_room(room: &EndRoom) -> AreaRequest {
+    let (x, y) = sma4_assets::END_ROOM_ARRIVAL;
+    let exit = PipeExit { page: 0, x, y, dir: UP, camera_y: sma4_assets::END_ROOM_CAMERA_Y };
+    AreaRequest { level: room.level, enemies: room.enemies, tileset: room.tileset, exit }
 }
 
 /// Where the pipe the player is in leads: the pointer of the page it was entered on.
@@ -169,8 +189,8 @@ mod tests {
         for x in 0..W {
             m[(H - 1) * W + x] = 0x53;
         }
-        m[row * W + 4] = PIPE_LEFT;
-        m[row * W + 5] = PIPE_RIGHT;
+        m[row * W + 4] = PIPE_LEFT as u16;
+        m[row * W + 5] = PIPE_RIGHT as u16;
         let junction = Junction { level: to, enemies: 0, tileset: 1, exits: vec![exit] };
         Level::new(W, H, m, TEST_SOLIDITY, BlockRules::default()).with_area(id, Some(junction), None)
     }
@@ -242,6 +262,39 @@ mod tests {
         run(&mut g, Buttons::empty(), EXIT_UP_FRAMES as u32);
         assert_eq!(g.pipe, None);
         assert_eq!(g.player.y - y, -(EXIT_UP_FRAMES as i32) * SLIDE);
+    }
+
+    /// World 1-5's last pipe: an end-of-level pipe end (0xBD / 0xBE) hanging from the
+    /// ceiling, in a tileset whose class allows them, leads to the world's end room.
+    #[test]
+    fn end_of_level_pipes_lead_to_the_worlds_end_room() {
+        let mut m = vec![SKY; W * H];
+        m[(H - 1) * W..].fill(0x53);
+        m[8 * W + 4] = END_LEFT as u16;
+        m[8 * W + 5] = END_RIGHT as u16;
+        let level = Level::new(W, H, m, TEST_SOLIDITY, BlockRules::default());
+        let mut g = Game::new();
+        let room = EndRoom { level: 0x27, enemies: 0x52, tileset: 1 };
+        g.end_rooms = Some([room; sma4_assets::WORLDS]);
+        g.enter_level(level.clone(), (4 * 16 + 5 + 2, (H as i32 - 1) * 16 - 16), &[]);
+        run(&mut g, Buttons::empty(), 2);
+        for _ in 0..40 {
+            g.step(Buttons::A | Buttons::UP);
+        }
+        assert!(g.pipe.is_none(), "not without the class flag");
+        g.enter_level(level.with_pipe_flags(END_PIPES), (4 * 16 + 5 + 2, (H as i32 - 1) * 16 - 16), &[]);
+        run(&mut g, Buttons::empty(), 2);
+        for _ in 0..40 {
+            g.step(Buttons::A | Buttons::UP);
+            if g.pipe.is_some() {
+                break;
+            }
+        }
+        assert_eq!(g.pipe, Some(Pipe::enter(UP)));
+        run(&mut g, Buttons::empty(), ENTER_FRAMES as u32);
+        let to = g.pending_area.take().expect("the end room");
+        assert_eq!((to.level, to.enemies, to.tileset), (0x27, 0x52, 1));
+        assert_eq!((to.exit.x, to.exit.y, to.exit.dir), (0x28, 0x180, UP));
     }
 
     /// The room's exit pipe hangs 6 px above the raccoon's head: the head hits it on the
