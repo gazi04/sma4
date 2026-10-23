@@ -130,8 +130,10 @@ fn sync_sprite(
     let feet = top + p.height();
     let half_body = PLAYER_BODY_W as i32 / 2;
     let centre_x = if p.facing_left { cx - half_body + PLAYER_W as i32 / 2 } else { cx + half_body - PLAYER_W as i32 / 2 };
-    // In a pipe, the pipe's tiles cover the player (0x0809BA58).
-    let z = if game.0.pipe.is_some() { Z_BEHIND_TILES } else { 10.0 };
+    // In a pipe, the pipe's tiles cover the player (0x0809BA58); after a white block, OBJ
+    // priority 2 puts the player under the level (BG1) and over the scene (BG2) while
+    // 0x03003D06 runs.
+    let z = if game.0.pipe.is_some() || p.behind != 0 { Z_BEHIND_TILES } else { 10.0 };
     transform.translation = Vec3::new(centre_x as f32, -((feet - PLAYER_H as i32 / 2) as f32), z);
     sprite.flip_x = !p.facing_left;
     // Blink while invulnerable after a hit.

@@ -48,7 +48,7 @@ fn debug_popup(mut game: ResMut<GameRes>, mut popup: ResMut<DebugPopup>) {
 }
 
 /// How a run starts: on the map or in the level, and the debug overrides (`--hit`,
-/// `--form`, `--lives`).
+/// `--form`, `--lives`, `--behind`).
 #[derive(Resource, Default)]
 pub struct StartOptions {
     pub on_map: bool,
@@ -57,6 +57,8 @@ pub struct StartOptions {
     /// Starting form: 0 small, 1 big, 2 fire, 3 raccoon.
     pub form: u8,
     pub lives: Option<u16>,
+    /// Start behind the scenery, as just through a white block.
+    pub behind: bool,
 }
 
 pub struct LevelPlugin;
@@ -64,7 +66,7 @@ pub struct LevelPlugin;
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, (spawn_level, load_item_art, load_coin_frames, load_sparkle_frames, load_skid_dust_frames, load_debris))
-            .add_systems(Update, (debug_popup, load_pending_level, load_pending_area, follow_area).chain())
+            .add_systems(Update, (debug_popup, load_pending_level, load_pending_area, load_pending_house, follow_area).chain())
             .add_systems(Update, (sync_tiles, animate_tiles, sync_bumps, sync_items, sync_coins, sync_sparkles, sync_skid_dust, sync_debris))
             .add_systems(Update, sync_background.after(crate::player::CameraMoved));
     }
@@ -220,8 +222,11 @@ fn spawn_level(
     };
     game.0.enter_level(core_level, spawn, &level.enemies);
     game.0.set_time_limit(level.time_limit);
-    let start = start.map(|s| (s.on_map, s.hit, s.form, s.lives)).unwrap_or_default();
-    let (on_map, hit, form, lives) = start;
+    let start = start.map(|s| (s.on_map, s.hit, s.form, s.lives, s.behind)).unwrap_or_default();
+    let (on_map, hit, form, lives, behind) = start;
+    if behind {
+        game.0.player.behind = sma4_core::player::WHITE_BLOCK_TIME;
+    }
     if let Some(n) = lives {
         game.0.status.lives = n.saturating_sub(1);
     }
@@ -304,6 +309,38 @@ fn load_pending_area(
     spawn_tilemaps(&mut commands, &mut images, &level);
     let core = core_level(&level);
     game.0.enter_area(core, &level.enemies, &to);
+    level_res.0 = level;
+}
+
+/// World 1-3's warp trigger fired: load its hidden Toad House and Toad's message.
+fn load_pending_house(
+    mut commands: Commands,
+    mut game: ResMut<GameRes>,
+    dir: Res<crate::AssetDir>,
+    mut level_res: ResMut<LevelRes>,
+    mut images: ResMut<Assets<Image>>,
+    old: Query<Entity, With<LevelTiles>>,
+) {
+    let Some(id) = game.0.pending_house.take() else { return };
+    let message = std::fs::read(sma4_assets::toad_message_path(&dir.0));
+    let level = match (LevelAsset::read(&dir.0, id), message) {
+        (Ok(l), Ok(m)) => (l, m),
+        (Err(e), _) => {
+            warn!("{e} (re-run sma4-extract to get World 1-3's Toad House)");
+            return;
+        }
+        (_, Err(e)) => {
+            warn!("Toad's message: {e} (re-run sma4-extract)");
+            return;
+        }
+    };
+    let (level, message) = level;
+    for e in &old {
+        commands.entity(e).despawn();
+    }
+    spawn_tilemaps(&mut commands, &mut images, &level);
+    let core = core_level(&level);
+    game.0.enter_house(core, &level.enemies, message);
     level_res.0 = level;
 }
 
@@ -569,12 +606,14 @@ fn sync_skid_dust(
     for e in &old {
         commands.entity(e).despawn();
     }
+    // Priority 2 with the player behind the scenery (0x03003D06).
+    let z = if game.0.player.behind != 0 { crate::player::Z_BEHIND_TILES - 0.5 } else { Z_SKID_DUST };
     for (x, y, cell) in game.0.skid_dust.puffs() {
         let Some(image) = frames.0.get(cell) else { continue };
         commands.spawn((
             SkidDustSprite,
             Sprite::from_image(image.clone()),
-            Transform::from_xyz((x + 4) as f32, -((y - 1 + 4) as f32), Z_SKID_DUST),
+            Transform::from_xyz((x + 4) as f32, -((y - 1 + 4) as f32), z),
         ));
     }
 }

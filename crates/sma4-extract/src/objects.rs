@@ -755,6 +755,58 @@ pub fn extract_micro_goomba(
     Ok(())
 }
 
+/// Boomerang Bro (type 0x82, draw 0x08068BB8: body 8 px below the object's y; frame +0x17
+/// = walk step (+0x3B bit 4) + 2 while throwing (+0x23), facing +0x1A bit 6) and its
+/// boomerang (projectile type 2, draw 0x0808CEF8: one 16x16 OBJ, tile 0x08170ACC[(+0x13 >>
+/// 2) & 3], flips 0x08170AC8[..] ^ the direction, palette 1).
+const BOOMERANG_BRO: u16 = 0x82;
+const FN_DRAW_BOOMERANG_BRO: u32 = 0x0806_8BB8;
+const FN_DRAW_BOOMERANG: u32 = 0x0808_D05C;
+const BOOMERANG_TYPE: u8 = 2;
+
+pub fn extract_boomerang_bro(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{BOOMERANG_FRAMES, BRO_CELLS, BRO_RAISE, boomerang_bro_cell, boomerang_bro_path, boomerang_path};
+    let raise = (oam::AT - BRO_RAISE) as u8;
+    let mut bytes = Vec::new();
+    for right in [false, true] {
+        for throwing in [false, true] {
+            for step in 0..2u8 {
+                debug_assert_eq!(boomerang_bro_cell(right, throwing, step as usize), bytes.len());
+                bytes.push(vec![(0x09, raise), (0x1A, if right { 0x40 } else { 0 }), (0x3B, step * 0x10), (0x23, throwing as u8)]);
+            }
+        }
+    }
+    let poses: Vec<Pose> =
+        bytes.iter().map(|b| Pose { kind: BOOMERANG_BRO, state: 2, draw: FN_DRAW_BOOMERANG_BRO, bytes: b, globals: &[] }).collect();
+    debug_assert_eq!(poses.len(), BRO_CELLS as usize);
+    oam::render(m, rom.bytes(), &poses)?.write_png(&boomerang_bro_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
+    // The boomerang flying right (speed +), then left.
+    let mut bytes = Vec::new();
+    for vx in [0x0020u16, 0xFFE0] {
+        for f in 0..BOOMERANG_FRAMES as u8 {
+            let [lo, hi] = vx.to_le_bytes();
+            bytes.push([
+                (0x05, oam::AT as u8),
+                (0x08, 0),
+                (0x09, 0),
+                (0x0A, lo),
+                (0x0B, hi),
+                (0x0E, BOOMERANG_TYPE),
+                (0x13, f * 4),
+                (0x14, 0x0F),
+                (0xCCD, FIREBALL_OAM),
+                (0xCD2, 0),
+            ]);
+        }
+    }
+    let globals = [(PAUSED, 0)];
+    let poses: Vec<Pose> =
+        bytes.iter().map(|b| Pose { kind: 0, state: 0, draw: FN_DRAW_BOOMERANG, bytes: b, globals: &globals }).collect();
+    oam::render(m, rom.bytes(), &poses)?.write_png(&boomerang_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
+    println!("  boomerang bro, boomerang");
+    Ok(())
+}
+
 /// Puff of smoke, object state 8 (0x08044550, entered from state 6 by enemies whose
 /// 0x0816A89D class is 7): timer +0x23 starts at 0x1F; two 8x16 OBJs at x and x + 8, tile
 /// 0x08169484[timer >> 3], palette 1, the halves h-flipped by turns (0x03003CF6 >> 1).
@@ -1309,4 +1361,130 @@ pub fn extract_coin(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Result
     .map_err(|e| ExtractError(e.to_string()))?;
     println!("  coin spin: {COIN_FRAMES} frames");
     Ok(())
+}
+
+/// Toad's message box in a Toad House (object 0x34, phase 0 0x0806E384): eight rows of 0x12
+/// BG3 map entries, row r from 0x0816F3CA + 0x0816F436[r] * 2, written one row a frame from
+/// map byte 0x4C (0x0300384B/C, +0x40 a row). BG3 (0x03002DAA = 0x1E08: char block 2) sits
+/// on top (priority 0, scroll 0x03003760/64 = 0) once Toad's init enables it.
+const TOAD_BOX_ROWS: u32 = 0x0816_F3CA;
+const TOAD_BOX_ROW_OF: u32 = 0x0816_F436;
+const BG3_CHARS: u32 = 0x0600_8000;
+/// Message ids 0x0816F3C4[kind] (u16) in the language's text table 0x08244318
+/// (0x080AB0CC).
+const TOAD_MESSAGES: u32 = 0x0816_F3C4;
+const TEXT_TABLES: u32 = 0x0824_4318;
+
+pub fn extract_toad_house(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{TOAD_BOX_H, TOAD_BOX_W, TOAD_TEXT_AT, toad_box_path, toad_message_path, toad_text_path};
+    let chars = m.read(BG3_CHARS, 0x8000)?;
+    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(BG_PAL_BUFFER, 0x200)?) };
+    let (w, h) = (TOAD_BOX_W * 8, TOAD_BOX_H * 8);
+    let entry = |px: &mut Vec<u8>, e: u16, tx: u32, ty: u32| {
+        sheet.tile_flip(px, w, (e & 0x3FF) as u32, tx * 8, ty * 8, e & 0x400 != 0, e & 0x800 != 0, (e >> 12) as u32);
+    };
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    for ty in 0..TOAD_BOX_H {
+        let row = TOAD_BOX_ROWS + rom.u8(TOAD_BOX_ROW_OF + ty)? as u32 * 2;
+        for tx in 0..TOAD_BOX_W {
+            entry(&mut px, rom.u16(row + tx * 2)?, tx, ty);
+        }
+    }
+    let write = |px: Vec<u8>, path: std::path::PathBuf| {
+        Rgba { width: w, height: h, pixels: px }.write_png(&path).map_err(|e| ExtractError(e.to_string()))
+    };
+    write(px.clone(), toad_box_path(out_dir))?;
+    // The 1-3 house's message (kind 0), drawn whole over the box; the game reveals it.
+    let id = rom.u16(TOAD_MESSAGES)? as u32;
+    let mut p = rom.ptr(rom.ptr(TEXT_TABLES + LANG * 4)? + id * 4)?;
+    let mut bytes = Vec::new();
+    let (mut line, mut col) = (0, 0);
+    loop {
+        let b = rom.u8(p)?;
+        p += 1;
+        bytes.push(b);
+        match b {
+            0xFF => break,
+            0xF0 => (line, col) = (line + 1, 0),
+            0xFE => col += 1,
+            _ => {
+                let (tx, ty) = (TOAD_TEXT_AT.0 + col, TOAD_TEXT_AT.1 + line);
+                // Text tiles replace the box's (palette 0, no flips).
+                for y in 0..8 {
+                    let o = (((ty * 8 + y) * w + tx * 8) * 4) as usize;
+                    px[o..o + 32].fill(0);
+                }
+                entry(&mut px, b as u16, tx, ty);
+                col += 1;
+            }
+        }
+    }
+    write(px, toad_text_path(out_dir))?;
+    std::fs::write(toad_message_path(out_dir), &bytes).map_err(|e| ExtractError(e.to_string()))?;
+    extract_toad(rom, m, out_dir)?;
+    extract_house_item(rom, m, out_dir)?;
+    extract_chest_lid(rom, m, out_dir)?;
+    println!("  toad house message ({} bytes), toad, warp whistle", bytes.len());
+    Ok(())
+}
+
+/// The open chest: tile change 0x14 (0x08027E3C) writes the 2x2 BG entries
+/// 0x0813AA24[0x13 * 4..] at the chest's x (8 px steps) and top row, over the level.
+const CHEST_LID: u32 = 0x0813_AA24 + 0x13 * 8;
+
+fn extract_chest_lid(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    let chars = m.read(BG_VRAM, 0x8000)?;
+    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(BG_PAL_BUFFER, 0x200)?) };
+    let mut px = vec![0u8; 16 * 16 * 4];
+    for i in 0..4 {
+        let e = rom.u16(CHEST_LID + i * 2)?;
+        let (tx, ty) = (i % 2 * 8, i / 2 * 8);
+        sheet.tile_flip(&mut px, 16, (e & 0x3FF) as u32, tx, ty, e & 0x400 != 0, e & 0x800 != 0, (e >> 12) as u32);
+    }
+    Rgba { width: 16, height: 16, pixels: px }
+        .write_png(&sma4_assets::chest_lid_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))
+}
+
+/// Toad (type 0x34): the generic draw 0x08047340 (frame +0x17 = 0), facing left then right
+/// (+0x1A = 0x40), in `oam::CELL_W` x `oam::CELL_H` cells, `TOAD_RAISE` px up.
+const TOAD: u16 = 0x34;
+const FN_DRAW_OBJECT: u32 = 0x0804_7340;
+
+fn extract_toad(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    // Drawn 16 px higher in the cell (its sprite reaches below the object's 16x16 box).
+    let raise = (oam::AT - sma4_assets::TOAD_RAISE) as u8;
+    let bytes = [[(0x09, raise), (0x1A, 0)], [(0x09, raise), (0x1A, 0x40)]];
+    let poses: Vec<Pose> =
+        bytes.iter().map(|b| Pose { kind: TOAD, state: 2, draw: FN_DRAW_OBJECT, bytes: b, globals: &[] }).collect();
+    oam::render(m, rom.bytes(), &poses)?.write_png(&sma4_assets::toad_path(out_dir)).map_err(|e| ExtractError(e.to_string()))
+}
+
+/// The chest's item (object 0x35, main 0x0804FFFC draws it itself): two 8x16 OBJs at x and
+/// x + 8, tiles 0x0816E43E[item] and 0x0816E44B[item]; 0x0816E458[item] gives the palette
+/// (bits 3-1) and the right half's flips (bit 6 h, bit 7 v). Here the Warp Whistle.
+const ITEM_TILES_LEFT: u32 = 0x0816_E43E;
+const ITEM_TILES_RIGHT: u32 = 0x0816_E44B;
+const ITEM_ATTRS: u32 = 0x0816_E458;
+
+fn extract_house_item(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    let item = sma4_assets::HOUSE_ITEM as u32;
+    let chars = m.read(OBJ_VRAM, 0x8000)?;
+    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?) };
+    let a = rom.u8(ITEM_ATTRS + item)?;
+    let pal = (a >> 1 & 7) as u32;
+    let mut px = vec![0u8; 16 * 16 * 4];
+    let left = rom.u8(ITEM_TILES_LEFT + item)? as u32;
+    let right = rom.u8(ITEM_TILES_RIGHT + item)? as u32;
+    let (h, v) = (a & 0x40 != 0, a & 0x80 != 0);
+    for (half, tile, hflip, vflip) in [(0, left, false, false), (8, right, h, v)] {
+        // 8x16 in 2D mapping: the tile and the one a row below; flipped vertically the
+        // halves swap.
+        let (top, bottom) = if vflip { (tile + TILES_PER_ROW, tile) } else { (tile, tile + TILES_PER_ROW) };
+        sheet.tile_flip(&mut px, 16, top, half, 0, hflip, vflip, pal);
+        sheet.tile_flip(&mut px, 16, bottom, half, 8, hflip, vflip, pal);
+    }
+    Rgba { width: 16, height: 16, pixels: px }
+        .write_png(&sma4_assets::house_item_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))
 }

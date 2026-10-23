@@ -11,9 +11,11 @@ pub mod input;
 pub mod level;
 pub mod pipes;
 pub mod player;
+pub mod rng;
 pub mod screens;
 pub mod world_map;
 pub mod status;
+pub mod toad_house;
 
 /// Fireball knockouts score 100 (0x08093560 with popup 5); star chains stop growing at
 /// the 9th (0x080488E4 caps +0x107 at 8).
@@ -64,6 +66,10 @@ pub struct Game {
     pub fireballs: Vec<enemies::Fireball>,
     /// Fire Mario's fireballs (player projectile slots 0x03007848 + 0xAD4 / + 0xAE8).
     pub player_fireballs: Vec<fire::PlayerFireball>,
+    /// The ROM's random bytes (0x03003878), stepped every frame.
+    pub rng: rng::Rng,
+    /// Boomerang Bros' boomerangs (the same projectile slots).
+    pub boomerangs: Vec<enemies::Boomerang>,
     /// Micro-Goombas from the 0x74 Paragoomba (the same projectile slots).
     pub micro_goombas: Vec<enemies::MicroGoomba>,
     pub spawner: Spawner,
@@ -103,6 +109,16 @@ pub struct Game {
     pub pipe: Option<Pipe>,
     /// A pipe led to the other area: the host loads it and calls `enter_area`.
     pub pending_area: Option<AreaRequest>,
+    /// World 1-3's warp trigger (type 0x07), in a level that has one.
+    warp_trigger: Option<toad_house::WarpTrigger>,
+    /// The trigger fired: the host loads this Toad House and calls `enter_house`.
+    pub pending_house: Option<u16>,
+    /// In a Toad House.
+    pub house: Option<toad_house::ToadHouse>,
+    /// The player is frozen (+0x40, 0x080A8000): only drawn; counts down.
+    freeze: u8,
+    /// Items got (0x03002C2E, inventory item ids; not usable yet).
+    pub inventory: Vec<u8>,
 }
 
 // TODO(re): the ROM's post-hit invulnerability length (player flashing) is not decoded yet.
@@ -140,6 +156,7 @@ impl Game {
         self.fireballs.clear();
         self.micro_goombas.clear();
         self.player_fireballs.clear();
+        self.boomerangs.clear();
         self.debris.clear();
         self.goomba_pipes.clear();
         self.invulnerable = 0;
@@ -157,6 +174,10 @@ impl Game {
         self.end_coin_chain = 0;
         self.pipe = None;
         self.pending_area = None;
+        self.warp_trigger = toad_house::WarpTrigger::find(enemies);
+        self.pending_house = None;
+        self.house = None;
+        self.freeze = 0;
     }
 
     /// Arrives through a pipe in the other area of the level (0x08005690): its objects
@@ -174,6 +195,25 @@ impl Game {
         }
         pipes::place(&mut self.player, &to.exit);
         self.pipe = Some(Pipe::exit(to.exit.dir));
+        self.level_generation = self.level_generation.wrapping_add(1);
+    }
+
+    /// Warps into a Toad House (0x03003CA0 = 5, 0x0800578C): its objects, the player at
+    /// `toad_house::ARRIVAL` in the same form, no clock. `message` is Toad's message
+    /// (`sma4_assets::toad_message_path`). The level to restart after a lost life stays.
+    pub fn enter_house(&mut self, level: Level, enemies: &[sma4_assets::EnemySpawn], message: Vec<u8>) {
+        let (start, spawn, player) = (self.start.take(), self.spawn, self.player);
+        self.enter_level(level, spawn, enemies);
+        self.start = start;
+        let (fx, fy) = toad_house::ARRIVAL;
+        self.player = Player::spawn(fx + 2, fy + 32 - Form::Small.height());
+        self.player.set_form(player.form);
+        self.player.facing_left = player.facing_left;
+        self.status.start_clock(0);
+        self.house = toad_house::ToadHouse::new(enemies, message);
+        if self.house.is_some() {
+            self.freeze = toad_house::ARRIVAL_FREEZE;
+        }
         self.level_generation = self.level_generation.wrapping_add(1);
     }
 
@@ -303,6 +343,27 @@ impl Game {
         }
     }
 
+    /// The Toad House's frame; true once the visit is over (back on the map).
+    fn step_house(&mut self, pressed: Buttons, frozen: bool) -> bool {
+        let camera_y = self.camera().1;
+        let Some(h) = &mut self.house else { return false };
+        let ev = h.step(&mut self.player, &self.level, pressed, frozen, camera_y, self.frame);
+        if let Some(item) = ev.got {
+            self.inventory.push(item);
+        }
+        // The item (+0x40 = 2 every frame) and the exit (0x08007594) hold the player.
+        if h.busy() {
+            self.freeze = self.freeze.max(toad_house::ITEM_FREEZE);
+        }
+        if ev.leave {
+            // The level is not cleared: Mario is back on its spot.
+            self.house = None;
+            self.to_map(false);
+            return true;
+        }
+        false
+    }
+
     /// Sub-state 7 done (0x08068160): a full row of cards is used up, three of a kind
     /// giving extra lives (0x080680C4); back to the map.
     fn finish_level(&mut self) {
@@ -382,6 +443,8 @@ impl Game {
         self.input.pressed = held & !self.input.held;
         self.input.held = held;
         self.frame = self.frame.wrapping_add(1);
+        // 0x08000698: the random bytes move on every frame.
+        self.rng.step();
         match &mut self.screen {
             Screen::Map => {
                 if let Some(map) = &mut self.world_map {
@@ -462,8 +525,22 @@ impl Game {
             return;
         }
 
-        let head_hit = self.player.step(held, self.input.pressed, &self.level, self.frame);
+        // Frozen (+0x40): no input, no movement (0x080A8000 only draws the player).
+        let frozen = self.freeze > 0;
+        self.freeze = self.freeze.saturating_sub(1);
+        let (held, pressed) = if frozen { (Buttons::empty(), Buttons::empty()) } else { (held, self.input.pressed) };
+        let head_hit = if frozen { None } else { self.player.step(held, pressed, &self.level, self.frame) };
         self.skid_dust.step(&self.player);
+        if let Some(t) = self.warp_trigger
+            && t.hit(&self.player)
+        {
+            self.warp_trigger = None;
+            self.pending_house = Some(toad_house::HIDDEN_HOUSE);
+            return;
+        }
+        if self.step_house(pressed, frozen) {
+            return;
+        }
         // 0x0808C068 -> 0x0808BFEC: a free slot (a bursting fireball still holds its own).
         if self.player.wants_fireball(self.input.pressed) && self.player_fireballs.len() < fire::FIREBALL_SLOTS {
             self.player_fireballs.push(fire::PlayerFireball::thrown(&self.player));
@@ -553,8 +630,12 @@ impl Game {
         }
 
         self.invulnerable = self.invulnerable.saturating_sub(1);
+        let before = self.enemies.len();
         let camera_x = self.camera().0;
         self.spawner.spawn(camera_x, &self.player, &mut self.enemies, &mut self.goomba_pipes);
+        for (i, e) in self.enemies.iter_mut().enumerate().skip(before) {
+            e.init_random(self.rng.byte(i));
+        }
         // Generators run before the objects (0x08090448).
         for i in 0..self.goomba_pipes.len() {
             let room = self.enemies.iter().filter(|e| e.from_pipe).count() < enemies::PIPE_GOOMBA_SLOTS;
@@ -566,6 +647,9 @@ impl Game {
         let twice = self.status.world != 0;
         let (level, player, frame) = (&self.level, &self.player, self.frame);
         let camera = self.camera();
+        for (i, e) in self.enemies.iter_mut().enumerate() {
+            e.rand = self.rng.byte(i);
+        }
         self.enemies.retain_mut(|e| {
             e.spits_twice = twice;
             e.step(level, player, frame) && !(e.from_pipe && e.off_screen(camera))
@@ -573,7 +657,16 @@ impl Game {
         // 0x08055938 takes a free slot among the first four, or does not spit; 0x0808C8FC
         // gives a Micro-Goomba any free slot.
         for e in &mut self.enemies {
-            let used = self.fireballs.len() + self.micro_goombas.len();
+            let used = self.fireballs.len() + self.micro_goombas.len() + self.boomerangs.len();
+            // 0x08068B04 -> 0x0808C8FC: any free slot.
+            if let Some(mut b) = e.thrown.take()
+                && used < enemies::PROJECTILE_SLOTS
+                && let Some(slot) = enemies::free_slot(self.boomerangs.iter().map(|b| b.slot))
+            {
+                b.slot = slot;
+                self.boomerangs.push(b);
+            }
+            let used = self.fireballs.len() + self.micro_goombas.len() + self.boomerangs.len();
             if let Some(f) = e.spit.take()
                 && self.fireballs.len() < enemies::FIREBALL_SLOTS
                 && used < enemies::PROJECTILE_SLOTS
@@ -588,6 +681,11 @@ impl Game {
         }
         let camera = self.camera();
         self.fireballs.retain_mut(|f| f.step(camera));
+        let (enemies, player) = (&self.enemies, &self.player);
+        self.boomerangs.retain_mut(|b| {
+            let owner = enemies.iter().find(|e| e.id == b.owner);
+            b.step(owner, player, camera, frame)
+        });
         // Fire Mario's fireballs: move and bounce, then knock out what they touch
         // (0x0808B648; a fireball bursting this frame still hits everything it touches).
         let level = &self.level;
@@ -637,14 +735,16 @@ impl Game {
             }
         }
         let mut hurt = false;
-        for e in &mut self.enemies {
+        // 0x08048960 / 0x0808CAEC: nothing touches a player hidden behind the scenery.
+        let hidden = self.player.hidden;
+        for e in self.enemies.iter_mut().filter(|_| !hidden) {
             match e.contact(&self.player) {
                 // Stomps (0x08048B3C) and kicks from above (0x08048E58) score the chain.
                 Contact::Stomped => {
                     self.player.vy = enemies::STOMP_BOUNCE;
                     self.player.on_ground = false;
                     let (x, y) = e.px();
-                    self.status.chain_popup(x, y, self.player.stomp_chain);
+                    self.status.chain_popup(x, y, self.player.stomp_chain + e.stomp_bonus());
                     self.player.stomp_chain += 1;
                 }
                 Contact::KickedFromAbove => {
@@ -663,7 +763,7 @@ impl Game {
             }
         }
         // 0x0808CC9C -> 0x0808CAEC: a fireball hurts like an enemy (0x0804A5F4) and flies on.
-        if self.fireballs.iter().any(|f| f.touches(&self.player)) {
+        if !hidden && (self.fireballs.iter().any(|f| f.touches(&self.player)) || self.boomerangs.iter().any(|b| b.touches(&self.player))) {
             hurt = true;
         }
         if hurt {
@@ -961,6 +1061,63 @@ mod tests {
             g.step(Buttons::empty());
         }
         assert!(matches!(g.world_map.as_ref().unwrap().phase, MapPhase::Intro(_)));
+    }
+
+    #[test]
+    fn behind_the_scenery_the_warp_trigger_leads_to_the_toad_house_and_its_chest() {
+        use toad_house::{ARRIVAL, HIDDEN_HOUSE, TOAD, WARP_TRIGGER, WARP_WHISTLE};
+        let mut g = Game::new();
+        // 1-3's end: dark scenery (metatile 0, not sky) over the ground, the trigger ahead.
+        let (w, h) = (20, 10);
+        let mut m = vec![0u16; w * h];
+        m[(h - 1) * w..].fill(0x53);
+        let list = [sma4_assets::EnemySpawn { kind: WARP_TRIGGER, col: 10, row: 7, ..Default::default() }];
+        let start = (2 * TILE_PX, 9 * TILE_PX - 16);
+        g.play(Level::new(w, h, m, TEST_SOLIDITY, BlockRules::default()), start, &list, 0);
+        for _ in 0..200 {
+            g.step(Buttons::RIGHT);
+        }
+        assert_eq!(g.pending_house, None, "in front of the scenery nothing happens");
+        g.play(g.level.clone(), start, &list, 0);
+        g.player.behind = player::WHITE_BLOCK_TIME;
+        for _ in 0..200 {
+            g.step(Buttons::RIGHT);
+            if g.pending_house.is_some() {
+                break;
+            }
+        }
+        assert_eq!(g.pending_house.take(), Some(HIDDEN_HOUSE));
+        // The house: floor on row 24, a chest (collision ids 0x81-0x84) on rows 22-23.
+        let (w, h) = (16, 27);
+        let mut m = vec![SKY; w * h];
+        m[24 * w..25 * w].fill(0x53);
+        for y in 22..24 {
+            m[y * w + 6..y * w + 9].fill(0x81);
+        }
+        let list = [sma4_assets::EnemySpawn { kind: TOAD, col: 0x0C, row: 0x03, ..Default::default() }];
+        g.enter_house(Level::new(w, h, m, TEST_SOLIDITY, BlockRules::default()), &list, vec![0x10, 0xFF]);
+        assert_eq!(g.player.frame(), ARRIVAL);
+        for _ in 0..toad_house::ARRIVAL_FREEZE {
+            g.step(Buttons::RIGHT);
+        }
+        assert_eq!(g.player.frame(), ARRIVAL, "frozen while Toad talks");
+        g.player = Player::spawn(0x68 + 2, 24 * TILE_PX - 16);
+        for _ in 0..10 {
+            g.step(Buttons::empty());
+        }
+        g.step(Buttons::B);
+        assert!(g.house.as_ref().unwrap().item.is_some(), "the chest opens");
+        let mut frames = 0;
+        let mut lid = None;
+        while g.screen == Screen::Level {
+            g.step(Buttons::RIGHT);
+            lid = lid.or(g.house.as_ref().and_then(|h| h.chest_lid));
+            frames += 1;
+            assert!(frames < 400);
+        }
+        assert_eq!(g.inventory, [WARP_WHISTLE]);
+        assert_eq!(lid, Some((0x68, 0x160)), "the chest opens");
+        assert_eq!(g.player.frame().0, 0x68, "held while the item is out");
     }
 
     #[test]

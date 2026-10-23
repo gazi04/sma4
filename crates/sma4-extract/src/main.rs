@@ -78,6 +78,13 @@ fn extract_gfx(rom: &Rom, args: &Args) -> Result<usize, String> {
     Ok(blobs.len())
 }
 
+/// World 1-3 (level 0x0C), whose object graphics include the Boomerang Bro.
+const BOOMERANG_BRO_LEVEL: u16 = 0x0C;
+/// World 1-3's hidden Toad House: level 0x106, tileset 7, enemy list 0x0816BA52.
+const TOAD_HOUSE_1_3: u16 = 0x106;
+const TOAD_HOUSE_TILESET: u8 = 7;
+const TOAD_HOUSE_1_3_LIST: u32 = 0x0816_BA52;
+
 fn run(args: &Args) -> Result<(), String> {
     let rom = Rom::open(&args.rom).map_err(|e| format!("{}: {e}", args.rom))?;
     let h = rom.header();
@@ -128,6 +135,16 @@ fn run(args: &Args) -> Result<(), String> {
             && !levels.iter().any(|l| l.0 == j.level)
         {
             levels.push((j.level, j.tileset, j.enemies));
+        }
+        // World 1-3 loads the Boomerang Bro's graphics.
+        if id == BOOMERANG_BRO_LEVEL {
+            objects::extract_boomerang_bro(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+            // Its hidden Toad House (trigger 0x07, 0x0804E718), with the list the trigger
+            // names directly.
+            level::extract_at(&rom, &mut m, TOAD_HOUSE_1_3, TOAD_HOUSE_TILESET, TOAD_HOUSE_1_3_LIST)
+                .and_then(|a| a.write(&args.out).map_err(|e| level::ExtractError(e.to_string())))
+                .map_err(|e| e.0)?;
+            objects::extract_toad_house(&rom, &mut m, &args.out).map_err(|e| e.0)?;
         }
         // Object graphics are loaded by the same routines; take them after the first level.
         if n == 0 {

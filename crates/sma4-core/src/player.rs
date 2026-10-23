@@ -36,6 +36,10 @@ pub const FIRE_FLASH: u8 = 0x1F;
 pub const STAR_TIME: u8 = 0xE0;
 /// Throw pose timer (+0x67, 0x0808BECC).
 pub const THROW_TIME: u8 = 0xB;
+/// White block (0x0809E164): its top tiles, the crouch time and the drop.
+const WHITE_BLOCK: [u8; 3] = [0x25, 0x26, 0x27];
+pub const WHITE_BLOCK_TIME: u8 = 0xF0;
+const WHITE_BLOCK_DROP: i32 = 6;
 const GOAL_WALK: i32 = 0x14;
 const RUN_MAX: i32 = 0x28;
 const P_MAX: i32 = 0x38;
@@ -245,6 +249,13 @@ pub struct Player {
     star_timer: i8,
     /// Throw pose timer (+0x67 = 0xB when a fireball is thrown).
     pub throw: u8,
+    /// Frames crouched on a white block (+0x49, 0x0809E164).
+    white_block: u8,
+    /// Behind the scenery (0x03003D06): 0xF0, -1 on odd frames, held at 1 while the player
+    /// is inside scenery.
+    pub behind: u8,
+    /// Behind and inside scenery this frame (0x03003D05): enemies and their shots miss.
+    pub hidden: bool,
     /// Course clear: has stood on the ground since touching the card (+0x43).
     goal_walking: bool,
     /// Skidding this frame: the skid pose, and the skid dust follows (0x08097800).
@@ -419,6 +430,8 @@ impl Player {
         self.update_p_meter(frame);
         self.move_x(map);
         let head_hit = self.move_y(map);
+        self.white_block(held, map);
+        self.behind_scenery(map, frame);
         if self.on_ground {
             self.animate_walk(held);
             self.skidding = self.skids(held);
@@ -766,6 +779,50 @@ impl Player {
         (m < 0x100 && map.rules.land_behaviour[m as usize] != sma4_assets::BlockRules::NOT_BUMPABLE).then_some((tx, ty))
     }
 
+    /// 0x0809E164 (plains tilesets): standing on a white block (ids 0x25-0x27) with Down
+    /// held for 0xF0 frames drops the player 6 px through it, behind the scenery.
+    fn white_block(&mut self, held: Buttons, map: &Level) {
+        let (px, py) = self.px();
+        let feet = (py + self.height()).div_euclid(TILE_PX);
+        let on_white = self.on_ground
+            && tile_span(px, HITBOX_W).any(|tx| map.collision_id(tx, feet).is_some_and(|id| WHITE_BLOCK.contains(&id)));
+        if !on_white || !held.contains(Buttons::DOWN) {
+            self.white_block = 0;
+            return;
+        }
+        self.white_block = self.white_block.wrapping_add(1);
+        if self.white_block == WHITE_BLOCK_TIME {
+            self.white_block = 0;
+            self.behind = WHITE_BLOCK_TIME;
+            self.vy = 0;
+            self.y += WHITE_BLOCK_DROP * SUB;
+            self.on_ground = false;
+        }
+    }
+
+    /// 0x0809588C: the behind-the-scenery timer runs down on odd frames; while the tile at
+    /// (frame x + 8, frame y + 0x14 small / 0x0A big) is scenery (not sky 0x80 or 0x41) the
+    /// player stays behind, and is out of the enemies' reach.
+    fn behind_scenery(&mut self, map: &Level, frame: u32) {
+        self.hidden = false;
+        if self.behind == 0 {
+            return;
+        }
+        if frame & 1 != 0 {
+            self.behind -= 1;
+        }
+        let (fx, fy) = self.frame();
+        let dy = if self.form == Form::Small { 0x14 } else { 0x0A };
+        let id = map.metatile((fx + 8).div_euclid(TILE_PX), (fy + dy).div_euclid(TILE_PX));
+        let inside = id.is_some_and(|m| m != crate::level::SKY && m != 0x41);
+        if inside {
+            self.hidden = true;
+            if self.behind == 0 {
+                self.behind = 1;
+            }
+        }
+    }
+
     /// Puts the feet on `floor` (px) and lands (0x080A3A5C).
     fn land(&mut self, floor: i32) {
         self.y = (floor - self.height()) * SUB;
@@ -923,6 +980,43 @@ mod tests {
         s.run(Buttons::LEFT, 300);
         assert_eq!(s.p.px().0, 0);
         assert_eq!(s.p.vx, 0);
+    }
+
+    /// 10x6 map: a solid floor on row 5 and a row of white blocks (id 0x25) on row 3.
+    fn white_blocks() -> Level {
+        let (w, h) = (10, 6);
+        let mut m = vec![crate::level::SKY; w * h];
+        for x in 0..w {
+            m[3 * w + x] = WHITE_BLOCK[0] as u16;
+            m[5 * w + x] = 0x53;
+        }
+        Level::new(w, h, m, crate::level::TEST_SOLIDITY, sma4_assets::BlockRules::default())
+    }
+
+    #[test]
+    fn holding_down_on_a_white_block_drops_behind_the_scenery() {
+        let mut s = Sim::new(white_blocks(), 32);
+        let top = 3 * TILE_PX - s.p.height();
+        assert_eq!(s.p.px().1, top);
+        // Letting go of Down starts the count again.
+        s.run(Buttons::DOWN, WHITE_BLOCK_TIME as u32 - 1);
+        s.run(Buttons::empty(), 1);
+        s.run(Buttons::DOWN, WHITE_BLOCK_TIME as u32 - 1);
+        assert_eq!((s.p.px().1, s.p.behind), (top, 0));
+        s.run(Buttons::DOWN, 1);
+        assert_eq!(s.p.behind, WHITE_BLOCK_TIME);
+        assert!(!s.p.on_ground);
+        // Through the block (inside it: out of the enemies' reach) and down to the floor.
+        let mut hidden = 0;
+        for _ in 0..62 {
+            s.run(Buttons::empty(), 1);
+            hidden += s.p.hidden as u32;
+        }
+        assert!(hidden > 0);
+        assert_eq!(s.p.px().1, 5 * TILE_PX - s.p.height());
+        assert!(!s.p.hidden);
+        // The timer runs down on odd frames only.
+        assert_eq!(s.p.behind, WHITE_BLOCK_TIME - 31);
     }
 
     #[test]

@@ -984,6 +984,24 @@ pub const MICRO_GOOMBA_FLIP: usize = 1;
 pub const MICRO_GOOMBA_OFF: usize = 2;
 pub const MICRO_GOOMBA_CELLS: u32 = 3;
 
+/// Boomerang Bro (type 0x82): `KOOPA_CELL_W` x `KOOPA_CELL_H` cells with the object's
+/// position at (`KOOPA_ORIGIN.0`, `KOOPA_ORIGIN.1 - BRO_RAISE`) (the body hangs 8 px below
+/// it and reaches 32 px down); cells by `boomerang_bro_cell`.
+pub fn boomerang_bro_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("boomerang_bro.png")
+}
+pub const BRO_RAISE: i32 = 16;
+pub const BRO_CELLS: u32 = 8;
+pub fn boomerang_bro_cell(right: bool, throwing: bool, step: usize) -> usize {
+    right as usize * 4 + throwing as usize * 2 + step
+}
+/// The boomerang (projectile type 2): `KOOPA_CELL_W` x `KOOPA_CELL_H` cells, the
+/// projectile's position at `KOOPA_ORIGIN`; spin frames flying right, then left.
+pub fn boomerang_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("boomerang.png")
+}
+pub const BOOMERANG_FRAMES: u32 = 4;
+
 /// Puff of smoke left by an enemy knocked out that has no body to fall (object state 8,
 /// e.g. a Piranha Plant hit by the tail): four 16x16 cells in the order they are shown.
 pub fn puff_path(dir: &Path) -> PathBuf {
@@ -1173,4 +1191,40 @@ mod tests {
         assert_eq!(LevelAsset::read(&dir, 0x22).unwrap(), plain);
         std::fs::remove_dir_all(dir).ok();
     }
+}
+
+/// Toad House message box (BG3, fixed on screen): `TOAD_BOX_W` x `TOAD_BOX_H` tiles at
+/// screen tile `TOAD_BOX_AT`.
+pub fn toad_box_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("toad_box.png")
+}
+/// The box with the whole message of the 1-3 house drawn in.
+pub fn toad_text_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("toad_text.png")
+}
+/// That message's bytes: BG tile ids, 0xF0 next line, 0xFE skip a cell, 0xFF end.
+pub fn toad_message_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("toad_message.bin")
+}
+pub const TOAD_BOX_W: u32 = 0x12;
+pub const TOAD_BOX_H: u32 = 8;
+pub const TOAD_BOX_AT: (u32, u32) = (6, 1);
+/// First text cell, in box tiles (map index 0x47: row 2, column 7).
+pub const TOAD_TEXT_AT: (u32, u32) = (1, 1);
+
+/// Toad (`KOOPA_CELL_W` x `KOOPA_CELL_H` cells like the other OAM renders, the object's
+/// position at (`KOOPA_ORIGIN.0`, `KOOPA_ORIGIN.1 - TOAD_RAISE`)): facing left, facing
+/// right.
+pub fn toad_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("toad.png")
+}
+/// The item in World 1-3's hidden house's chest, 16x16: the Warp Whistle (item 0x0C).
+pub fn house_item_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("warp_whistle.png")
+}
+pub const HOUSE_ITEM: u8 = 0x0C;
+pub const TOAD_RAISE: i32 = 16;
+/// The open chest's lid, 16x16 BG tiles drawn over the level at the chest.
+pub fn chest_lid_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("chest_open.png")
 }

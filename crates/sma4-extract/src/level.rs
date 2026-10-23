@@ -174,6 +174,17 @@ pub fn extract(
     tileset: u8,
     enemy_list: u16,
 ) -> Result<LevelAsset> {
+    extract_at(rom, m, level_id, tileset, rom.ptr(ENEMY_LISTS + enemy_list as u32 * 4)?)
+}
+
+/// `extract` with the enemy list given by address.
+pub fn extract_at(
+    rom: &Rom,
+    m: &mut Machine,
+    level_id: u16,
+    tileset: u8,
+    enemy_list: u32,
+) -> Result<LevelAsset> {
     let data = rom.ptr(LEVEL_TABLE + level_id as u32 * 4)?;
     let hdr = rom.slice(data, HEADER_LEN as usize)?.to_vec();
 
@@ -282,7 +293,7 @@ pub fn extract(
     };
 
     let enemies = rom
-        .enemy_list(enemy_list)?
+        .enemy_list_at(enemy_list)?
         .into_iter()
         .map(|e| EnemySpawn {
             kind: e.kind,
@@ -327,6 +338,9 @@ pub fn extract(
         },
     })
 }
+
+/// Enemy-list pointers by id (`Rom::enemy_list`).
+const ENEMY_LISTS: u32 = 0x0813_6B14;
 
 /// 0x080A4D4C special-cases the camera of World 1-1's coin room (object stream
 /// 0x08155460, level 0x23): x from 0x70 (+0xA0 of the player struct) to 0xA0 (+0x9E).

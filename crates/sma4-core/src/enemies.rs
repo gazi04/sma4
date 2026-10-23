@@ -44,6 +44,8 @@ pub const PARATROOPA: u16 = 0x6E;
 pub const PARAGOOMBA: u16 = 0x73;
 /// Brown Paragoomba that drops Micro-Goombas (World 1-2).
 pub const MICRO_PARAGOOMBA: u16 = 0x74;
+/// Boomerang Bro (World 1-3; main 0x08068F78).
+pub const BOOMERANG_BRO: u16 = 0x82;
 /// Enemy-list type of the Goomba pipe opening to the right (types >= 0x190 are
 /// generators, 0x0804B768 -> 0x0804B460: generator kind = type - 0x18F = 6).
 pub const GOOMBA_PIPE: u16 = 0x195;
@@ -57,8 +59,18 @@ pub const FIRE_PIRANHA: u16 = 0xA4;
 /// 0xA5 / 0xA7 and the red Venus Fire Trap 0xA6 are not ported yet).
 pub const PIRANHA_TYPES: [u16; 3] = [PIRANHA, RED_PIRANHA, FIRE_PIRANHA];
 /// Enemy types implemented so far.
-pub const SUPPORTED: [u16; 9] =
-    [WALKER, KOOPA, RED_KOOPA, PARATROOPA, PARAGOOMBA, MICRO_PARAGOOMBA, PIRANHA, RED_PIRANHA, FIRE_PIRANHA];
+pub const SUPPORTED: [u16; 10] = [
+    WALKER,
+    KOOPA,
+    RED_KOOPA,
+    PARATROOPA,
+    PARAGOOMBA,
+    MICRO_PARAGOOMBA,
+    BOOMERANG_BRO,
+    PIRANHA,
+    RED_PIRANHA,
+    FIRE_PIRANHA,
+];
 
 /// 8/16 px per frame.
 const WALK_SPEED: i32 = 8 * 16;
@@ -183,6 +195,21 @@ const PLANT_BOX_H: i32 = 24;
 const RED_PLANT_BOX_H: i32 = 20;
 /// Puff of smoke (state 8, 0x08044550): timer +0x23 = 0x1F, frame = timer >> 3.
 const PUFF_TIME: u8 = 0x1F;
+/// Boomerang Bro: 16x32 (feet probe at y + 0x20), contact box 0x08169F44[2] = (2, 12, 2,
+/// 24). Phases +0x3A & 3 (0x0816F058): stand (0x08068EA8), walk right at 8 (0x08068F5C),
+/// stand, walk left (0x08068F68); a walk lasts 0x40 frames, a stand 0x10 (+0x34). Faces
+/// the player every 16 frames (0x0816F068). Walking, the throw counter +0x3D throws when
+/// (+0x3D & 0xBF) == 0x1F (+0x23 = 0xF: the throw pose) and it hops (speed 0xD0) when the
+/// frame counter wraps.
+const BRO_HEIGHT: i32 = 32;
+const BRO_BOX: (i32, i32, i32, i32) = (2, 12, 2, 24);
+const BRO_WALK: i32 = 8 * 16;
+const BRO_WALK_TIME: u8 = 0x40;
+const BRO_STAND_TIME: u8 = 0x10;
+const BRO_HOP: i32 = -0x30 * 16;
+const BRO_THROW_POSE: u8 = 0x0F;
+/// Stomped, a Brother scores 4 steps up the chain (0x08169799[0x82] & 0xF4 == 4).
+const BRO_STOMP_BONUS: u16 = 4;
 /// Star knockout (0x080488E4): speed 0xC8 up, 0x081698C6 = -8 / 8 across.
 const STAR_KNOCKOUT: i32 = -0x38 * 16;
 const STAR_DRIFT: i32 = 8 * 16;
@@ -292,6 +319,13 @@ pub struct Enemy {
     pub emerging: u8,
     /// Made by a Goomba pipe: removed once off the screen (0x0804A0C4).
     pub from_pipe: bool,
+    /// Boomerang Bro: phase timer +0x34 and the boomerang thrown this frame.
+    wait: u8,
+    pub thrown: Option<Boomerang>,
+    /// Identity of this enemy (the boomerang finds its Bro by it).
+    pub id: u32,
+    /// This frame's random byte for its slot (0x03003879[slot]), set by the game.
+    pub rand: u8,
 }
 
 /// What touching an enemy did this frame.
@@ -307,6 +341,13 @@ pub enum Contact {
     /// Landed on a resting shell, kicking it (0x08048E58: chain points, no bounce).
     KickedFromAbove,
     HurtPlayer,
+}
+
+/// A new enemy identity.
+fn next_id() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Direction toward the player (0x08049F48 side test): +1 if the left of the player's
@@ -334,7 +375,8 @@ impl Enemy {
             kind,
             x: x * SUB,
             y: y * SUB,
-            vx: toward(player, x * SUB) * WALK_SPEED,
+            // The Bro's init (0x08068E80) leaves the speed at 0.
+            vx: if kind == BOOMERANG_BRO { 0 } else { toward(player, x * SUB) * WALK_SPEED },
             vy: 0,
             state: EnemyState::Walking,
             age: 0,
@@ -369,6 +411,10 @@ impl Enemy {
             dropped: None,
             emerging: 0,
             from_pipe: false,
+            wait: 0,
+            thrown: None,
+            id: next_id(),
+            rand: 0,
         }
     }
 
@@ -413,6 +459,10 @@ impl Enemy {
             dropped: None,
             emerging: 0,
             from_pipe: false,
+            wait: 0,
+            thrown: None,
+            id: next_id(),
+            rand: 0,
         }
     }
 
@@ -449,6 +499,7 @@ impl Enemy {
         self.wall_hit = None;
         self.spit = None;
         self.dropped = None;
+        self.thrown = None;
         match self.state {
             EnemyState::Squished(t) => {
                 self.state = EnemyState::Squished(t - 1);
@@ -457,6 +508,7 @@ impl Enemy {
             EnemyState::Walking if self.kind == RED_KOOPA => self.walk_red(level),
             EnemyState::Walking if self.kind == PARAGOOMBA => self.step_paragoomba(level, player),
             EnemyState::Walking if self.kind == MICRO_PARAGOOMBA => self.step_micro_paragoomba(level, player),
+            EnemyState::Walking if self.kind == BOOMERANG_BRO => self.step_bro(level, player, frame),
             // 0x08053704 with +0x1C: out of the pipe, across only, the walk cycle +1 a frame.
             EnemyState::Walking if self.emerging > 0 => {
                 self.emerging -= 1;
@@ -696,6 +748,64 @@ impl Enemy {
         }
     }
 
+    /// Boomerang Bro main 0x08068F78. The object loop counts +0x23 and +0x34 down first.
+    fn step_bro(&mut self, level: &Level, player: &Player, frame: u32) {
+        self.hop_timer = self.hop_timer.saturating_sub(1);
+        self.wait = self.wait.saturating_sub(1);
+        // 0x08049EC0: move (walls are only flagged), fall, land, then gravity.
+        self.x += self.vx;
+        if self.drop(level) {
+            self.vy = 0;
+        } else {
+            self.vy = (self.vy + GRAVITY).min(MAX_FALL);
+        }
+        if frame & 0xF == 0 {
+            self.facing_right = toward(player, self.x) > 0;
+        }
+        match self.phase & 3 {
+            // 0x08068EA8: stand; then walk for 0x40 frames.
+            0 | 2 => {
+                if self.wait == 0 {
+                    self.phase = self.phase.wrapping_add(1);
+                    self.wait = BRO_WALK_TIME;
+                }
+                self.vx = 0;
+            }
+            // 0x08068ECC: walk right / left.
+            p => {
+                self.vx = if p == 1 { BRO_WALK } else { -BRO_WALK };
+                self.walk_count = self.walk_count.wrapping_add(2);
+                // When the frame counter wraps and the slot's random byte has bit 7.
+                if frame & 0xFF == 0 && self.rand & 0x80 != 0 {
+                    self.vy = BRO_HOP;
+                }
+                if self.wait == 0 {
+                    self.phase = self.phase.wrapping_add(1);
+                    self.wait = BRO_STAND_TIME;
+                }
+                let c = self.drift;
+                self.drift = self.drift.wrapping_add(1);
+                if c & 0xBF == 0x1F {
+                    self.hop_timer = BRO_THROW_POSE;
+                    self.thrown = Some(Boomerang::thrown(self, player));
+                }
+            }
+        }
+    }
+
+    /// Per-type init that reads the slot's random byte: the Boomerang Bro starts in phase
+    /// 0x03003879[slot] (0x08068E80).
+    pub fn init_random(&mut self, rand: u8) {
+        if self.kind == BOOMERANG_BRO {
+            self.phase = rand;
+        }
+    }
+
+    /// Points step bonus for a stomp (0x08048B3C).
+    pub fn stomp_bonus(&self) -> u16 {
+        if self.kind == BOOMERANG_BRO { BRO_STOMP_BONUS } else { 0 }
+    }
+
     /// +0x3B += 1 with the phase timer at 0x80.
     fn next_phase(&mut self) {
         self.phase += 1;
@@ -880,9 +990,10 @@ impl Enemy {
         false
     }
 
-    /// Feet below the object's y (probe offsets 0x08169E78: feet (0x10, 8)).
+    /// Feet below the object's y: 16, or 32 for the Brothers (probe offsets 0x08169E78,
+    /// class 0x10: feet (0x20, 8)).
     pub fn height(&self) -> i32 {
-        SIZE
+        if self.kind == BOOMERANG_BRO { BRO_HEIGHT } else { SIZE }
     }
 
     /// 0x08045ABC's floor in a slope tileset: the feet probe (16, 8) in a tile at least
@@ -946,6 +1057,10 @@ impl Enemy {
             let bh = if self.kind == RED_PIRANHA { RED_PLANT_BOX_H } else { PLANT_BOX_H };
             return ex + dx < x + w && x < ex + dx + bw && ey + dy < y + h && y < ey + dy + bh;
         }
+        if self.kind == BOOMERANG_BRO {
+            let (dx, bw, dy, bh) = BRO_BOX;
+            return ex + dx < x + w && x < ex + dx + bw && ey + dy < y + h && y < ey + dy + bh;
+        }
         ex + 2 < x + w && x < ex + SIZE - 2 && ey + 2 < y + h && y < ey + SIZE
     }
 
@@ -993,6 +1108,12 @@ impl Enemy {
                         self.kind = WALKER;
                         self.vy = 0;
                         self.was_para = true;
+                    }
+                    // 0x08048B3C, 0x0816A2BB[type] bit 0: knocked out (state 6, sound 0x7F).
+                    BOOMERANG_BRO => {
+                        self.state = EnemyState::Dead;
+                        self.vx = 0;
+                        self.vy = 0;
                     }
                     // 0x0816966C[0x74] = 0x72 too; its palette is the Goomba's.
                     MICRO_PARAGOOMBA => {
@@ -1077,6 +1198,8 @@ impl Enemy {
         let (dx, w, dy, h) = if self.is_plant() {
             let (dx, w, dy) = PLANT_BOX;
             (dx, w, dy, if self.kind == RED_PIRANHA { RED_PLANT_BOX_H } else { PLANT_BOX_H })
+        } else if self.kind == BOOMERANG_BRO {
+            BRO_BOX
         } else {
             FIRE_BOX
         };
@@ -1129,6 +1252,13 @@ impl Enemy {
             (EnemyState::Walking, PARAGOOMBA) => {
                 sma4_assets::paragoomba_cell(((frame >> 3) & 1) as usize, self.wings_drawn & 8 != 0)
             }
+            // 0x08068BB8: frame = walk step (+0x3B bit 4) + 2 while throwing (+0x23).
+            (EnemyState::Walking, BOOMERANG_BRO) => sma4_assets::boomerang_bro_cell(
+                self.facing_right,
+                self.hop_timer != 0,
+                ((self.walk_count >> 4) & 1) as usize,
+            ),
+            (EnemyState::Dead, BOOMERANG_BRO) => sma4_assets::boomerang_bro_cell(self.facing_right, false, 0),
             (EnemyState::Walking, MICRO_PARAGOOMBA) => sma4_assets::paragoomba_cell(self.body as usize, self.wings_drawn & 8 != 0),
             // 0x08053704: frame (+0x3A >> 2) & 1.
             (EnemyState::Walking, WALKER) => ((self.walk_count >> 2) & 1) as usize,
@@ -1385,6 +1515,142 @@ fn projectile_touches((x, y): (i32, i32), player: &Player) -> bool {
     let dy = (y - fy - FIRE_TOP[big] + 8) as u16;
     let dx = (x - fx + 6) as u16;
     dy < FIRE_H[big] as u16 && dx < FIRE_W as u16
+}
+
+/// A Boomerang Bro's boomerang: projectile type 2 (thrown by 0x08068B04, handler
+/// 0x0808D378). It sits in the Bro's hand for 15 frames (0x0808C9AC: +0x14 low nibble),
+/// then flies: across at +/-0x20 for the first 0x40 frames of +0x15, then 1 a frame back
+/// toward -/+0x20, holding 0x30 frames at each end (0x08170ADE / 0x08170ADC); up and down
+/// every other frame by 1 between -0x16, 0x12 and back to 0 (0x08170AE0). Coming back it
+/// is caught by the Bro (0x0808D2D4). It hurts like a fireball (0x0808CC9C).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Boomerang {
+    /// Top-left, 1/256 px.
+    pub x: i32,
+    pub y: i32,
+    /// Speeds in 1/16 px per frame (+0x0A / +0x08).
+    pub vx: i32,
+    vy: i32,
+    /// +0x0C: direction step (bit 0: accelerate left), 0xFF once it no longer turns.
+    dir: u8,
+    /// +0x0D: vertical step.
+    vert: u8,
+    /// +0x13: spin counter.
+    pub spin: u8,
+    /// +0x15: frames before it may turn.
+    hold: u8,
+    /// Frames left in the Bro's hand (+0x14 & 0xF).
+    pub held: u8,
+    /// The thrower (`Enemy::id`).
+    pub owner: u32,
+    /// Projectile slot (0x0808C8FC: the highest free); the catch test runs on frames where
+    /// slot + frame is even.
+    pub slot: u8,
+}
+
+const BOOMERANG_VX: [i32; 2] = [0x20, -0x20];
+const BOOMERANG_ACCEL: [i32; 2] = [1, -1];
+const BOOMERANG_VY_END: [i32; 2] = [0x12, -0x12];
+const BOOMERANG_VY: i32 = -0x16;
+const BOOMERANG_HOLD: u8 = 0x40;
+const BOOMERANG_TURN_HOLD: u8 = 0x30;
+const BOOMERANG_IN_HAND: u8 = 0x0F;
+/// In the hand (0x08170A90 / 0x08170A96, type 2): 8 px behind the facing, 3 px down.
+const HAND_DX: i32 = 8;
+const HAND_DY: i32 = 3;
+
+impl Boomerang {
+    /// 0x08068B04: at the Bro, speed 0x0816F042[side] (+0x20 toward a player on the right),
+    /// direction 0x0816F044[side].
+    fn thrown(bro: &Enemy, player: &Player) -> Self {
+        let right = toward(player, bro.x) > 0;
+        Self {
+            x: bro.x,
+            y: bro.y,
+            vx: if right { 0x20 } else { -0x20 },
+            vy: BOOMERANG_VY,
+            dir: right as u8,
+            vert: 0,
+            spin: 0,
+            hold: BOOMERANG_HOLD,
+            held: BOOMERANG_IN_HAND,
+            owner: bro.id,
+            slot: PROJECTILE_SLOTS as u8 - 1,
+        }
+    }
+
+    pub fn px(&self) -> (i32, i32) {
+        (self.x >> 8, self.y >> 8)
+    }
+
+    /// Spin frame, a cell of `sma4_assets::boomerang_path` (flying left: the next four).
+    pub fn cell(&self) -> usize {
+        ((self.spin >> 2) & 3) as usize + if self.vx < 0 { sma4_assets::BOOMERANG_FRAMES as usize } else { 0 }
+    }
+
+    /// One frame (0x0808FB08 -> 0x0808D378). `owner` is the thrower if it is still alive.
+    /// Returns false once it is gone (off the screen, caught, or its Bro is gone while it
+    /// is held).
+    pub fn step(&mut self, owner: Option<&Enemy>, player: &Player, camera: (i32, i32), frame: u32) -> bool {
+        let (x, y) = self.px();
+        if !(-8..0xF8).contains(&(x - camera.0)) || y - camera.1 + 0x14 >= 0x100 {
+            return false;
+        }
+        self.hold = self.hold.saturating_sub(1);
+        if self.held > 0 {
+            // 0x0808C9AC: in the hand, the speed's sign following the Bro's facing.
+            let Some(bro) = owner.filter(|b| b.state == EnemyState::Walking) else { return false };
+            self.held -= 1;
+            self.x = bro.x + if bro.facing_right { -HAND_DX } else { HAND_DX } * SUB;
+            self.y = bro.y + HAND_DY * SUB;
+            if (self.vx > 0) != bro.facing_right {
+                self.vx = -self.vx;
+                self.dir = self.dir.wrapping_add(1);
+            }
+            return true;
+        }
+        self.spin = self.spin.wrapping_add(1);
+        let d = (self.dir & 1) as usize;
+        if self.dir & 0x80 == 0 && self.hold == 0 {
+            self.vx += BOOMERANG_ACCEL[d];
+            if self.vx == BOOMERANG_VX[d] {
+                self.hold = BOOMERANG_TURN_HOLD;
+                self.dir = if self.vert != 0 { 0xFF } else { self.dir.wrapping_add(1) };
+            }
+        }
+        if frame & 1 == 0 && (self.vert == 0 || self.vy != 0) {
+            let v = (self.vert & 1) as usize;
+            self.vy += BOOMERANG_ACCEL[v];
+            if self.vy == BOOMERANG_VY_END[v] {
+                self.vert += 1;
+            }
+        }
+        self.x += self.vx * 16;
+        self.y += self.vy * 16;
+        // 0x0808D2D4: back home, the Bro catches it.
+        if self.dir & 0x80 != 0
+            && (self.slot as u32 + frame) & 1 == 0
+            && let Some(bro) = owner.filter(|b| b.state == EnemyState::Walking)
+        {
+            let dy = ((self.y - (bro.y - 8 * SUB)) >> 8) - 8;
+            let dx = (self.x - (bro.x - 8 * SUB)) >> 8;
+            if (0..0x10).contains(&dy) && (0..0x10).contains(&dx) {
+                return false;
+            }
+        }
+        let _ = player;
+        true
+    }
+
+    /// 0x0808CC9C, only once it has left the hand.
+    pub fn touches(&self, player: &Player) -> bool {
+        self.held == 0 && projectile_touches(self.px(), player)
+    }
+}
+
+/// The highest projectile slot not in `used` (0x0808C8FC searches 5 down to 0).
+pub fn free_slot(used: impl Iterator<Item = u8> + Clone) -> Option<u8> {
+    (0..PROJECTILE_SLOTS as u8).rev().find(|s| !used.clone().any(|u| u == *s))
 }
 
 /// Projectile slots 0x03007848 + 0x8EC + i * 0x18 (six in all) shared by fireballs and
@@ -2099,5 +2365,50 @@ mod tests {
         assert_eq!(e.px().1, 6 * TILE_PX, "landed on the floor");
         assert!(e.off_screen((e.px().0 - 0x121, 0)) && e.off_screen((e.px().0 + 0x41, 0)));
         assert!(!e.off_screen((e.px().0 - 0x120, 0)) && !e.off_screen((e.px().0 + 0x40, 0)));
+    }
+
+    #[test]
+    fn boomerang_bro_paces_throws_and_catches_its_boomerang() {
+        let lvl = level();
+        let p = player_at(2 * TILE_PX);
+        let mut e = Enemy::spawn_at(BOOMERANG_BRO, 10 * TILE_PX, 4 * TILE_PX, &p);
+        e.init_random(0);
+        let mut xs = Vec::new();
+        let mut boomerangs: Vec<Boomerang> = Vec::new();
+        let (mut thrown, mut caught) = (0, 0);
+        for f in 1..600 {
+            e.step(&lvl, &p, f);
+            xs.push(e.px().0);
+            if let Some(mut b) = e.thrown.take() {
+                b.slot = free_slot(boomerangs.iter().map(|b| b.slot)).unwrap();
+                assert!(b.vx < 0, "thrown toward the player on the left");
+                boomerangs.push(b);
+                thrown += 1;
+            }
+            let before = boomerangs.len();
+            boomerangs.retain_mut(|b| b.step(Some(&e), &p, (0, 0), f));
+            caught += before - boomerangs.len();
+        }
+        assert_eq!(e.px().1 + BRO_HEIGHT, 7 * TILE_PX, "stands on the floor");
+        // It paces: never more than a walk (0x40 frames at half a pixel) from home.
+        let (lo, hi) = (*xs.iter().min().unwrap(), *xs.iter().max().unwrap());
+        assert!(hi - lo <= 33 && hi > lo, "paces {lo}..{hi}");
+        assert!(thrown >= 4, "throws twice per walk cycle: {thrown}");
+        assert!(caught >= 2, "boomerangs come back: {caught}");
+    }
+
+    #[test]
+    fn stomping_a_boomerang_bro_knocks_it_out_for_a_bigger_score() {
+        let lvl = level();
+        let p = far_player();
+        let mut e = Enemy::spawn_at(BOOMERANG_BRO, 8 * TILE_PX, 4 * TILE_PX, &p);
+        for f in 0..30 {
+            e.step(&lvl, &p, f);
+        }
+        let (ex, ey) = e.px();
+        let jumper = Player::spawn(ex, ey + 4 - 16);
+        assert_eq!(e.contact(&jumper), Contact::Stomped);
+        assert_eq!(e.state, EnemyState::Dead);
+        assert_eq!(e.stomp_bonus(), BRO_STOMP_BONUS);
     }
 }

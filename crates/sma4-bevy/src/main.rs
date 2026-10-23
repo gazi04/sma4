@@ -6,6 +6,7 @@
 
 mod enemies;
 mod goal;
+mod toad_house;
 mod hud;
 mod input;
 mod level;
@@ -37,6 +38,7 @@ const USAGE: &str = "usage: sma4 [--assets <dir>] [--level <hex id>] [--viewer]
             (a Piranha Plant goes in the pipe there: column = the pipe's left column)
   --hit <col>,<row>  debug: hit the block at a cell from below when the level starts
   --form <0-3>  debug: start small, big, fire or raccoon
+  --behind  debug: start behind the scenery (as just through a white block)
   --no-enemies  debug: leave the level's enemy list out
   --map  start on the world map even with debug options / scripts
   --lives <n>  debug: start with n lives
@@ -66,6 +68,7 @@ struct Args {
     place: Vec<(u16, u16)>,
     hit: Option<(i32, i32)>,
     form: u8,
+    behind: bool,
     no_enemies: bool,
     popup: Option<u8>,
     map: bool,
@@ -85,6 +88,7 @@ fn parse_args() -> Option<Args> {
         place: Vec::new(),
         hit: None,
         form: 0,
+        behind: false,
         no_enemies: false,
         popup: None,
         map: false,
@@ -111,6 +115,7 @@ fn parse_args() -> Option<Args> {
             }
             "--popup" => args.popup = Some(it.next()?.parse().ok()?),
             "--form" => args.form = it.next()?.parse().ok()?,
+            "--behind" => args.behind = true,
             "--hit" => {
                 let spec = it.next()?;
                 let (x, y) = spec.split_once(',')?;
@@ -205,6 +210,7 @@ fn main() -> AppExit {
                 hit: args.hit,
                 form: args.form,
                 lives: args.lives,
+                behind: args.behind,
             })
             .insert_resource(level::LevelRes(level))
             .insert_resource(worldmap::ClearedSpots(args.cleared.clone()))
@@ -214,6 +220,7 @@ fn main() -> AppExit {
                 player::PlayerPlugin,
                 enemies::EnemyPlugin,
                 goal::GoalPlugin,
+                toad_house::ToadHousePlugin,
                 hud::HudPlugin,
                 screens::ScreensPlugin,
                 worldmap::WorldMapPlugin,
