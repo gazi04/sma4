@@ -21,11 +21,16 @@ assets once (in `assets/extracted/`, git-ignored, never share it), and the game 
 # Once: extract assets from your own ROM (writes assets/extracted/, git-ignored, never share it)
 cargo run --release -p sma4-extract -- path/to/sma4.gba
 
-cargo run -p sma4-bevy                       # play World 1-1
+cargo run --release -p sma4-bevy             # play World 1-1
 cargo run -p sma4-bevy -- --viewer           # browse the extracted graphics
 cargo run -p sma4-bevy -- --script "-20 R120 RA30 R15" --screenshot out.png   # automated check
 ```
 Re-run the extractor when it learns new assets. More levels: `--level <hex id>:<tileset>`.
+
+On a display near 60 Hz the game runs one GBA frame per screen refresh, so scrolling is smooth
+(the GBA's 59.73 Hz against a 60 Hz screen would otherwise freeze a frame every few seconds);
+at other refresh rates it keeps the GBA's speed. The log says which (`display ... Hz`).
+Scripts run one frame per rendered frame.
 
 Ghidra:
 ```sh

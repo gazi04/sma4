@@ -1,5 +1,6 @@
 //! Bevy host for the SMA4 port. Bevy handles windowing, input, rendering and audio;
-//! all game rules live in `sma4-core` and run in `FixedUpdate` at the GBA frame rate.
+//! all game rules live in `sma4-core`, stepped once per vblank when the display runs near the
+//! GBA's frame rate (`pacing`).
 //!
 //! The game reads only extracted assets (default `assets/extracted/`, created once by
 //! `sma4-extract` from the user's own ROM); it never opens the ROM itself.
@@ -10,6 +11,7 @@ mod toad_house;
 mod hud;
 mod input;
 mod level;
+mod pacing;
 mod player;
 mod screens;
 mod viewer;
@@ -19,7 +21,7 @@ use std::path::PathBuf;
 
 use bevy::{camera::ScalingMode, prelude::*};
 use sma4_assets::{DEFAULT_DIR, EnemySpawn, LevelAsset, TileKind};
-use sma4_core::{FRAME_HZ, Game, SCREEN_H, SCREEN_W};
+use sma4_core::{Game, SCREEN_H, SCREEN_W};
 
 /// Initial window size as a multiple of the GBA screen.
 const SCALE: u32 = 4;
@@ -161,7 +163,6 @@ fn main() -> AppExit {
                 ..default()
             }),
     )
-    .insert_resource(Time::<Fixed>::from_hz(FRAME_HZ))
     .insert_resource(AssetDir(args.assets.clone()))
     .init_resource::<GameRes>()
     .add_systems(Startup, spawn_camera);

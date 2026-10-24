@@ -6,13 +6,17 @@ use bevy::{
 };
 use sma4_core::Buttons;
 
-use crate::GameRes;
+use crate::{GameRes, pacing::Pacer};
 
 pub struct InputPlugin;
 
 impl Plugin for InputPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(FixedUpdate, step_game).add_systems(Update, finish_script);
+        // After input (PreUpdate), before everything that draws the game (Update): where
+        // `FixedUpdate` would run.
+        app.init_resource::<Pacing>()
+            .add_systems(RunFixedMainLoop, step_game.in_set(RunFixedMainLoopSystems::FixedMainLoop))
+            .add_systems(Update, finish_script);
     }
 }
 
@@ -90,16 +94,35 @@ impl Script {
     }
 }
 
-/// One core tick per fixed step; the core never sees real time.
-fn step_game(keys: Res<ButtonInput<KeyCode>>, script: Option<ResMut<Script>>, mut game: ResMut<GameRes>) {
-    let held = match script {
-        Some(mut s) => match s.next() {
-            Some(b) => b,
-            None => return, // script over: freeze so the screenshot shows the final frame
-        },
-        None => held_buttons(&keys),
-    };
-    game.0.step(held);
+#[derive(Resource, Default)]
+struct Pacing(Pacer);
+
+/// Runs the core frames due this rendered frame (`Pacer`); the core never sees real time.
+/// A script runs one frame per rendered frame, so it plays the same however fast it renders.
+fn step_game(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time<Real>>,
+    mut pacing: ResMut<Pacing>,
+    script: Option<ResMut<Script>>,
+    mut game: ResMut<GameRes>,
+) {
+    if let Some(mut s) = script {
+        // Script over: freeze so the screenshot shows the final frame.
+        if let Some(held) = s.next() {
+            game.0.step(held);
+        }
+        return;
+    }
+    let held = held_buttons(&keys);
+    let was_locked = pacing.0.locked();
+    let n = pacing.0.steps(time.delta_secs_f64());
+    if pacing.0.locked() != was_locked {
+        let hz = 1.0 / pacing.0.period();
+        info!("display {hz:.3} Hz: {}", if pacing.0.locked() { "one game frame per vblank" } else { "fixed timestep" });
+    }
+    for _ in 0..n {
+        game.0.step(held);
+    }
 }
 
 fn finish_script(mut commands: Commands, script: Option<ResMut<Script>>, game: Res<GameRes>, mut exit: MessageWriter<AppExit>) {
