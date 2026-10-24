@@ -192,18 +192,23 @@ fn follow_camera(
     let level_w = map.pixel_width() as f32;
     let level_h = map.pixel_height() as f32;
     let mut x = c.x.clamp(half_w, (level_w - half_w).max(half_w));
-    // Bottom of the level stays at the bottom of the view; taller views show more sky.
-    let mut y = c.y.clamp(-(level_h - half_h), (-half_h).max(-(level_h - half_h)));
     // Areas where the ROM sets the camera limits (the coin room) and autoscrolling levels:
-    // the core's camera.
+    // the core's camera across too.
     let (gx, gy) = game.0.camera();
     let scrolling = game.0.autoscroll.is_some();
     if map.camera_x.is_some() || scrolling {
         x = (gx + SCREEN_W as i32 / 2) as f32;
     }
-    if map.camera_y.is_some() || scrolling {
-        y = -((gy + SCREEN_H as i32 / 2) as f32);
-    }
+    // Up and down, the core's camera (the ROM's vertical scroll) centred in the view; outside
+    // fixed rooms and autoscrolls the level's bottom stays at the bottom of the view, and
+    // taller views show more above. In fixed rooms (the crushing-ceiling room too) the GBA's
+    // own lines never go below the level either, so a taller view only grows upward there.
+    let y = -((gy + SCREEN_H as i32 / 2) as f32);
+    let y = if map.camera_y.is_some() || scrolling {
+        y.max(-(level_h - half_h))
+    } else {
+        y.clamp(-(level_h - half_h), (-half_h).max(-(level_h - half_h)))
+    };
     transform.translation.x = x.round();
     transform.translation.y = y.round();
 }

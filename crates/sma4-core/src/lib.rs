@@ -3,6 +3,7 @@
 
 pub mod autoscroll;
 pub mod blocks;
+pub mod camera_zones;
 pub mod coins;
 pub mod dust;
 pub mod enemies;
@@ -132,6 +133,8 @@ pub struct Game {
     pub end_rooms: Option<[sma4_assets::EndRoom; sma4_assets::WORLDS]>,
     /// The pipe the player is in is an end-of-level pipe.
     pipe_to_end: bool,
+    /// Vertical camera triggers of the enemy list (World 1-5).
+    pub camera_zones: camera_zones::CameraZones,
 }
 
 // TODO(re): the ROM's post-hit invulnerability length (player flashing) is not decoded yet.
@@ -193,6 +196,8 @@ impl Game {
         self.freeze = 0;
         self.autoscroll = None;
         self.lifts.clear();
+        let start_y = self.level.start_camera_y.unwrap_or(0);
+        self.camera_zones = camera_zones::CameraZones::new(enemies, self.level.camera, start_y);
     }
 
     /// Arrives through a pipe in the other area of the level (0x08005690): its objects
@@ -209,6 +214,7 @@ impl Game {
             self.level.camera_y = Some(to.exit.camera_y as i32);
         }
         self.level.start_camera_y = Some(to.exit.camera_y as i32);
+        self.camera_zones.set(to.exit.camera_y as i32);
         pipes::place(&mut self.player, &to.exit);
         self.pipe = Some(Pipe::exit(to.exit.dir));
         self.level_generation = self.level_generation.wrapping_add(1);
@@ -236,7 +242,7 @@ impl Game {
     /// Top-left of a GBA-sized view following the player, clamped to the level (the view
     /// `sma4-bevy` centres on the player).
     pub fn camera(&self) -> (i32, i32) {
-        let (cx, cy) = self.player.centre();
+        let cx = self.player.centre().0;
         let (w, h) = (SCREEN_W as i32, SCREEN_H as i32);
         if let Some(a) = &self.autoscroll {
             let (x, y) = a.camera();
@@ -244,10 +250,7 @@ impl Game {
         }
         let (min_x, max_x) = self.level.camera_x.unwrap_or((0, (self.level.pixel_width() - w).max(0)));
         let x = (cx - w / 2).clamp(min_x, max_x);
-        let y = match self.level.camera_y {
-            Some(y) => y,
-            None => (cy - h / 2).clamp(0, (self.level.pixel_height() - h).max(0)),
-        };
+        let y = self.level.camera_y.unwrap_or(self.camera_zones.y);
         (x, y)
     }
 
@@ -574,6 +577,7 @@ impl Game {
         let (held, pressed) = if frozen { (Buttons::empty(), Buttons::empty()) } else { (held, self.input.pressed) };
         let head_hit = if frozen { None } else { self.player.step(held, pressed, &self.level, self.frame) };
         self.skid_dust.step(&self.player);
+        self.camera_zones.step(&self.player);
         if let Some(t) = self.warp_trigger
             && t.hit(&self.player)
         {

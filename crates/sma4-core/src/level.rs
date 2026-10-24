@@ -31,6 +31,8 @@ pub struct Level {
     pub pipe_flags: u8,
     /// Slope collision, in tilesets with slopes.
     pub slopes: Option<Slopes>,
+    /// The vertical scroll's settings (`sma4_assets::LevelAsset::camera`).
+    pub camera: sma4_assets::CameraParams,
     /// The multi-coin block in use (0x03003D00), its timer (0x03003CFE: 200 frames from the
     /// first hit) and its result high nibble.
     pub coin_block: Option<(i32, i32)>,
@@ -55,6 +57,13 @@ impl Level {
             start_camera_y: None,
             pipe_flags: 0,
             slopes: None,
+            camera: sma4_assets::CameraParams {
+                bottom: (height * TILE_PX as usize) as u16 - 1,
+                fixed: 0,
+                dead_zone: [0x20, 0x40],
+                dead_zone_flying: [0x20, 0x40],
+                top: 0,
+            },
             coin_block: None,
             coin_timer: 0,
             coin_hi: 0,
@@ -68,6 +77,11 @@ impl Level {
 
     pub fn with_start_camera_y(mut self, y: i32) -> Self {
         self.start_camera_y = Some(y);
+        self
+    }
+
+    pub fn with_camera(mut self, camera: sma4_assets::CameraParams) -> Self {
+        self.camera = camera;
         self
     }
 

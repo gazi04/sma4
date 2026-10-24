@@ -203,6 +203,7 @@ fn core_level(level: &LevelAsset) -> Level {
         .with_slopes(level.slopes.clone())
         .with_start_camera_y(level.start_camera_y as i32)
         .with_pipe_flags(level.pipe_flags)
+        .with_camera(level.camera)
 }
 
 fn spawn_level(
@@ -227,6 +228,7 @@ fn spawn_level(
     }
     spawn_tilemaps(&mut commands, &mut images, level);
     let core_level = core_level(level);
+    let debug_spawn = spawn_col.is_some();
     let spawn = match spawn_col.map(|c| (c.0, c.1)) {
         // Centred on the column's right edge: the middle of a pipe starting there.
         Some((Some(col), Some(row))) => ((col + 1) * sma4_core::level::TILE_PX - 6, row * sma4_core::level::TILE_PX - 16),
@@ -251,6 +253,11 @@ fn spawn_level(
         2 => game.0.player.set_form(sma4_core::Form::Fire),
         3 => game.0.player.set_form(sma4_core::Form::Raccoon),
         _ => {}
+    }
+    // A debug start mid-level: the camera as if it had followed the player there.
+    if debug_spawn {
+        let g = &mut game.0;
+        g.camera_zones.settle(&g.player);
     }
     if let Some((tx, ty)) = hit {
         let g = &mut game.0;

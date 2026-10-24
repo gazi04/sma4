@@ -42,6 +42,17 @@ Supported ROM: Europe AX4P rev 0 (SHA1 `b7f3d6dc014e2f0ddc996137bdefbb8167a77e66
 
 Controls: arrows = move, X = jump (A), Z = run (B), Enter = Start, Backspace = Select, A/S = L/R.
 
+The camera now scrolls up and down as in the ROM in every level (checked frame by frame
+against the ROM's scroll routines over a run through World 1-5): it follows Mario only
+when his frame's top leaves a band below the top of the view (0x10-0x30 px in World 1-5),
+at a speed set by his vertical speed,
+and once it is down at the ground (y 0xF0 or below) it does not follow him up unless he
+flies; each level's settings are extracted from your ROM. Views taller than the GBA's
+show more above, with the bottom of the level kept at the bottom. World 1-5's camera
+triggers work on it: over the note-block stretch (two 0xC8 boxes) the camera heads for
+the bottom of the level, and near the end (an 0xE0 / 0xE1 band) it stays up while Mario is
+above the band's row.
+
 Current state: World 1-1 is drawn natively (Bevy `TilemapChunk`) from the ROM's tiles and
 palettes. The player is "Pip", an original placeholder character, with placeholder physics
 (`crates/sma4-core/src/player.rs`, to be replaced by the reverse-engineered values).
