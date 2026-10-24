@@ -75,6 +75,10 @@ const DEATH_POSE: u8 = 0x4B;
 const GROW_POSES: u32 = 0x0813_DE2F;
 /// Fire Mario's throw poses 0x0813DE9E[(+0x67 >> 2) (+3 in the air)] (0x08098648).
 const THROW_POSES: u32 = 0x0813_DE9E;
+/// Swimming (0x08097724): a stroke's 6 steps, then paddling in place (4); the small form's
+/// poses follow the others' in each table.
+const SWIM_POSES: u32 = 0x0813_DE43;
+const SWIM_IDLE_POSES: u32 = 0x0813_DE4F;
 const FIRE: u8 = 2;
 /// Player palette loader (0x0809FB54: OBJ palette 7 and 0x02000800 = 0x08173050[form 2,
 /// else the character]) and the star palette step (0x08009208: palette 7 = 0x08133210[+0x25
@@ -379,6 +383,43 @@ pub fn extract_skid_dust(
     .write_png(&skid_dust_path(out_dir))
     .map_err(|e| ExtractError(e.to_string()))?;
     println!("  skid dust: {SKID_DUST_FRAMES} frames");
+    Ok(())
+}
+
+/// Water splash tiles by step (0x0808A128): u16 OBJ tile per (timer >> 3).
+const SPLASH_TILES: u32 = 0x0817_09BA;
+/// Air bubble OBJ tile (0x08089E9C).
+const BUBBLE_TILE: u32 = 0x223;
+/// Palette of the splash and the bubbles (attribute 2 = 0x14xx).
+const WATER_PALETTE: u32 = 1;
+
+/// The water splash (`sma4_assets::splash_path`) and the air bubble, from OBJ VRAM as a
+/// water level leaves it.
+pub fn extract_water(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{SPLASH_FRAMES, bubble_path, splash_path};
+    let chars = m.read(OBJ_VRAM, 0x8000)?;
+    let sheet = Sheet {
+        chars: &chars,
+        palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?),
+    };
+    let w = 16 * SPLASH_FRAMES;
+    let mut px = vec![0u8; (w * 16 * 4) as usize];
+    for i in 0..SPLASH_FRAMES {
+        let tile = (rom.u16(SPLASH_TILES + i * 2)? & 0x3FF) as u32;
+        for (dy, t) in [(0, tile), (8, tile + 0x20)] {
+            sheet.tile(&mut px, w, t, i * 16, dy, false, WATER_PALETTE);
+            sheet.tile(&mut px, w, t, i * 16 + 8, dy, true, WATER_PALETTE);
+        }
+    }
+    Rgba { width: w, height: 16, pixels: px }
+        .write_png(&splash_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))?;
+    let mut px = vec![0u8; 8 * 8 * 4];
+    sheet.tile(&mut px, 8, BUBBLE_TILE, 0, 0, false, WATER_PALETTE);
+    Rgba { width: 8, height: 8, pixels: px }
+        .write_png(&bubble_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))?;
+    println!("  splash: {SPLASH_FRAMES} frames, bubble");
     Ok(())
 }
 
@@ -1115,6 +1156,9 @@ fn player_poses(rom: &Rom, form: u8) -> Result<Vec<u8>, ExtractError> {
     } else {
         poses.extend([walk[2]; 6]);
     }
+    let small = (form == 0) as u32;
+    poses.extend(table(SWIM_POSES, small * 6, 6)?);
+    poses.extend(table(SWIM_IDLE_POSES, small * 4, 4)?);
     debug_assert_eq!(poses.len(), PLAYER_FRAMES as usize);
     Ok(poses)
 }

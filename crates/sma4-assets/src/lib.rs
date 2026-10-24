@@ -1126,7 +1126,11 @@ pub const PLAYER_SKID: usize = 30;
 /// Fire Mario throwing a fireball: 3 steps on the ground, 3 in the air (0x0813DE9E).
 pub const PLAYER_THROW: usize = 31;
 pub const PLAYER_THROW_AIR: usize = 34;
-pub const PLAYER_FRAMES: u32 = 37;
+/// Swimming (0x08097724): 6 steps of a stroke (0x0813DE43), then 4 of paddling in place
+/// (0x0813DE4F); the small form has its own poses (+6 / +4 in those tables).
+pub const PLAYER_SWIM: usize = 37;
+pub const PLAYER_SWIM_IDLE: usize = 43;
+pub const PLAYER_FRAMES: u32 = 47;
 /// Star flashing: the player is drawn in palette 7 = 0x08133210[k], k = 0 being the
 /// form's own palette (`player_path`), 1-3 in `player_star_path`.
 pub const PLAYER_STAR_PALETTES: u32 = 4;
@@ -1137,6 +1141,19 @@ pub const PLAYER_W: u32 = 32;
 pub const PLAYER_H: u32 = 32;
 /// Width of the body part of a player cell.
 pub const PLAYER_BODY_W: u32 = 16;
+
+/// Water splash (effect slots 0x03007848 + 0x888, drawn by 0x0808A128): 16x16 cells, one per
+/// step (timer >> 3): OBJ tile 0x081709BA[step] and the tile below it (+0x20) on the left,
+/// the same mirrored on the right, palette 1.
+pub fn splash_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("splash.png")
+}
+pub const SPLASH_FRAMES: u32 = 6;
+
+/// Air bubble (slots 0x03007848 + 0x858, 0x08089E9C): one 8x8 OBJ tile 0x223, palette 1.
+pub fn bubble_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("bubble.png")
+}
 
 /// Skid dust (0x0808C270): 8x8 cells, OBJ tiles 0x08170A88[i] (0x21D, 0x21E, 0x23D,
 /// 0x23E), palette 0.

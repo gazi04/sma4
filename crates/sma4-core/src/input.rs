@@ -41,6 +41,10 @@ impl Buttons {
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
+
+    pub fn remove(&mut self, other: Self) {
+        self.0 &= !other.0;
+    }
 }
 
 impl std::ops::BitOr for Buttons {

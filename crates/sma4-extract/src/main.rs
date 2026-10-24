@@ -80,6 +80,8 @@ fn extract_gfx(rom: &Rom, args: &Args) -> Result<usize, String> {
 
 /// World 1-3 (level 0x0C), whose object graphics include the Boomerang Bro.
 const BOOMERANG_BRO_LEVEL: u16 = 0x0C;
+/// World 1-5 (level 0x82), with the Buzzy Beetles.
+const BUZZY_LEVEL: u16 = 0x82;
 /// World 1-4 (level 0xD2), with the falling lifts and the red Paratroopa.
 const LIFT_LEVEL: u16 = 0xD2;
 /// World 1-3's hidden Toad House: level 0x106, tileset 7, enemy list 0x0816BA52.
@@ -144,6 +146,10 @@ fn run(args: &Args) -> Result<(), String> {
             && !levels.iter().any(|l| l.0 == j.level)
         {
             levels.push((j.level, j.tileset, j.enemies));
+        }
+        // World 1-5's water splash and air bubble.
+        if id == BUZZY_LEVEL {
+            objects::extract_water(&rom, &m, &args.out).map_err(|e| e.0)?;
         }
         // World 1-4 loads the lift's graphics.
         if id == LIFT_LEVEL {

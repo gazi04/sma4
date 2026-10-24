@@ -112,6 +112,11 @@ const SLOPE_WALL_PROBE: (i32, i32, i32) = (2, 1, 14);
 // at 0x08169D9C[0] = 64 while falling (1/16 px per frame; water uses 1 and 16, not ported).
 const GRAVITY: i32 = 3 * 16;
 const MAX_FALL: i32 = 64 * 16;
+/// In water (+0x32): gravity 0x08169D9E[1] = 1, falling at most 0x08169D9C[1] = 0x10, and
+/// rising at most 0x18 (0x08049EC0).
+const WATER_GRAVITY: i32 = 16;
+const WATER_MAX_FALL: i32 = 0x10 * 16;
+const WATER_RISE: i32 = -0x18 * 16;
 /// Paratroopa (0x08053704, type 0x6E): on landing the speed byte becomes 0xD0, and each
 /// frame in the air it is lowered by one more (gravity 2 instead of 3).
 const HOP_SPEED: i32 = -48 * 16;
@@ -332,6 +337,11 @@ pub struct Enemy {
     pub id: u32,
     /// This frame's random byte for its slot (0x03003879[slot]), set by the game.
     pub rand: u8,
+    /// In water (+0x32; 0x080462A0 from the probe 0x08169E78[0x6C] = (4, 8)).
+    pub in_water: bool,
+    /// Went into or out of the water this frame (0x0804A224): the game makes the splash,
+    /// and a bubble when it was falling in.
+    pub splash: Option<bool>,
 }
 
 /// What touching an enemy did this frame.
@@ -421,6 +431,8 @@ impl Enemy {
             thrown: None,
             id: next_id(),
             rand: 0,
+            in_water: false,
+            splash: None,
         }
     }
 
@@ -469,6 +481,8 @@ impl Enemy {
             thrown: None,
             id: next_id(),
             rand: 0,
+            in_water: false,
+            splash: None,
         }
     }
 
@@ -506,6 +520,7 @@ impl Enemy {
         self.spit = None;
         self.dropped = None;
         self.thrown = None;
+        self.splash = None;
         match self.state {
             EnemyState::Squished(t) => {
                 self.state = EnemyState::Squished(t - 1);
@@ -947,9 +962,16 @@ impl Enemy {
         (x.div_euclid(TILE_PX), (py + 9).div_euclid(TILE_PX))
     }
 
-    /// Horizontal move; returns true if it ran into a wall (and was pushed out).
+    /// The move across: in water anything but a walking enemy moves at half its speed byte
+    /// (0x08049EC0).
+    fn water_vx(&self) -> i32 {
+        if self.in_water && self.state != EnemyState::Walking { (self.vx >> 4 >> 1) << 4 } else { self.vx }
+    }
+
+    /// Horizontal move; returns true if it ran into a wall (and was pushed out). In water,
+    /// anything but a walking enemy moves at half its speed byte (0x08049EC0).
     fn move_x(&mut self, level: &Level) -> bool {
-        self.x += self.vx;
+        self.x += self.water_vx();
         if self.vx == 0 {
             return false;
         }
@@ -969,12 +991,46 @@ impl Enemy {
 
     /// Fall and land, then gravity (0x08049EC0: move, collide, speed += 3 up to 0x40);
     /// returns true if standing on ground after the move.
+    /// In water the speed is held above -0x18, gravity is 1 and the fall at most 0x10.
     fn fall(&mut self, level: &Level) -> bool {
-        let landed = self.drop(level);
+        let old_bottom = self.px().1 + self.height();
+        self.y += self.vy;
+        self.fall_moved(level, old_bottom)
+    }
+
+    /// `fall` once y has moved: land, water, gravity.
+    fn fall_moved(&mut self, level: &Level, old_bottom: i32) -> bool {
+        // 0x08046358 takes the water probe before the floor snaps the object.
+        let probe = self.px();
+        let landed = self.land(level, old_bottom);
+        self.water(level, probe);
         if !landed {
-            self.vy = (self.vy + GRAVITY).min(MAX_FALL);
+            let (g, max) = if self.in_water { (WATER_GRAVITY, WATER_MAX_FALL) } else { (GRAVITY, MAX_FALL) };
+            if self.in_water && self.vy < WATER_RISE {
+                self.vy = WATER_RISE;
+            }
+            self.vy = (self.vy + g).min(max);
         }
         landed
+    }
+
+    /// 0x080462A0: the water flag from the probe (x + 8, y + 4), kept while the probe is in
+    /// a colliding cell (0x08046358 only calls it for open ones); going in or out (not out of
+    /// the bottom of the level) splashes, and stops a fall (0x0804A224).
+    fn water(&mut self, level: &Level, (px, py): (i32, i32)) {
+        let (tx, ty) = ((px + 8).div_euclid(TILE_PX), (py + 4).div_euclid(TILE_PX));
+        if level.at(tx, ty) != TileKind::Empty {
+            return;
+        }
+        let water = level.is_water(tx, ty);
+        if water != self.in_water && py + 4 < level.pixel_height() {
+            let falling = self.vy >= 0;
+            if falling {
+                self.vy = 0;
+            }
+            self.splash = Some(falling);
+        }
+        self.in_water = water;
     }
 
     /// The wall probe of a slope tileset (0x08045ABC): one point, high up the body after a

@@ -31,6 +31,8 @@ pub struct Level {
     pub pipe_flags: u8,
     /// Slope collision, in tilesets with slopes.
     pub slopes: Option<Slopes>,
+    /// Water ids per quadrant (`sma4_assets::LevelAsset::water`); 0xFF: none.
+    pub water: [u8; 4],
     /// The vertical scroll's settings (`sma4_assets::LevelAsset::camera`).
     pub camera: sma4_assets::CameraParams,
     /// The multi-coin block in use (0x03003D00), its timer (0x03003CFE: 200 frames from the
@@ -57,6 +59,7 @@ impl Level {
             start_camera_y: None,
             pipe_flags: 0,
             slopes: None,
+            water: [0xFF; 4],
             camera: sma4_assets::CameraParams {
                 bottom: (height * TILE_PX as usize) as u16 - 1,
                 fixed: 0,
@@ -82,6 +85,11 @@ impl Level {
 
     pub fn with_camera(mut self, camera: sma4_assets::CameraParams) -> Self {
         self.camera = camera;
+        self
+    }
+
+    pub fn with_water(mut self, water: [u8; 4]) -> Self {
+        self.water = water;
         self
     }
 
@@ -144,6 +152,22 @@ impl Level {
     /// The id a cell collides as (second-plane ids mapped, `Solidity::id`).
     pub fn collision_id(&self, tx: i32, ty: i32) -> Option<u8> {
         self.metatile(tx, ty).and_then(|m| self.solidity.id(m))
+    }
+
+    /// A water cell (0x080A1E60 for the player, 0x080462A0 for objects): an id above the
+    /// quadrant's water threshold that does not collide, except 0xD7 and the 0xE0 / 0xE1
+    /// pair (a different kind of water, none in World 1).
+    pub fn is_water(&self, tx: i32, ty: i32) -> bool {
+        let Some(id) = self.collision_id(tx, ty) else {
+            return false;
+        };
+        let q = (id >> 6) as usize;
+        id < self.solidity.top[q] && !matches!(id, 0xD7 | 0xE0 | 0xE1) && id > self.water[q]
+    }
+
+    /// Whether the pixel is in a water cell.
+    pub fn water_at(&self, x: i32, y: i32) -> bool {
+        self.is_water(x.div_euclid(TILE_PX), y.div_euclid(TILE_PX))
     }
 
     /// Whether this tileset has slope collision (0x03003CF4).
@@ -229,4 +253,31 @@ pub fn test_hill() -> Level {
     let solidity =
         Solidity { top: [0x25, 0x5F, 0x99, 0xE2], solid: [0x2E, 0x5F, 0xA6, 0xF0], high: [0; sma4_assets::HIGH_IDS] };
     Level::new(w, h, m, solidity, BlockRules::default()).with_slopes(Some(slopes))
+}
+
+/// 16x8 level with World 1-5's water (tileset 14 thresholds, water above 0xC1 in the last
+/// quadrant): air on rows 0-3, the surface 0xC2 on row 4, water 0xC3 on rows 5-6 and solid
+/// ground on row 7, with a dry ledge (columns 12-15) up to row 4.
+#[cfg(test)]
+pub fn test_pool() -> Level {
+    use sma4_assets::Solidity;
+    const SURFACE: u16 = 0xC2;
+    const WATER: u16 = 0xC3;
+    const GROUND: u16 = 0xAB;
+    let (w, h) = (16, 8);
+    let mut m = vec![SKY; w * h];
+    for x in 0..w {
+        m[4 * w + x] = SURFACE;
+        m[5 * w + x] = WATER;
+        m[6 * w + x] = WATER;
+        m[7 * w + x] = GROUND;
+    }
+    for x in 12..w {
+        for y in 4..7 {
+            m[y * w + x] = GROUND;
+        }
+    }
+    let solidity =
+        Solidity { top: [0x25, 0x5F, 0x99, 0xE2], solid: [0x2E, 0x5F, 0xA6, 0xF0], high: [0; sma4_assets::HIGH_IDS] };
+    Level::new(w, h, m, solidity, BlockRules::default()).with_water([0xFF, 0xFF, 0xFF, 0xC1])
 }

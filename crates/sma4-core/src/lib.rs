@@ -19,6 +19,7 @@ pub mod screens;
 pub mod world_map;
 pub mod status;
 pub mod toad_house;
+pub mod water;
 
 /// Fireball knockouts score 100 (0x08093560 with popup 5); star chains stop growing at
 /// the 9th (0x080488E4 caps +0x107 at 8).
@@ -133,6 +134,11 @@ pub struct Game {
     pub end_rooms: Option<[sma4_assets::EndRoom; sma4_assets::WORLDS]>,
     /// The pipe the player is in is an end-of-level pipe.
     pipe_to_end: bool,
+    /// Water splashes (effect slots 0x03007848 + 0x888) and air bubbles (+ 0x858).
+    pub splashes: Vec<water::Splash>,
+    pub bubbles: Vec<water::Bubble>,
+    /// Objects' splashes alternate between the last two slots (0x03007848 + 0xC94).
+    splash_turn: u8,
     /// Vertical camera triggers of the enemy list (World 1-5).
     pub camera_zones: camera_zones::CameraZones,
 }
@@ -196,6 +202,8 @@ impl Game {
         self.freeze = 0;
         self.autoscroll = None;
         self.lifts.clear();
+        self.splashes.clear();
+        self.bubbles.clear();
         let start_y = self.level.start_camera_y.unwrap_or(0);
         self.camera_zones = camera_zones::CameraZones::new(enemies, self.level.camera, start_y);
     }
@@ -274,6 +282,27 @@ impl Game {
             self.player.vy = 0;
             self.dying = Some(Dying::new());
         }
+    }
+
+    /// The player's splash and bubbles (0x0809F4C8 on going in or out, 0x08089B4C while
+    /// in), then the effects' own update (0x0808A5B8, 0x08089E9C).
+    fn step_water(&mut self, held: Buttons) {
+        if let Some(change) = self.player.splash {
+            self.splashes.retain(|s| s.slot != 0);
+            self.splashes.push(water::Splash::player(&self.player, &self.level));
+            if self.player.vy >= 0 && change == player::WaterChange::In {
+                let rng = &self.rng;
+                water::dive(&mut self.bubbles, &self.player, |i| rng.byte(i));
+            }
+        }
+        if self.player.in_water {
+            let moving = held.contains(Buttons::A) || held.contains(Buttons::LEFT) || held.contains(Buttons::RIGHT);
+            water::breathe(&mut self.bubbles, &self.player, moving, self.frame);
+        }
+        let frame = self.frame;
+        self.splashes.retain_mut(|s| s.step(frame));
+        let level = &self.level;
+        self.bubbles.retain_mut(|b| b.step(level));
     }
 
     /// Spawns the goal card when its column comes up (`enemies::Spawner`) and runs it; touching it starts the
@@ -575,8 +604,10 @@ impl Game {
         let frozen = self.freeze > 0;
         self.freeze = self.freeze.saturating_sub(1);
         let (held, pressed) = if frozen { (Buttons::empty(), Buttons::empty()) } else { (held, self.input.pressed) };
+        self.player.camera_y = self.camera().1;
         let head_hit = if frozen { None } else { self.player.step(held, pressed, &self.level, self.frame) };
         self.skid_dust.step(&self.player);
+        self.step_water(held);
         self.camera_zones.step(&self.player);
         if let Some(t) = self.warp_trigger
             && t.hit(&self.player)
@@ -719,6 +750,19 @@ impl Game {
             e.spits_twice = twice;
             e.step(level, player, frame) && !(e.from_pipe && e.off_screen(camera))
         });
+        for e in &self.enemies {
+            if let Some(falling) = e.splash {
+                // 0x0804A224: slots 1 and 2 in turn.
+                self.splash_turn = self.splash_turn.wrapping_add(1);
+                let slot = (self.splash_turn & 1) as usize + 1;
+                let (x, y) = e.px();
+                self.splashes.retain(|s| s.slot != slot);
+                self.splashes.push(water::Splash::object(x, y, slot));
+                if falling {
+                    water::object_dive(&mut self.bubbles, x, y);
+                }
+            }
+        }
         // 0x08055938 takes a free slot among the first four, or does not spit; 0x0808C8FC
         // gives a Micro-Goomba any free slot.
         for e in &mut self.enemies {

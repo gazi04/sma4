@@ -40,6 +40,25 @@ pub const THROW_TIME: u8 = 0xB;
 const WHITE_BLOCK: [u8; 3] = [0x25, 0x26, 0x27];
 pub const WHITE_BLOCK_TIME: u8 = 0xF0;
 const WHITE_BLOCK_DROP: i32 = 6;
+// Swimming (0x08096EB4, 0x080974C8; table 0x08172C96 from index 0x40 on the floor of the
+// water, 0x44 swimming): friction, acceleration, against the motion; the top speed is
+// 0x08172C88[0] = 8 on the floor and 0x18 swimming.
+const SWIM_FLOOR: [i32; 3] = [-0xD0, 0x100, 0x100];
+const SWIM_AIR: [i32; 3] = [-0x20, 0x30, 0x80];
+const SWIM_FLOOR_MAX: i32 = 8;
+const SWIM_MAX: i32 = 0x18;
+/// A stroke (A) sets the speed byte to -0x20 from the floor, or adds -0x20; it is held
+/// within +/-0x20.
+const STROKE: i32 = -0x20;
+const SWIM_LIMIT: i32 = 0x20;
+/// At the surface (0x0809588C) the rise is held to -0xC; Up + A jumps out at 0xCC (small)
+/// or 0xCA.
+const SURFACE_RISE: i32 = -0xC;
+/// 0x080974C8: above -0x14 on the screen (+0x18) a rising swimmer is pushed by +0x10.
+const SCREEN_TOP_REACH: i32 = 0x14;
+const SCREEN_TOP_PUSH: i32 = 0x10;
+const LEAP_SMALL: i32 = -0x34;
+const LEAP: i32 = -0x36;
 const GOAL_WALK: i32 = 0x14;
 const RUN_MAX: i32 = 0x28;
 const P_MAX: i32 = 0x38;
@@ -172,6 +191,9 @@ pub enum Pose {
     /// Transformation smoke, tile 0x0817388C[i] (0x83, 0x82, 0x81, 0x80); the player is
     /// not drawn.
     Puff(u8),
+    /// Swimming: stroke step 0-5 (0x0813DE43), or paddling in place, step 0-3 (0x0813DE4F).
+    Swim(u8),
+    SwimIdle(u8),
 }
 
 impl Pose {
@@ -190,6 +212,8 @@ impl Pose {
             Pose::WhipAir(s) => a::PLAYER_WHIP_AIR + s as usize,
             Pose::Skid => a::PLAYER_SKID,
             Pose::Throw(s) => a::PLAYER_THROW + s as usize,
+            Pose::Swim(s) => a::PLAYER_SWIM + s as usize,
+            Pose::SwimIdle(s) => a::PLAYER_SWIM_IDLE + s as usize,
             Pose::ThrowAir(s) => a::PLAYER_THROW_AIR + s as usize,
             // Drawn from their own sheets; the standing cell as a fallback.
             Pose::Morph(_) | Pose::Puff(_) => a::PLAYER_WALK + STAND_STEP as usize,
@@ -260,6 +284,36 @@ pub struct Player {
     goal_walking: bool,
     /// Skidding this frame: the skid pose, and the skid dust follows (0x08097800).
     pub skidding: bool,
+    /// In water (+0x4C).
+    pub in_water: bool,
+    /// Strokes still showing (+0x4E) and the stroke's step (+0x54, stepped with the walk
+    /// cycle).
+    stroke: u8,
+    stroke_step: u8,
+    /// The swimming pose 0x08097724 picked this frame.
+    swim_pose: Option<Pose>,
+    /// Position (1/256 px) and ground flag at the start of this step and of the last one.
+    /// The ROM moves the player by last frame's speed before its update; the port moves by
+    /// the new speed after it, so its position runs a frame ahead. The water code
+    /// (0x0809588C, the swimming handlers) decides on what the ROM sees, the state a step
+    /// earlier, and a speed it changes redoes the last move (the ROM's move comes after it).
+    now: Option<(i32, i32, bool)>,
+    seen: (i32, i32, bool),
+    /// The camera y as of last frame, set by the game: the draw (0x080A6E0C) leaves the
+    /// player's screen y in +0x18 for the next update.
+    pub camera_y: i32,
+    /// Last step's handlers left the ground (a jump or stroke): the ROM's air flag changes
+    /// at once, only the collision's lags.
+    took_off: bool,
+    /// Went into or out of the water this frame (0x0809F4C8): the splash follows.
+    pub splash: Option<WaterChange>,
+}
+
+/// Into or out of the water.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaterChange {
+    In,
+    Out,
 }
 
 impl Player {
@@ -284,7 +338,12 @@ impl Player {
 
     /// Top-left of the ROM's 16x32 player frame, in pixels.
     pub fn frame(&self) -> (i32, i32) {
-        let (px, py) = self.px();
+        self.frame_at(self.x, self.y)
+    }
+
+    /// The frame for a box at (x, y), 1/256 px.
+    fn frame_at(&self, x: i32, y: i32) -> (i32, i32) {
+        let (px, py) = (x.div_euclid(SUB), y.div_euclid(SUB));
         (px + HITBOX_W / 2 - FRAME_W / 2, py + self.height() - FRAME_H)
     }
 
@@ -422,9 +481,32 @@ impl Player {
         }
         self.dither = (self.dither & 0xF0).wrapping_add(0x70);
 
-        self.horizontal(held);
-        self.vertical(held, pressed);
-        if self.is_raccoon() {
+        let last = self.now.replace((self.x, self.y, self.on_ground));
+        self.seen = last.unwrap_or((self.x, self.y, self.on_ground));
+        self.seen.2 &= !self.took_off;
+        let grounded = self.on_ground;
+        let mut pressed = pressed;
+        let (vx, vy) = (self.vx, self.vy);
+        self.splash = self.water(held, &mut pressed, map, frame);
+        if (vx, vy) != (self.vx, self.vy) {
+            self.x = self.seen.0 + self.vx;
+            self.y = self.seen.1 + self.vy;
+        }
+        if self.in_water {
+            // 0x0809588C steps the walk cycle (0x08097800) before the swimming handlers.
+            self.animate_walk(held);
+            self.swim_horizontal(held);
+            self.swim_vertical(pressed, frame);
+            self.swim_pose = None;
+            if !self.seen.2 {
+                self.stroke_pose(pressed, frame);
+            }
+        } else {
+            self.horizontal(held);
+            self.vertical(held, pressed);
+        }
+        self.took_off = grounded && !self.on_ground;
+        if self.is_raccoon() && !self.in_water {
             self.raccoon(pressed);
         }
         self.update_p_meter(frame);
@@ -432,11 +514,162 @@ impl Player {
         let head_hit = self.move_y(map);
         self.white_block(held, map);
         self.behind_scenery(map, frame);
-        if self.on_ground {
+        if self.on_ground && !self.in_water {
             self.animate_walk(held);
+        }
+        if self.on_ground && !self.in_water {
             self.skidding = self.skids(held);
         }
         head_hit
+    }
+
+    /// 0x0809588C: into the water when the head probe at frame (8, 0x14 small / 0x0A) is
+    /// in it. With the head out of it: on the ground, out of the water; in the air, out once
+    /// the foot probe at frame (8, 0x20) is in open air (tested while falling), otherwise
+    /// at the surface: the rise is held to -0xC, A does nothing and Up + A jumps out.
+    fn water(&mut self, held: Buttons, pressed: &mut Buttons, map: &Level, frame: u32) -> Option<WaterChange> {
+        let (fx, fy) = self.frame_at(self.seen.0, self.seen.1);
+        let ground = self.seen.2;
+        let dy = if self.form == Form::Small { 0x14 } else { 0x0A };
+        let (hx, hy) = ((fx + 8).div_euclid(TILE_PX), (fy + dy).div_euclid(TILE_PX));
+        let head_solid = map.at(hx, hy) != TileKind::Empty;
+        if !head_solid && map.is_water(hx, hy) {
+            if self.in_water {
+                return None;
+            }
+            self.in_water = true;
+            return Some(self.enter_or_leave_water(WaterChange::In));
+        }
+        if !self.in_water {
+            return None;
+        }
+        let vy = self.vy / UNIT;
+        if ground {
+            if head_solid {
+                return None;
+            }
+            return Some(self.leave_water());
+        }
+        if head_solid || vy >= 0 {
+            let (tx, ty) = ((fx + 8).div_euclid(TILE_PX), (fy + 0x20).div_euclid(TILE_PX));
+            if map.at(tx, ty) == TileKind::Empty && !map.is_water(tx, ty) {
+                return Some(self.leave_water());
+            }
+            if head_solid {
+                return None;
+            }
+        }
+        let mut rise = vy.max(SURFACE_RISE);
+        if frame & 7 == 0 {
+            rise += 1;
+        }
+        self.vy = rise * UNIT;
+        pressed.remove(Buttons::A);
+        if held.contains(Buttons::UP | Buttons::A) {
+            self.vy = if self.form == Form::Small { LEAP_SMALL } else { LEAP } * UNIT;
+            return Some(self.leave_water());
+        }
+        None
+    }
+
+    fn leave_water(&mut self) -> WaterChange {
+        self.in_water = false;
+        self.stroke = 0;
+        self.enter_or_leave_water(WaterChange::Out)
+    }
+
+    /// 0x0809F4C8: falling in (or walking out) stops the fall, and the motion across if in
+    /// the air; air bubbles come out (the game spawns them with the splash).
+    fn enter_or_leave_water(&mut self, change: WaterChange) -> WaterChange {
+        if self.vy >= 0 {
+            self.vy = 0;
+            if !self.seen.2 {
+                self.vx = 0;
+            }
+        }
+        change
+    }
+
+    /// 0x08096EB4 -> 0x08096D24 with the swimming table; friction applies in the water too.
+    fn swim_horizontal(&mut self, held: Buttons) {
+        let dir = match (held.contains(Buttons::LEFT), held.contains(Buttons::RIGHT)) {
+            (true, false) => -1,
+            (false, true) => 1,
+            _ => 0,
+        };
+        let (table, target) = if self.seen.2 { (SWIM_FLOOR, SWIM_FLOOR_MAX) } else { (SWIM_AIR, SWIM_MAX) };
+        let speed = self.vx / UNIT;
+        if dir == 0 {
+            if speed != 0 {
+                self.accelerate(if speed < 0 { -table[0] } else { table[0] });
+            }
+            return;
+        }
+        self.facing_left = dir < 0;
+        let delta = if speed != 0 && speed.signum() != dir {
+            table[2]
+        } else if speed.abs() == target {
+            return;
+        } else if speed.abs() < target {
+            table[1]
+        } else {
+            table[0]
+        };
+        self.accelerate(delta * dir);
+    }
+
+    /// 0x080974C8: A strokes; in the water the speed byte rises by 1 a frame, or every
+    /// other frame (bit 1 of the frame counter clear) while sinking.
+    fn swim_vertical(&mut self, pressed: Buttons, frame: u32) {
+        let mut vy = self.vy / UNIT;
+        if pressed.contains(Buttons::A) {
+            if self.seen.2 {
+                vy = STROKE;
+                self.on_ground = false;
+                self.seen.2 = false;
+            } else {
+                vy += STROKE;
+            }
+        }
+        if !self.seen.2 {
+            if vy < 0 || frame & 2 == 0 {
+                vy += 1;
+            }
+            // Rising more than 0x14 px above the top of the screen pushes back down.
+            let screen_y = self.frame_at(self.seen.0, self.seen.1).1 - self.camera_y;
+            if vy < 0 && screen_y < -SCREEN_TOP_REACH {
+                vy += SCREEN_TOP_PUSH;
+            }
+            if !(-SWIM_LIMIT..SWIM_LIMIT).contains(&vy) {
+                vy = if vy < 0 { -SWIM_LIMIT } else { SWIM_LIMIT };
+            }
+        }
+        self.vy = vy * UNIT;
+        self.flight = 0;
+    }
+
+    /// 0x08097724: a stroke starts on A (+0x4E counts the strokes to show, +0x54 restarts);
+    /// each shows for six walk-cycle steps, the last step held while the count runs down.
+    /// Without strokes and with no speed across, the paddling steps with the frame counter.
+    fn stroke_pose(&mut self, pressed: Buttons, frame: u32) {
+        if pressed.contains(Buttons::A) {
+            if self.stroke == 0 {
+                self.walk_timer = 0;
+            }
+            self.stroke_step = 0;
+            self.stroke = self.stroke.saturating_add(1);
+        }
+        self.swim_pose = Some(if self.stroke == 0 {
+            if self.vx / UNIT == 0 {
+                self.walk_step = ((frame >> 4) & 3) as u8;
+            }
+            Pose::SwimIdle(self.walk_step)
+        } else {
+            if self.stroke_step > 5 {
+                self.stroke -= 1;
+            }
+            Pose::Swim(self.stroke_step.min(5))
+        });
     }
 
     /// Adds `delta` (1/256 speed units) to the speed byte through the dithering accumulator.
@@ -623,6 +856,11 @@ impl Player {
             let step = (self.throw >> 2).min(2);
             return if self.on_ground { Pose::Throw(step) } else { Pose::ThrowAir(step) };
         }
+        // In water: the swimming pose the handler picked (before the collision, so it stays
+        // on the frame he lands), or 0x08097800's walking pose when it did not run.
+        if self.in_water {
+            return self.swim_pose.unwrap_or(Pose::Walk(self.walk_step));
+        }
         if self.whip != 0 && self.is_raccoon() {
             let step = (self.whip >> 2).min(4);
             return if self.on_ground { Pose::Whip(step) } else { Pose::WhipAir(step) };
@@ -702,6 +940,7 @@ impl Player {
         if self.walk_timer >= WALK_STEP_FRAMES[(speed >> 3).min(15)] {
             self.walk_timer = 0;
             self.walk_step = (self.walk_step + 1) & 3;
+            self.stroke_step = self.stroke_step.wrapping_add(1);
         }
         if !held.contains(Buttons::LEFT) && !held.contains(Buttons::RIGHT) && speed == 0 {
             self.walk_step = STAND_STEP;
@@ -911,6 +1150,99 @@ mod tests {
             }
             hit
         }
+    }
+
+    /// Drops a player into `test_pool` at column `col` and lets it settle on the floor of
+    /// the water.
+    fn in_pool(col: i32, form: Form) -> Sim {
+        let mut s = Sim { p: Player::spawn(col * TILE_PX, 0), map: crate::level::test_pool(), frame: 0, held: Buttons::empty() };
+        s.p.set_form(form);
+        s.run(Buttons::empty(), 300);
+        s
+    }
+
+    #[test]
+    fn falling_in_stops_the_fall_and_sinks_slowly_to_the_floor() {
+        let mut s = Sim { p: Player::spawn(3 * TILE_PX, 0), map: crate::level::test_pool(), frame: 0, held: Buttons::empty() };
+        let mut entered = None;
+        for _ in 0..200 {
+            s.run(Buttons::empty(), 1);
+            if s.p.splash == Some(WaterChange::In) {
+                entered = Some(s.p.vy);
+            }
+            if s.p.in_water {
+                assert!(s.p.vy <= SWIM_LIMIT * UNIT, "sinks at most 0x20");
+            }
+        }
+        assert_eq!(entered, Some(0), "0x0809F4C8 stops the fall on the way in");
+        assert!(s.p.in_water && s.p.on_ground);
+        assert_eq!(s.p.px().1 + s.p.height(), 7 * TILE_PX);
+    }
+
+    #[test]
+    fn a_stroke_from_the_floor_sets_minus_0x20_and_a_second_adds_to_it_within_the_limit() {
+        let mut s = in_pool(3, Form::Big);
+        s.run(Buttons::A, 1);
+        // -0x20, then +1 in the same frame (rising).
+        assert_eq!(s.p.vy, (STROKE + 1) * UNIT);
+        assert_eq!(s.p.pose(), Pose::Swim(0));
+        s.run(Buttons::empty(), 1);
+        s.run(Buttons::A, 1);
+        // -0x1E - 0x20 + 1, held at -0x20.
+        assert_eq!(s.p.vy, -SWIM_LIMIT * UNIT);
+    }
+
+    #[test]
+    fn swimming_speed_tops_out_at_0x18_and_8_on_the_floor() {
+        let mut s = in_pool(2, Form::Big);
+        s.run(Buttons::RIGHT, 40);
+        assert_eq!(s.p.vx, SWIM_FLOOR_MAX * UNIT);
+        // 0x30 / 256 a frame from 8 to 0x18, stroking now and then to stay off the floor.
+        for _ in 0..6 {
+            s.run(Buttons::RIGHT | Buttons::A, 1);
+            s.run(Buttons::RIGHT, 15);
+        }
+        assert!(!s.p.on_ground);
+        assert_eq!(s.p.vx, SWIM_MAX * UNIT);
+    }
+
+    #[test]
+    fn at_the_surface_a_does_nothing_and_up_a_jumps_out() {
+        for (form, leap) in [(Form::Big, LEAP), (Form::Small, LEAP_SMALL)] {
+            let mut s = in_pool(3, form);
+            // Stroke up to the surface and stay there.
+            for _ in 0..12 {
+                s.run(Buttons::A, 1);
+                s.run(Buttons::empty(), 7);
+            }
+            assert!(s.p.in_water, "{form:?}: A alone never leaves the water");
+            assert!(s.p.px().1 + s.p.height() > 4 * TILE_PX, "{form:?}: held at the surface");
+            let mut left = None;
+            for _ in 0..40 {
+                s.run(Buttons::UP | Buttons::A, 1);
+                if s.p.splash == Some(WaterChange::Out) {
+                    left = Some(s.p.vy);
+                    break;
+                }
+                s.run(Buttons::empty(), 1);
+            }
+            // Out of the water the land gravity runs the same frame: +1 with A held.
+            assert_eq!(left, Some((leap + GRAVITY_HOLD) * UNIT), "{form:?}");
+            assert!(!s.p.in_water);
+        }
+    }
+
+    #[test]
+    fn walking_out_onto_the_ledge_leaves_the_water() {
+        let mut s = in_pool(9, Form::Big);
+        // The ledge is 3 tiles up: swim up and over it.
+        let mut out = false;
+        for _ in 0..30 {
+            s.run(Buttons::RIGHT | Buttons::A | Buttons::UP, 1);
+            s.run(Buttons::RIGHT, 3);
+            out |= !s.p.in_water;
+        }
+        assert!(out);
     }
 
     #[test]

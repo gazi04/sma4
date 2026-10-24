@@ -65,9 +65,25 @@ pub struct LevelPlugin;
 
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_level, load_item_art, load_coin_frames, load_sparkle_frames, load_skid_dust_frames, load_debris))
+        app.add_systems(
+            Startup,
+            (spawn_level, load_item_art, load_coin_frames, load_sparkle_frames, load_skid_dust_frames, load_debris, load_water_art),
+        )
             .add_systems(Update, (debug_popup, load_pending_level, load_pending_area, load_pending_house, follow_area).chain())
-            .add_systems(Update, (sync_tiles, animate_tiles, sync_bumps, sync_items, sync_coins, sync_sparkles, sync_skid_dust, sync_debris))
+            .add_systems(
+                Update,
+                (
+                    sync_tiles,
+                    animate_tiles,
+                    sync_bumps,
+                    sync_items,
+                    sync_coins,
+                    sync_sparkles,
+                    sync_skid_dust,
+                    sync_debris,
+                    sync_water,
+                ),
+            )
             .add_systems(Update, sync_background.after(crate::player::CameraMoved));
     }
 }
@@ -203,6 +219,7 @@ fn core_level(level: &LevelAsset) -> Level {
         .with_slopes(level.slopes.clone())
         .with_start_camera_y(level.start_camera_y as i32)
         .with_pipe_flags(level.pipe_flags)
+        .with_water(level.water)
         .with_camera(level.camera)
 }
 
@@ -606,6 +623,41 @@ fn sync_debris(mut commands: Commands, game: Res<GameRes>, art: Res<DebrisImage>
             sprite.flip_y = flip_y;
             commands.spawn((DebrisSprite, sprite, Transform::from_xyz((x + 4) as f32, -((y + 4) as f32), Z_SPARKLE)));
         }
+    }
+}
+
+/// Water splash steps (16x16) and the air bubble (8x8).
+#[derive(Resource, Default)]
+struct WaterArt {
+    splash: Vec<Handle<Image>>,
+    bubble: Option<Handle<Image>>,
+}
+
+#[derive(Component)]
+struct WaterSprite;
+/// OBJ priority 1, over the level's tiles; under the player.
+const Z_WATER: f32 = 9.6;
+
+fn load_water_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMut<Assets<Image>>) {
+    let splash = crate::player::load_cells(&sma4_assets::splash_path(&dir.0), 16, 16, &mut images);
+    let bubble = crate::player::load_cells(&sma4_assets::bubble_path(&dir.0), 8, 8, &mut images).into_iter().next();
+    commands.insert_resource(WaterArt { splash, bubble });
+}
+
+/// Splashes (top-left at their x, y) and bubbles (swaying with the frame counter).
+fn sync_water(mut commands: Commands, game: Res<GameRes>, art: Res<WaterArt>, old: Query<Entity, With<WaterSprite>>) {
+    for e in &old {
+        commands.entity(e).despawn();
+    }
+    for s in &game.0.splashes {
+        let Some(image) = art.splash.get(s.step_index()) else { continue };
+        let at = Transform::from_xyz((s.x + 8) as f32, -((s.y + 8) as f32), Z_WATER);
+        commands.spawn((WaterSprite, Sprite::from_image(image.clone()), at));
+    }
+    let Some(image) = &art.bubble else { return };
+    for b in &game.0.bubbles {
+        let at = Transform::from_xyz((b.draw_x(game.0.frame) + 4) as f32, -((b.y + 4) as f32), Z_WATER);
+        commands.spawn((WaterSprite, Sprite::from_image(image.clone()), at));
     }
 }
 
