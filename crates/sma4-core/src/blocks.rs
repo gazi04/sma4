@@ -301,6 +301,8 @@ pub const HEAD_BUMP_PUSH: i32 = 0x20 * 16;
 /// was pressed during the bounce (+0x24 = 0xB).
 pub const NOTE_LAUNCH: i32 = -0x38 * 16;
 pub const NOTE_LAUNCH_HIGH: i32 = -0x70 * 16;
+/// Hit-result high nibble of the note block that launches to the sky.
+const SKY_RESULT: u8 = 0x10;
 
 impl Bump {
     /// One frame of the bump-block object (0x08084FBC). Returns an item to spawn, and
@@ -320,6 +322,12 @@ impl Bump {
             if self.from == HitFrom::Above {
                 player.vy = if self.high { NOTE_LAUNCH_HIGH } else { NOTE_LAUNCH };
                 player.on_ground = false;
+                // With A pressed during the bounce, a block whose result high nibble is 1
+                // (World 1-5's orange note block 0x71) sends the player up to the sky
+                // (+0x27 = 0x80, sounds 0x4A / 0x39).
+                if self.high && self.result & 0xF0 == SKY_RESULT {
+                    player.sky = crate::player::SKY_LAUNCH;
+                }
             }
             return (spawned, true);
         }

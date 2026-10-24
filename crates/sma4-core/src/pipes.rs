@@ -46,6 +46,9 @@ const UP_WINDOW: std::ops::RangeInclusive<i32> = 3..=12;
 /// Direction byte +0x4A / 0x03003BF1: 1 up, 2 down.
 pub const UP: u8 = 1;
 pub const DOWN: u8 = 2;
+/// Arriving from below by the sky flight (World 1-5's pointer to its coin heaven): no exit
+/// animation (0x08173018[7] = 0).
+pub const SKY_EXIT: u8 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pipe {
@@ -262,6 +265,34 @@ mod tests {
         run(&mut g, Buttons::empty(), EXIT_UP_FRAMES as u32);
         assert_eq!(g.pipe, None);
         assert_eq!(g.player.y - y, -(EXIT_UP_FRAMES as i32) * SLIDE);
+    }
+
+    /// World 1-5's orange note block: the sky flight leaves the top of the area and the
+    /// page's pointer (exit direction 7) puts the player at the bottom of the other area,
+    /// still rising.
+    #[test]
+    fn the_sky_flight_leaves_through_the_top_into_the_other_area() {
+        let sky = PipeExit { page: 0, x: 0x78, y: 0x180, dir: SKY_EXIT, camera_y: 0xF0 };
+        let level = area(0x82, 11, 0x154, sky);
+        let mut g = Game::new();
+        g.enter_level(level, (2 * 16, 176 - 16), &[]);
+        run(&mut g, Buttons::empty(), 2);
+        g.player.sky = crate::player::SKY_LAUNCH;
+        let mut frames = 0;
+        while g.pending_area.is_none() {
+            g.step(Buttons::empty());
+            frames += 1;
+            assert!(frames < 100, "flies up out of the area");
+            assert_eq!(g.player.vx, 0);
+        }
+        let to = g.pending_area.take().unwrap();
+        assert_eq!((to.level, to.exit), (0x154, sky));
+        g.enter_area(area(0x154, 11, 0x82, sky), &[], &to);
+        assert_eq!(g.player.frame(), (0x78, 0x180));
+        assert_eq!(g.pipe, None);
+        let y = g.player.y;
+        run(&mut g, Buttons::empty(), 10);
+        assert!(g.player.y < y, "still rising");
     }
 
     /// World 1-5's last pipe: an end-of-level pipe end (0xBD / 0xBE) hanging from the

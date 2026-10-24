@@ -50,7 +50,7 @@ struct EnemySprite;
 fn load_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMut<Assets<Image>>) {
     let mut art = HashMap::new();
     art.insert(enemies::WALKER, load_cells(&walker_path(&dir.0), 16, 16, &mut images));
-    for kind in [enemies::KOOPA, enemies::RED_KOOPA, enemies::PARATROOPA, enemies::RED_PARATROOPA] {
+    for kind in [enemies::KOOPA, enemies::RED_KOOPA, enemies::PARATROOPA, enemies::RED_PARATROOPA, enemies::BUZZY] {
         art.insert(kind, load_cells(&koopa_path(&dir.0, kind), KOOPA_CELL_W, KOOPA_CELL_H, &mut images));
     }
     for kind in [enemies::PARAGOOMBA, enemies::MICRO_PARAGOOMBA] {
@@ -193,13 +193,16 @@ fn sync_enemies(mut commands: Commands, game: Res<GameRes>, art: Res<Art>, old: 
 fn spawn_plant(commands: &mut Commands, image: &Handle<Image>, e: &enemies::Enemy) {
     let (x, y) = e.px();
     let top = y - PIRANHA_ORIGIN.1;
-    let shown = (e.home_y - top).clamp(0, KOOPA_CELL_H as i32);
-    if shown == 0 {
+    // A floor plant shows above its pipe top (`home_y`), a ceiling plant below its pipe's
+    // bottom edge (its home y too).
+    let cut = (e.home_y - top).clamp(0, KOOPA_CELL_H as i32);
+    let (from, to) = if e.is_ceiling_plant() { (cut, KOOPA_CELL_H as i32) } else { (0, cut) };
+    if to <= from {
         return;
     }
     let mut sprite = Sprite::from_image(image.clone());
-    sprite.rect = Some(Rect::new(0.0, 0.0, KOOPA_CELL_W as f32, shown as f32));
+    sprite.rect = Some(Rect::new(0.0, from as f32, KOOPA_CELL_W as f32, to as f32));
     let cx = x - PIRANHA_ORIGIN.0 + KOOPA_CELL_W as i32 / 2;
-    let cy = top as f32 + shown as f32 / 2.0;
+    let cy = top as f32 + (from + to) as f32 / 2.0;
     commands.spawn((EnemySprite, sprite, Transform::from_xyz(cx as f32, -cy, Z_ENEMY)));
 }

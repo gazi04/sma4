@@ -40,6 +40,10 @@ pub const KOOPA: u16 = 0x6C;
 pub const RED_KOOPA: u16 = 0x6D;
 /// Green Koopa Paratroopa: hops; loses its wings when stomped.
 pub const PARATROOPA: u16 = 0x6E;
+/// Buzzy Beetle (World 1-5): the walker main 0x08053704 and a Koopa's shell (0x0816A3E8
+/// = 0x45 like the Koopas), but fire-proof (0x0816A516[0x70] = 0x201: bit 0x200 bursts
+/// fireballs, 0x0808B2F0).
+pub const BUZZY: u16 = 0x70;
 /// Red Paratroopa (World 1-4): flies up and down in place (main 0x08053CDC).
 pub const RED_PARATROOPA: u16 = 0x6F;
 /// Paragoomba: hops and flutters; loses its wings when stomped.
@@ -55,23 +59,28 @@ pub const GOOMBA_PIPE: u16 = 0x195;
 pub const PIRANHA: u16 = 0xA0;
 /// Red Piranha Plant: comes 0x21 px out.
 pub const RED_PIRANHA: u16 = 0xA2;
+/// Red Piranha Plant hanging from a ceiling pipe (World 1-5; flags 0x0816E56E = 1, init
+/// 0x08055140: y + 16, +0x1A = 0x80).
+pub const CEILING_PIRANHA: u16 = 0xA3;
 /// Green Venus Fire Trap (SMB3's 0xA4, flags 0x80): comes 0x19 px out and spits fire.
 pub const FIRE_PIRANHA: u16 = 0xA4;
 /// Types that live in a pipe and are listed at its top row (ceiling variants 0xA1 / 0xA3 /
 /// 0xA5 / 0xA7 and the red Venus Fire Trap 0xA6 are not ported yet).
-pub const PIRANHA_TYPES: [u16; 3] = [PIRANHA, RED_PIRANHA, FIRE_PIRANHA];
+pub const PIRANHA_TYPES: [u16; 4] = [PIRANHA, RED_PIRANHA, CEILING_PIRANHA, FIRE_PIRANHA];
 /// Enemy types implemented so far.
-pub const SUPPORTED: [u16; 11] = [
+pub const SUPPORTED: [u16; 13] = [
     WALKER,
     KOOPA,
     RED_KOOPA,
     PARATROOPA,
     RED_PARATROOPA,
+    BUZZY,
     PARAGOOMBA,
     MICRO_PARAGOOMBA,
     BOOMERANG_BRO,
     PIRANHA,
     RED_PIRANHA,
+    CEILING_PIRANHA,
     FIRE_PIRANHA,
 ];
 
@@ -117,6 +126,8 @@ const MAX_FALL: i32 = 64 * 16;
 const WATER_GRAVITY: i32 = 16;
 const WATER_MAX_FALL: i32 = 0x10 * 16;
 const WATER_RISE: i32 = -0x18 * 16;
+/// A sliding shell's speed byte while on the floor (0x080441A4).
+const KICKED_FLOOR_SPEED: i32 = 0x0C * 16;
 /// Paratroopa (0x08053704, type 0x6E): on landing the speed byte becomes 0xD0, and each
 /// frame in the air it is lowered by one more (gravity 2 instead of 3).
 const HOP_SPEED: i32 = -48 * 16;
@@ -438,6 +449,8 @@ impl Enemy {
 
     /// A Piranha Plant in the pipe whose top is at pixel `(x, y)` (left column, top row).
     fn plant(kind: u16, x: i32, y: i32) -> Self {
+        // 0x08055140: a ceiling plant starts 16 px lower, hanging below its pipe.
+        let y = if kind == CEILING_PIRANHA { y + TILE_PX } else { y };
         Self {
             kind,
             x: (x + PLANT_X) * SUB,
@@ -452,7 +465,7 @@ impl Enemy {
             wall_hit: None,
             knockouts: 0,
             home_y: y,
-            reach: if kind == RED_PIRANHA { RED_PLANT_REACH } else { PLANT_REACH },
+            reach: if matches!(kind, RED_PIRANHA | CEILING_PIRANHA) { RED_PLANT_REACH } else { PLANT_REACH },
             chomp: 0,
             looks_right: false,
             looks_up: false,
@@ -497,13 +510,18 @@ impl Enemy {
         matches!(self.state, EnemyState::Plant { phase: 1..=3, .. })
     }
 
+    /// Hangs from a ceiling pipe (flags 0x0816E56E bit 0; +0x1A bit 7).
+    pub fn is_ceiling_plant(&self) -> bool {
+        self.kind == CEILING_PIRANHA
+    }
+
     /// Spits fire (flags 0x0816E56E bit 7).
     pub fn is_fire_plant(&self) -> bool {
         self.kind == FIRE_PIRANHA
     }
 
     pub fn is_koopa(&self) -> bool {
-        matches!(self.kind, KOOPA | RED_KOOPA | PARATROOPA | RED_PARATROOPA)
+        matches!(self.kind, KOOPA | RED_KOOPA | PARATROOPA | RED_PARATROOPA | BUZZY)
     }
 
     /// Can hurt, be stomped or be knocked out.
@@ -548,7 +566,7 @@ impl Enemy {
                     // With slopes the wall is only flagged; a Goomba (0x0816AAF7 bit 1)
                     // steps back out of it after the floor test, turning at most once
                     // every 0x10 frames (+0x27).
-                    if level.has_slopes() && matches!(self.kind, WALKER | KOOPA) {
+                    if level.has_slopes() && matches!(self.kind, WALKER | KOOPA | BUZZY) {
                         self.x -= self.vx;
                         if self.turn_wait == 0 {
                             self.turn_wait = TURN_WAIT;
@@ -568,11 +586,31 @@ impl Enemy {
             EnemyState::Kicked => {
                 // 0x08042FF0: the wall probe's cell is hit like a head hit (0x08042EF8 ->
                 // 0x0809FC1C(4)), then the shell turns around.
-                if self.move_x(level) {
-                    self.wall_hit = Some(self.wall_probe());
-                    self.vx = -self.vx;
+                // 0x080441A4: 0x08049EC0 moves across and down, then the probes (the wall
+                // one in slope tilesets at the new y, before the floor snaps it); on the
+                // floor the speed byte is set to 0x0C every frame, so the shell leaves a
+                // ledge already falling (0x0C + 3).
+                let landed = if level.has_slopes() {
+                    self.x += self.water_vx();
+                    let old_bottom = self.px().1 + self.height();
+                    self.y += self.vy;
+                    let wall = self.vx != 0 && self.slope_wall(level);
+                    let landed = self.fall_moved(level, old_bottom);
+                    if wall {
+                        self.wall_hit = Some(self.wall_probe());
+                        self.vx = -self.vx;
+                    }
+                    landed
+                } else {
+                    if self.move_x(level) {
+                        self.wall_hit = Some(self.wall_probe());
+                        self.vx = -self.vx;
+                    }
+                    self.fall(level)
+                };
+                if landed {
+                    self.vy = KICKED_FLOOR_SPEED;
                 }
-                self.fall(level);
             }
             EnemyState::Dead => {
                 self.x += self.vx;
@@ -600,7 +638,15 @@ impl Enemy {
             self.looks_right = fx - x >= 0;
             self.looks_up = fy - y < 0;
         }
-        let advance = match phase {
+        // Main 0x08055C88: a ceiling plant (+0x1A bit 7) runs handler (phase + 2) & 3: it
+        // waits in its pipe with 0x08055B34, comes down with 0x08055C04 (to home), waits out
+        // with 0x08055A24 and goes back up with 0x08055AFC; neither wait has the shy test
+        // (flags bit 0) and a red one does not spit.
+        let ceiling = self.is_ceiling_plant();
+        let handler = if ceiling { (phase + 2) & 3 } else { phase };
+        let advance = match handler {
+            0 if ceiling => timer == 0,
+            2 if ceiling => timer == 0,
             // 0x08055A24: once the timer runs out, come out unless the player is close.
             0 => {
                 let d = (player.centre().0 - (self.px().0 + SIZE / 2)) as u8;
@@ -1139,7 +1185,7 @@ impl Enemy {
         let (ex, ey) = self.px();
         if self.is_plant() {
             let (dx, bw, dy) = PLANT_BOX;
-            let bh = if self.kind == RED_PIRANHA { RED_PLANT_BOX_H } else { PLANT_BOX_H };
+            let bh = if matches!(self.kind, RED_PIRANHA | CEILING_PIRANHA) { RED_PLANT_BOX_H } else { PLANT_BOX_H };
             return ex + dx < x + w && x < ex + dx + bw && ey + dy < y + h && y < ey + dy + bh;
         }
         if self.kind == BOOMERANG_BRO {
@@ -1279,18 +1325,19 @@ impl Enemy {
         true
     }
 
-    /// A player fireball at `(x, y)` px (8x8, flying in direction `dir`) hits this enemy
+    /// A fireball at `(x, y)` px (8x8, flying in direction `dir`) hits this enemy
     /// (0x0808B2F0): box 0x08169F44[+0x64 & 0x3F] widened by 8 px to the left and 0xE px
     /// up. The enemy is knocked out (state 6, speed 0xCC up and 0x0C away; plants puff).
-    /// Returns whether it hit.
-    pub fn fireball_hit(&mut self, (x, y): (i32, i32), dir: i32) -> bool {
+    /// A player fireball at `(x, y)`: None if it misses, Some(true) if it knocks the
+    /// object out, Some(false) if it only bursts (a fire-proof object).
+    pub fn fireball_hit(&mut self, (x, y): (i32, i32), dir: i32) -> Option<bool> {
         if !self.alive() || (self.is_plant() && !self.plant_visible()) {
-            return false;
+            return None;
         }
         let (ex, ey) = self.px();
         let (dx, w, dy, h) = if self.is_plant() {
             let (dx, w, dy) = PLANT_BOX;
-            (dx, w, dy, if self.kind == RED_PIRANHA { RED_PLANT_BOX_H } else { PLANT_BOX_H })
+            (dx, w, dy, if matches!(self.kind, RED_PIRANHA | CEILING_PIRANHA) { RED_PLANT_BOX_H } else { PLANT_BOX_H })
         } else if self.kind == BOOMERANG_BRO {
             BRO_BOX
         } else {
@@ -1299,7 +1346,10 @@ impl Enemy {
         let vertical = (y - (ey + dy) + 0xE) as u16 as i32;
         let across = (x - (ex + dx) + 8) as u16 as i32;
         if vertical >= h + 0xE || across >= w + 8 {
-            return false;
+            return None;
+        }
+        if self.kind == BUZZY {
+            return Some(false);
         }
         if self.is_plant() {
             self.puff();
@@ -1309,7 +1359,7 @@ impl Enemy {
             self.vy = FIRE_KNOCKOUT;
             self.vx = dir * FIRE_DRIFT;
         }
-        true
+        Some(true)
     }
 
     /// Knocked out by a shell moving in direction `dir`.
@@ -1329,6 +1379,8 @@ impl Enemy {
         match (self.state, self.kind) {
             // 0x0805564C: frame (+0x3C >> 3) & 1, +2 (no stem) while less than 0x11 px out.
             (EnemyState::Plant { .. }, _) => {
+                // (A ceiling plant's draw flips this too: its +2 frames are the ones with
+                // the stem, shown near home where it hangs out of its pipe.)
                 let low = if self.home_y - self.px().1 < PLANT_LOW { PIRANHA_LOW } else { 0 };
                 let frame = ((self.chomp >> 3) & 1) as usize + low;
                 if self.is_fire_plant() {
@@ -2279,6 +2331,40 @@ mod tests {
             frames += 1;
         }
         assert_eq!(frames, PUFF_TIME as u32);
+    }
+
+    #[test]
+    fn ceiling_plants_hang_out_below_their_pipe_then_go_up_into_it_even_with_the_player_near() {
+        let lvl = level();
+        let s = EnemySpawn { kind: CEILING_PIRANHA, col: 10, row: 3, ..Default::default() };
+        // The player right under it: a ceiling plant has no shy test.
+        let p = Player::spawn(10 * 16 + 8, 6 * 16);
+        let mut e = Enemy::spawn(&s, &p);
+        assert_eq!((e.px().1, e.home_y), (4 * 16, 4 * 16), "16 px below its row, at home");
+        let (mut top, mut bottom) = (i32::MAX, i32::MIN);
+        for f in 0..0x200 {
+            e.step(&lvl, &p, f);
+            top = top.min(e.px().1);
+            bottom = bottom.max(e.px().1);
+        }
+        assert_eq!((top, bottom), (4 * 16 - RED_PLANT_REACH, 4 * 16));
+    }
+
+    #[test]
+    fn buzzy_beetles_are_fire_proof_and_leave_a_shell_when_stomped() {
+        let p = Player::spawn(0, 0);
+        let mut e = Enemy::spawn(&enemy(BUZZY, 8), &p);
+        let (x, y) = e.px();
+        assert_eq!(e.fireball_hit((x + 4, y + 4), 1), Some(false), "the fireball bursts");
+        assert_eq!(e.state, EnemyState::Walking);
+        // Landing on it.
+        let mut p = Player::spawn(x + 2, y - 12);
+        p.vy = 16;
+        assert_eq!(e.contact(&p), Contact::Stomped);
+        assert!(matches!(e.state, EnemyState::Shell(_)));
+        let mut g = Enemy::spawn(&enemy(WALKER, 8), &p);
+        let (gx, gy) = g.px();
+        assert_eq!(g.fireball_hit((gx + 4, gy + 4), 1), Some(true), "a Goomba is knocked out");
     }
 
     #[test]

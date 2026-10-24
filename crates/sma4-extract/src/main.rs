@@ -147,8 +147,10 @@ fn run(args: &Args) -> Result<(), String> {
         {
             levels.push((j.level, j.tileset, j.enemies));
         }
-        // World 1-5's water splash and air bubble.
+        // World 1-5 loads the Buzzy Beetle's graphics.
         if id == BUZZY_LEVEL {
+            objects::extract_koopa_kind(&rom, &mut m, &args.out, 0x70).map_err(|e| e.0)?;
+            objects::extract_ceiling_piranha(&rom, &mut m, &args.out).map_err(|e| e.0)?;
             objects::extract_water(&rom, &m, &args.out).map_err(|e| e.0)?;
         }
         // World 1-4 loads the lift's graphics.

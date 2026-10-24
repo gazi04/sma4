@@ -224,7 +224,13 @@ impl Game {
         self.level.start_camera_y = Some(to.exit.camera_y as i32);
         self.camera_zones.set(to.exit.camera_y as i32);
         pipes::place(&mut self.player, &to.exit);
-        self.pipe = Some(Pipe::exit(to.exit.dir));
+        // Arriving by the sky flight (exit direction 7): still rising.
+        if to.exit.dir == pipes::SKY_EXIT {
+            self.pipe = None;
+            self.player.sky = player::SKY_ARRIVAL;
+        } else {
+            self.pipe = Some(Pipe::exit(to.exit.dir));
+        }
         self.level_generation = self.level_generation.wrapping_add(1);
     }
 
@@ -619,6 +625,16 @@ impl Game {
         if self.step_house(pressed, frozen) {
             return;
         }
+        // 0x080A8000: flying out of the top of the area (+0x27 sky flight, frame y < 0):
+        // the area switch 0x03003CA0 = 3, by the pointer for the page the player is on.
+        if self.player.sky < 0
+            && self.player.frame().1 < 0
+            && let Some(to) = pipes::destination(&self.level, &self.player)
+        {
+            self.pending_area = Some(to);
+            self.pipe = Some(Pipe::Switching);
+            return;
+        }
         // 0x0808C068 -> 0x0808BFEC: a free slot (a bursting fireball still holds its own).
         if self.player.wants_fireball(self.input.pressed) && self.player_fireballs.len() < fire::FIREBALL_SLOTS {
             self.player_fireballs.push(fire::PlayerFireball::thrown(&self.player));
@@ -805,10 +821,15 @@ impl Game {
             }
             let mut hit = false;
             for e in &mut self.enemies {
-                if e.fireball_hit(f.px(), f.vx.signum()) {
-                    hit = true;
-                    let (x, y) = e.px();
-                    self.status.popup(x, y, FIRE_POPUP);
+                match e.fireball_hit(f.px(), f.vx.signum()) {
+                    Some(true) => {
+                        hit = true;
+                        let (x, y) = e.px();
+                        self.status.popup(x, y, FIRE_POPUP);
+                    }
+                    // Fire-proof (Buzzy Beetle): the fireball just bursts (sound 0x60).
+                    Some(false) => hit = true,
+                    None => {}
                 }
             }
             if hit {

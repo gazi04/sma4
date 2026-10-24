@@ -50,9 +50,9 @@ back once he rises over 0x14 px above the top of the screen, he swims across at 
 your ROM. Falling in stops the fall (and the motion across); at the surface he bobs and A
 does nothing; Up + A jumps out. Going in or out splashes (six steps, extracted from your
 ROM), diving in lets out three bubbles, and he breathes out a bubble every 0x80 frames
-(0x40 while moving); bubbles rise, sway and pop at the surface. Shells
+(0x40 while moving); bubbles rise, sway and pop at the surface. Buzzy Beetles and shells
 that fall in splash too and sink slowly (gravity 1, at most 0x10, shells at half speed).
-Swimming, the splash, the bubbles and the kicked shells in the pools
+Swimming, the splash, the bubbles and the Buzzy Beetles and kicked shells in the pools
 were checked frame by frame against the ROM's own routines run in an emulator.
 
 The camera now scrolls up and down as in the ROM in every level (checked frame by frame
@@ -64,7 +64,8 @@ flies; each level's settings are extracted from your ROM. Views taller than the 
 show more above, with the bottom of the level kept at the bottom. World 1-5's camera
 triggers work on it: over the note-block stretch (two 0xC8 boxes) the camera heads for
 the bottom of the level, and near the end (an 0xE0 / 0xE1 band) it stays up while Mario is
-above the band's row.
+above the band's row. Sliding shells keep the ROM's floor speed (0x0C), so they leave
+ledges and drop into one-tile gaps as in the ROM.
 Debug: `--level 82 --spawn-col 26` starts in the first pool.
 
 Current state: World 1-1 is drawn natively (Bevy `TilemapChunk`) from the ROM's tiles and

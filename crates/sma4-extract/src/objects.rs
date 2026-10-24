@@ -442,54 +442,7 @@ pub fn extract_koopas(
     out_dir: &std::path::Path,
 ) -> Result<(), ExtractError> {
     for kind in [0x6Cu16, 0x6D] {
-        let walk = |f: u8| [(0x17, f)];
-        let (w0, w1) = (walk(0), walk(1));
-        let shell = [(0x17, 2), (0x34, 0xFF)];
-        let waking = [(0x17, 2), (0x34, 0x02)];
-        let spin: Vec<[(u32, u8); 1]> = (0..4).map(|k| [(SPIN_COUNTER, k * 2)]).collect();
-        let mut poses = vec![
-            Pose {
-                kind,
-                state: 2,
-                draw: FN_DRAW_WALKER,
-                bytes: &w0,
-                globals: &[],
-            },
-            Pose {
-                kind,
-                state: 2,
-                draw: FN_DRAW_WALKER,
-                bytes: &w1,
-                globals: &[],
-            },
-            Pose {
-                kind,
-                state: 3,
-                draw: FN_DRAW_SHELL,
-                bytes: &shell,
-                globals: &[],
-            },
-            Pose {
-                kind,
-                state: 3,
-                draw: FN_DRAW_SHELL,
-                bytes: &waking,
-                globals: &[],
-            },
-        ];
-        for g in &spin {
-            poses.push(Pose {
-                kind,
-                state: 5,
-                draw: FN_DRAW_SPIN,
-                bytes: &[],
-                globals: g,
-            });
-        }
-        oam::render(m, rom.bytes(), &poses)?
-            .write_png(&koopa_path(out_dir, kind))
-            .map_err(|e| ExtractError(e.to_string()))?;
-        println!("  koopa {kind:#x}: {} frames", poses.len());
+        extract_koopa_kind(rom, m, out_dir, kind)?;
     }
     let para: Vec<[(u32, u8); 2]> = [0u8, 2, 4, 6]
         .iter()
@@ -616,6 +569,22 @@ pub fn extract_piranhas(
     }
     extract_fire_piranha(rom, m, out_dir)?;
     extract_fireball(rom, m, out_dir)
+}
+
+/// The red Piranha Plant hanging from a ceiling pipe (0xA3, World 1-5): the same draw
+/// 0x0805564C with +0x1A = 0x80 (init 0x08055140), which flips it; cells as for 0xA2.
+pub fn extract_ceiling_piranha(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::piranha_path;
+    let kind = 0xA3u16;
+    let bytes: Vec<[(u32, u8); 5]> = [(PIRANHA_OUT, 0), (PIRANHA_OUT, 8), (PIRANHA_LOW, 0), (PIRANHA_LOW, 8)]
+        .iter()
+        .map(|&(home, chomp)| [(0x09, PIRANHA_Y), (0x3A, home), (0x1C, 0x11), (0x3C, chomp), (0x1A, 0x80)])
+        .collect();
+    let poses: Vec<Pose> =
+        bytes.iter().map(|b| Pose { kind, state: 2, draw: FN_DRAW_PIRANHA, bytes: b, globals: &[] }).collect();
+    oam::render(m, rom.bytes(), &poses)?.write_png(&piranha_path(out_dir, kind)).map_err(|e| ExtractError(e.to_string()))?;
+    println!("  piranha {kind:#x}: {} frames", poses.len());
+    Ok(())
 }
 
 /// Venus Fire Trap 0xA4: the same draw routine, which for fire plants (0x0816E56E bit 7)
@@ -1598,3 +1567,58 @@ pub fn extract_lift(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Re
 
 const RED_PARATROOPA: u16 = 0x6F;
 const RED_PARATROOPA_CELLS: u8 = 8;
+
+
+/// One Koopa-like sheet (walk 0 / 1, shell, waking shell, spin 0-3) for `kind`; also the
+/// Buzzy Beetle (0x70, drawn by the same routines), whose graphics only World 1-5 loads.
+pub fn extract_koopa_kind(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path, kind: u16) -> Result<(), ExtractError> {
+        let walk = |f: u8| [(0x17, f)];
+        let (w0, w1) = (walk(0), walk(1));
+        let shell = [(0x17, 2), (0x34, 0xFF)];
+        let waking = [(0x17, 2), (0x34, 0x02)];
+        let spin: Vec<[(u32, u8); 1]> = (0..4).map(|k| [(SPIN_COUNTER, k * 2)]).collect();
+        let mut poses = vec![
+            Pose {
+                kind,
+                state: 2,
+                draw: FN_DRAW_WALKER,
+                bytes: &w0,
+                globals: &[],
+            },
+            Pose {
+                kind,
+                state: 2,
+                draw: FN_DRAW_WALKER,
+                bytes: &w1,
+                globals: &[],
+            },
+            Pose {
+                kind,
+                state: 3,
+                draw: FN_DRAW_SHELL,
+                bytes: &shell,
+                globals: &[],
+            },
+            Pose {
+                kind,
+                state: 3,
+                draw: FN_DRAW_SHELL,
+                bytes: &waking,
+                globals: &[],
+            },
+        ];
+        for g in &spin {
+            poses.push(Pose {
+                kind,
+                state: 5,
+                draw: FN_DRAW_SPIN,
+                bytes: &[],
+                globals: g,
+            });
+        }
+        oam::render(m, rom.bytes(), &poses)?
+            .write_png(&koopa_path(out_dir, kind))
+            .map_err(|e| ExtractError(e.to_string()))?;
+        println!("  koopa {kind:#x}: {} frames", poses.len());
+    Ok(())
+}

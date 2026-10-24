@@ -39,6 +39,9 @@ pub const THROW_TIME: u8 = 0xB;
 /// White block (0x0809E164): its top tiles, the crouch time and the drop.
 const WHITE_BLOCK: [u8; 3] = [0x25, 0x26, 0x27];
 pub const WHITE_BLOCK_TIME: u8 = 0xF0;
+/// Sky flight starts (+0x27): from the note block, and arriving in the area above.
+pub const SKY_LAUNCH: i8 = -0x80;
+pub const SKY_ARRIVAL: i8 = -0x30;
 const WHITE_BLOCK_DROP: i32 = 6;
 // Swimming (0x08096EB4, 0x080974C8; table 0x08172C96 from index 0x40 on the floor of the
 // water, 0x44 swimming): friction, acceleration, against the motion; the top speed is
@@ -275,6 +278,9 @@ pub struct Player {
     pub throw: u8,
     /// Frames crouched on a white block (+0x49, 0x0809E164).
     white_block: u8,
+    /// Sky flight (+0x27, negative while it runs): 0x80 from an orange note block, 0xD0
+    /// arriving in the area above (0x080A8000).
+    pub sky: i8,
     /// Behind the scenery (0x03003D06): 0xF0, -1 on odd frames, held at 1 while the player
     /// is inside scenery.
     pub behind: u8,
@@ -463,6 +469,14 @@ impl Player {
             self.morph -= 1;
             return None;
         }
+        // 0x080A8000: sky flight: no speed across; the y speed byte is +0x27, which counts
+        // up to 0 one a frame. In the ROM the player moves +0x27 + 1 a frame (checked in
+        // mGBA: 126, 125, ... / 16 px after +0x27 = 0x80).
+        let flying = self.sky < 0;
+        if flying {
+            self.vx = 0;
+            self.sky += 1;
+        }
         // Per-frame timers of the player loop (0x08094780: bytes +0x64..+0x70).
         self.p_timer = self.p_timer.saturating_sub(1);
         self.wag = self.wag.saturating_sub(1);
@@ -506,6 +520,10 @@ impl Player {
             self.vertical(held, pressed);
         }
         self.took_off = grounded && !self.on_ground;
+        if flying {
+            self.vx = 0;
+            self.vy = (self.sky as i32 + 1) * UNIT;
+        }
         if self.is_raccoon() && !self.in_water {
             self.raccoon(pressed);
         }
@@ -995,11 +1013,23 @@ impl Player {
             None
         } else {
             let ty = py.div_euclid(TILE_PX);
+            // Hidden blocks (World 1-5's 0x46): passable tiles with a bump behaviour stop
+            // the head-centre probe from below only (checked in mGBA: the head turns there
+            // and the tile becomes 0x71).
+            let centre_tx = (px + HITBOX_W / 2).div_euclid(TILE_PX);
+            if map.at(centre_tx, ty) == TileKind::Empty
+                && map.metatile(centre_tx, ty).is_some_and(|m| {
+                    m < 0x100 && map.rules.bump_behaviour[m as usize] != sma4_assets::BlockRules::NOT_BUMPABLE
+                })
+            {
+                self.y = (ty + 1) * TILE_PX * SUB;
+                self.vy = 0;
+                return Some((centre_tx, ty));
+            }
             if cols.clone().any(|tx| map.at(tx, ty) == TileKind::Solid) {
                 self.y = (ty + 1) * TILE_PX * SUB;
                 self.vy = 0;
                 // The ROM's head-centre probe (probe 1) decides which block was hit.
-                let centre_tx = (px + HITBOX_W / 2).div_euclid(TILE_PX);
                 return (map.at(centre_tx, ty) == TileKind::Solid).then_some((centre_tx, ty));
             }
             None
