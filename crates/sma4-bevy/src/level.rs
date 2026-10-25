@@ -91,7 +91,7 @@ impl Plugin for LevelPlugin {
 /// One tilemap per background animation frame (spinning coins and blocks); only the
 /// current frame's is visible. Swapping visibility avoids rebuilding a chunk.
 #[derive(Component)]
-struct LevelTiles(usize);
+pub struct LevelTiles(pub usize);
 
 #[derive(Component)]
 struct BumpSprite;
@@ -446,7 +446,8 @@ fn sync_tiles(
 fn animate_tiles(game: Res<GameRes>, mut maps: Query<(&LevelTiles, &mut Visibility)>) {
     let current = anim_frame(game.0.frame);
     for (map, mut vis) in &mut maps {
-        let want = if map.0 == current { Visibility::Inherited } else { Visibility::Hidden };
+        // The crushing ceiling's split draws copies instead (`crate::fortress`).
+        let want = if map.0 == current && game.0.level.shift.is_none() { Visibility::Inherited } else { Visibility::Hidden };
         if *vis != want {
             *vis = want;
         }

@@ -6,6 +6,7 @@
 //! `sma4-extract` from the user's own ROM); it never opens the ROM itself.
 
 mod enemies;
+mod fortress;
 mod goal;
 mod toad_house;
 mod hud;
@@ -220,6 +221,7 @@ fn main() -> AppExit {
                 level::LevelPlugin,
                 player::PlayerPlugin,
                 enemies::EnemyPlugin,
+                fortress::FortressPlugin,
                 goal::GoalPlugin,
                 toad_house::ToadHousePlugin,
                 hud::HudPlugin,

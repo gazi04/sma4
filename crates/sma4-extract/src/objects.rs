@@ -1622,3 +1622,108 @@ pub fn extract_koopa_kind(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path,
         println!("  koopa {kind:#x}: {} frames", poses.len());
     Ok(())
 }
+
+/// Mini-fortress draw routines (see `sma4_core::fortress`, `sma4_core::boom_boom`).
+const FN_DRAW_ROTO_DISC: u32 = 0x0804_6C50;
+const FN_DRAW_DRY_BONES: u32 = 0x0806_EC40;
+const FN_DRAW_BOOM_BOOM: u32 = 0x0806_CCDC;
+const FN_DRAW_BALL: u32 = 0x0804_7400;
+const FN_DRAW_CHEST: u32 = 0x0804_705C;
+const FN_EMBER: u32 = 0x0808_F6E4;
+const FN_LAVA_SPLASH: u32 = 0x0808_F7E4;
+const FN_SPARK: u32 = 0x0808_E480;
+const FN_SMOKE: u32 = 0x0808_F568;
+/// Projectile slots: type +0x0E; the frame counter's copy 0x03003CF6 picks the sparks'
+/// palette; 0x03003754 is the camera y the splash reads.
+const SPIN_CLOCK: u32 = 0x0300_3CF6;
+const CAMERA_Y2: u32 = 0x0300_3754;
+const FRAMES: u32 = 0x0300_3AE8;
+/// 0x0816F096[item] bit 7: the item is drawn with 0x080475D4 rather than 0x0804705C.
+const CHEST_ITEM_DRAW: u32 = 0x0816_F096;
+const WARP_WHISTLE: u8 = 0x0C;
+
+/// A projectile slot at the drawing position (x +0, y +4; +8 / +0xA speeds).
+fn projectile(kind: u8, extra: &[(u32, u8)]) -> Vec<(u32, u8)> {
+    let mut b = vec![(0x05, oam::AT as u8), (0x08, 0), (0x09, 0), (0x0E, kind), (0xCCD, FIREBALL_OAM), (0xCD2, 0)];
+    b.extend_from_slice(extra);
+    b
+}
+
+fn write_sheet(
+    rom: &Rom,
+    m: &mut Machine,
+    out_dir: &std::path::Path,
+    sheet: sma4_assets::FortressSheet,
+    poses: &[Pose],
+) -> Result<(), ExtractError> {
+    debug_assert_eq!(poses.len() as u32, sheet.cells);
+    oam::render_cells(m, rom.bytes(), poses, sheet.cell, sheet.origin)?
+        .write_png(&sheet.path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))
+}
+
+/// The mini-fortress's objects, with level 0x1CB's object graphics loaded.
+pub fn extract_fortress(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::*;
+    let paused = [(PAUSED, 0)];
+    // Podoboo: 0x080475D4 with frame +0x17, falling = +0x1A bit 7.
+    let bytes: Vec<[(u32, u8); 2]> = (0..6).map(|i| [(0x17, i % 3), (0x1A, if i >= 3 { 0x80 } else { 0 })]).collect();
+    let poses: Vec<Pose> = bytes.iter().map(|b| Pose { kind: 0x9E, state: 2, draw: FN_DRAW_ITEM, bytes: b, globals: &[] }).collect();
+    write_sheet(rom, m, out_dir, PODOBOO_SHEET, &poses)?;
+    // Embers: step +0x13, +0x15 kept non-zero so the step stays.
+    let bytes: Vec<Vec<(u32, u8)>> = (0..3).map(|s| projectile(0x17, &[(0x13, s), (0x15, 1)])).collect();
+    let poses: Vec<Pose> = bytes.iter().map(|b| Pose { kind: 0, state: 0, draw: FN_EMBER, bytes: b, globals: &paused }).collect();
+    write_sheet(rom, m, out_dir, EMBER_SHEET, &poses)?;
+    // Lava splash: +0x15 = 4 * step + 1.
+    let globals = [(PAUSED, 0), (CAMERA_Y2, 0), (CAMERA_Y2 + 1, 0)];
+    let bytes: Vec<Vec<(u32, u8)>> = (0..6).map(|s| projectile(0x18, &[(0x15, s * 4 + 1)])).collect();
+    let poses: Vec<Pose> = bytes.iter().map(|b| Pose { kind: 0, state: 0, draw: FN_LAVA_SPLASH, bytes: b, globals: &globals }).collect();
+    write_sheet(rom, m, out_dir, LAVA_SPLASH_SHEET, &poses)?;
+    // Roto-Disc: frame +0x17 = counter & 1, the counter itself for the flips.
+    let globals: Vec<[(u32, u8); 1]> = (0..16).map(|f| [(FRAMES, f)]).collect();
+    let bytes: Vec<[(u32, u8); 2]> = (0..16).map(|f| [(0x17, f & 1), (0x2C, f >> 2)]).collect();
+    let poses: Vec<Pose> = (0..16)
+        .map(|i| Pose { kind: 0x5A, state: 2, draw: FN_DRAW_ROTO_DISC, bytes: &bytes[i], globals: &globals[i] })
+        .collect();
+    write_sheet(rom, m, out_dir, ROTO_DISC_SHEET, &poses)?;
+    // Dry Bones: frame +0x17, facing right = +0x1A bit 6.
+    let bytes: Vec<[(u32, u8); 2]> = (0..8).map(|i| [(0x17, i % 4), (0x1A, if i >= 4 { 0x40 } else { 0 })]).collect();
+    let poses: Vec<Pose> = bytes.iter().map(|b| Pose { kind: 0x3F, state: 2, draw: FN_DRAW_DRY_BONES, bytes: b, globals: &[] }).collect();
+    write_sheet(rom, m, out_dir, DRY_BONES_SHEET, &poses)?;
+    // Boom Boom: frame +0x17, facing right = +0x1A bit 6.
+    let bytes: Vec<[(u32, u8); 3]> =
+        (0..24).map(|i| [(0x17, i % 12), (0x1A, if i >= 12 { 0x40 } else { 0 }), (0x14, 0)]).collect();
+    let poses: Vec<Pose> = bytes.iter().map(|b| Pose { kind: 0x4B, state: 2, draw: FN_DRAW_BOOM_BOOM, bytes: b, globals: &[] }).collect();
+    write_sheet(rom, m, out_dir, BOOM_BOOM_SHEET, &poses)?;
+    let poses = [Pose { kind: 0x4A, state: 2, draw: FN_DRAW_BALL, bytes: &[], globals: &[] }];
+    write_sheet(rom, m, out_dir, BALL_SHEET, &poses)?;
+    // Sparks: palette ((0x03003CF6 >> 2) + slot) & 3.
+    let globals: Vec<[(u32, u8); 2]> = (0..4).map(|k| [(PAUSED, 0), (SPIN_CLOCK, k * 4)]).collect();
+    let bytes = projectile(0x0D, &[(0x14, 0), (0x15, 0x3F)]);
+    let poses: Vec<Pose> = globals.iter().map(|g| Pose { kind: 0, state: 0, draw: FN_SPARK, bytes: &bytes, globals: g }).collect();
+    write_sheet(rom, m, out_dir, SPARK_SHEET, &poses)?;
+    // Smoke: life +0x14 (counted down once before the draw), tile 0x08170B64[life >> 3].
+    let bytes: Vec<Vec<(u32, u8)>> = (0..3).map(|k| projectile(0x16, &[(0x14, k * 8 + 5)])).collect();
+    let poses: Vec<Pose> = bytes.iter().map(|b| Pose { kind: 0, state: 0, draw: FN_SMOKE, bytes: b, globals: &paused }).collect();
+    write_sheet(rom, m, out_dir, SMOKE_SHEET, &poses)?;
+    println!("  mini-fortress: podoboo, embers, lava splash, roto-disc, dry bones, boom boom, ball, sparks, smoke");
+    Ok(())
+}
+
+/// The fortress's treasure chest and its item, with level 0x1CC's object graphics loaded.
+pub fn extract_fortress_chest(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    let item_draw = if rom.u8(CHEST_ITEM_DRAW + WARP_WHISTLE as u32).map_err(|e| ExtractError(e.to_string()))? & 0x80 != 0 {
+        FN_DRAW_ITEM
+    } else {
+        FN_DRAW_CHEST
+    };
+    let chest = [(0x17, 0)];
+    let item = [(0x17, WARP_WHISTLE)];
+    let poses = [
+        Pose { kind: 0x52, state: 2, draw: FN_DRAW_CHEST, bytes: &chest, globals: &[] },
+        Pose { kind: 0x52, state: 2, draw: item_draw, bytes: &item, globals: &[] },
+    ];
+    write_sheet(rom, m, out_dir, sma4_assets::CHEST_SHEET, &poses)?;
+    println!("  mini-fortress chest");
+    Ok(())
+}

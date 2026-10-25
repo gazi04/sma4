@@ -202,3 +202,27 @@ pub fn render(m: &mut Machine, rom: &[u8], poses: &[Pose]) -> Result<Rgba, Extra
         pixels: sheet,
     })
 }
+
+/// Renders the poses side by side, one `cell` each with the object's position at `origin`.
+pub fn render_cells(
+    m: &mut Machine,
+    rom: &[u8],
+    poses: &[Pose],
+    cell: (u32, u32),
+    origin: (i32, i32),
+) -> Result<Rgba, ExtractError> {
+    let chars = m.read(OBJ_VRAM, 0x8000)?;
+    let palette = parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?);
+    let (cw, ch) = cell;
+    let w = cw * poses.len() as u32;
+    let mut sheet = vec![0u8; (w * ch * 4) as usize];
+    for (i, pose) in poses.iter().enumerate() {
+        let c = compose_in(&capture(m, rom, pose)?, &chars, &palette, cell, origin);
+        for y in 0..ch {
+            let src = (y * cw * 4) as usize;
+            let dst = ((y * w + i as u32 * cw) * 4) as usize;
+            sheet[dst..dst + (cw * 4) as usize].copy_from_slice(&c.pixels[src..src + (cw * 4) as usize]);
+        }
+    }
+    Ok(Rgba { width: w, height: ch, pixels: sheet })
+}

@@ -84,6 +84,9 @@ const BOOMERANG_BRO_LEVEL: u16 = 0x0C;
 const BUZZY_LEVEL: u16 = 0x82;
 /// World 1-4 (level 0xD2), with the falling lifts and the red Paratroopa.
 const LIFT_LEVEL: u16 = 0xD2;
+/// World 1's mini-fortress (level 0x1CB) and its other area (0x1CC).
+const FORTRESS_LEVEL: u16 = 0x1CB;
+const FORTRESS_ROOMS: u16 = 0x1CC;
 /// World 1-3's hidden Toad House: level 0x106, tileset 7, enemy list 0x0816BA52.
 const TOAD_HOUSE_1_3: u16 = 0x106;
 const TOAD_HOUSE_TILESET: u8 = 7;
@@ -147,17 +150,24 @@ fn run(args: &Args) -> Result<(), String> {
         {
             levels.push((j.level, j.tileset, j.enemies));
         }
+        // World 1-3 loads the Boomerang Bro's graphics.
         // World 1-5 loads the Buzzy Beetle's graphics.
         if id == BUZZY_LEVEL {
             objects::extract_koopa_kind(&rom, &mut m, &args.out, 0x70).map_err(|e| e.0)?;
             objects::extract_ceiling_piranha(&rom, &mut m, &args.out).map_err(|e| e.0)?;
             objects::extract_water(&rom, &m, &args.out).map_err(|e| e.0)?;
         }
+        // The mini-fortress and its secret room.
+        if id == FORTRESS_LEVEL {
+            objects::extract_fortress(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+        }
+        if id == FORTRESS_ROOMS {
+            objects::extract_fortress_chest(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+        }
         // World 1-4 loads the lift's graphics.
         if id == LIFT_LEVEL {
             objects::extract_lift(&rom, &mut m, &args.out).map_err(|e| e.0)?;
         }
-        // World 1-3 loads the Boomerang Bro's graphics.
         if id == BOOMERANG_BRO_LEVEL {
             objects::extract_boomerang_bro(&rom, &mut m, &args.out).map_err(|e| e.0)?;
             // Its hidden Toad House (trigger 0x07, 0x0804E718), with the list the trigger
