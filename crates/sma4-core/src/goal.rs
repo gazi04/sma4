@@ -214,21 +214,62 @@ impl Goal {
             self.tallied = true;
             return true;
         }
-        let digit = if clock[0] == 0 && clock[1] == 0 { 2 } else { 1 };
-        ev.points += TALLY_POINTS[digit - 1];
-        for d in clock[..=digit].iter_mut().rev() {
-            if *d > 0 {
-                *d -= 1;
-                break;
-            }
-            *d = 9;
-        }
+        ev.points += drain(clock, TALLY_POINTS);
         false
     }
 
     /// Whether the player has walked far enough to stop (0x0806743C sets +0x40).
     pub fn player_stopped(player: &Player, camera: (i32, i32)) -> bool {
         player.px().0 - camera.0 >= OFF_SCREEN
+    }
+}
+
+/// One step of the clock drain (0x08066F08): ten seconds while there are any, then
+/// seconds; `points` (tens) per ten seconds / per second. The clock must not be empty.
+fn drain(clock: &mut [u8; 3], points: [u32; 2]) -> u32 {
+    let digit = if clock[0] == 0 && clock[1] == 0 { 2 } else { 1 };
+    for d in clock[..=digit].iter_mut().rev() {
+        if *d > 0 {
+            *d -= 1;
+            break;
+        }
+        *d = 9;
+    }
+    points[digit - 1]
+}
+
+/// The clock tally on its own (0x08066F08 called from an object, e.g. the fortress's ball):
+/// a delay counted down to 0x10, the drain, then `leave` frames (the object's +0x23 = 0x40,
+/// leaving at 1) before the level ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockTally {
+    delay: u16,
+    points: [u32; 2],
+    leave: Option<u8>,
+}
+
+const TALLY_LEAVE: u8 = 0x40;
+
+impl ClockTally {
+    pub fn new(delay: u16, points: [u32; 2]) -> Self {
+        Self { delay, points, leave: None }
+    }
+
+    /// One frame: points (tens) earned, and whether the level ends.
+    pub fn step(&mut self, clock: &mut [u8; 3]) -> (u32, bool) {
+        if let Some(t) = &mut self.leave {
+            *t -= 1;
+            return (0, *t == 1);
+        }
+        if self.delay != TALLY_START {
+            self.delay -= 1;
+            return (0, false);
+        }
+        if clock.iter().all(|&d| d == 0) {
+            self.leave = Some(TALLY_LEAVE);
+            return (0, false);
+        }
+        (drain(clock, self.points), false)
     }
 }
 

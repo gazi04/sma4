@@ -3,11 +3,15 @@
 
 pub mod autoscroll;
 pub mod blocks;
+pub mod boom_boom;
 pub mod camera_zones;
+pub mod crusher;
+pub mod doors;
 pub mod coins;
 pub mod dust;
 pub mod enemies;
 pub mod fire;
+pub mod fortress;
 pub mod goal;
 pub mod input;
 pub mod level;
@@ -68,6 +72,8 @@ pub struct Game {
     pub enemies: Vec<Enemy>,
     /// Fireballs from Venus Fire Traps (projectile slots 0x03007848 + 0x8EC).
     pub fireballs: Vec<enemies::Fireball>,
+    /// Pieces of broken bricks (effect slots 0x03007848 + 0x7E0).
+    pub debris: Vec<blocks::BrickDebris>,
     /// Fire Mario's fireballs (player projectile slots 0x03007848 + 0xAD4 / + 0xAE8).
     pub player_fireballs: Vec<fire::PlayerFireball>,
     /// The ROM's random bytes (0x03003878), stepped every frame.
@@ -79,8 +85,6 @@ pub struct Game {
     pub spawner: Spawner,
     /// Goomba pipes in range (generator slots 0x03007848 + 0xA54).
     pub goomba_pipes: Vec<enemies::GoombaPipe>,
-    /// Pieces of broken bricks (effect slots 0x03007848 + 0x7E0).
-    pub debris: Vec<blocks::BrickDebris>,
     /// Frames of invulnerability left after taking a hit.
     pub invulnerable: u16,
     /// Status-bar "P" blink counter (0x03003852), counted down while the P-meter is full.
@@ -141,7 +145,34 @@ pub struct Game {
     splash_turn: u8,
     /// Vertical camera triggers of the enemy list (World 1-5).
     pub camera_zones: camera_zones::CameraZones,
+    /// The mini-fortress: Podoboos, Roto-Discs and their effects, Boom Boom and his ball,
+    /// the treasure chest, the crushing ceiling.
+    pub podoboos: Vec<fortress::Podoboo>,
+    pub discs: Vec<fortress::RotoDisc>,
+    pub embers: Vec<fortress::Ember>,
+    pub lava_splashes: Vec<fortress::LavaSplash>,
+    pub sparks: Vec<fortress::Spark>,
+    pub puffs: Vec<fortress::Puff>,
+    pub boom_boom: Option<boom_boom::BoomBoom>,
+    pub ball: Option<boom_boom::Ball>,
+    pub chest: Option<fortress::Chest>,
+    /// The chest's item (list type 0x1AA, 0x0300379D) and level effect 7 (0x03003CF7).
+    chest_item: u8,
+    /// Level effect 7's countdown to the end of the level (+0xBE9).
+    exit_timer: u8,
+    pub crusher: Option<crusher::Crusher>,
+    /// Camera x limits set by objects (min: player +0xA0, max: +0x9E).
+    camera_limits: (Option<i32>, Option<i32>),
+    /// Boom Boom's intro holds the player (+0x40 = 0xFF).
+    boss_freeze: bool,
+    /// The ball was touched: the clock tally (`goal::tally`) and the frames to the map.
+    pub fortress_clear: Option<goal::ClockTally>,
+    /// 0x03003D0F set by Boom Boom's burst or the opened chest: the clock (0x080044B8) holds.
+    clock_stopped: bool,
 }
+
+/// Autoscroll kind of the crushing ceiling (row >> 4).
+const CRUSHER_KIND: u8 = 3;
 
 // TODO(re): the ROM's post-hit invulnerability length (player flashing) is not decoded yet.
 const INVULNERABLE_FRAMES: u16 = 120;
@@ -181,6 +212,7 @@ impl Game {
         self.boomerangs.clear();
         self.debris.clear();
         self.goomba_pipes.clear();
+        self.player.stuck = 0;
         self.invulnerable = 0;
         self.spawn = spawn;
         self.player = Player::spawn(spawn.0, spawn.1);
@@ -204,6 +236,23 @@ impl Game {
         self.lifts.clear();
         self.splashes.clear();
         self.bubbles.clear();
+        self.podoboos.clear();
+        self.discs.clear();
+        self.embers.clear();
+        self.lava_splashes.clear();
+        self.sparks.clear();
+        self.puffs.clear();
+        self.boom_boom = None;
+        self.ball = None;
+        self.chest = None;
+        self.chest_item = 0;
+        self.exit_timer = 0;
+        self.crusher = None;
+        self.level.shift = None;
+        self.camera_limits = (None, None);
+        self.boss_freeze = false;
+        self.fortress_clear = None;
+        self.clock_stopped = false;
         let start_y = self.level.start_camera_y.unwrap_or(0);
         self.camera_zones = camera_zones::CameraZones::new(enemies, self.level.camera, start_y);
     }
@@ -224,8 +273,11 @@ impl Game {
         self.level.start_camera_y = Some(to.exit.camera_y as i32);
         self.camera_zones.set(to.exit.camera_y as i32);
         pipes::place(&mut self.player, &to.exit);
-        // Arriving by the sky flight (exit direction 7): still rising.
-        if to.exit.dir == pipes::SKY_EXIT {
+        // Through a door (exit direction 8): standing there.
+        if to.exit.dir == doors::DOOR_EXIT {
+            self.pipe = None;
+            self.player.on_ground = true;
+        } else if to.exit.dir == pipes::SKY_EXIT {
             self.pipe = None;
             self.player.sky = player::SKY_ARRIVAL;
         } else {
@@ -263,7 +315,8 @@ impl Game {
             return (x, y.clamp(0, (self.level.pixel_height() - h).max(0)));
         }
         let (min_x, max_x) = self.level.camera_x.unwrap_or((0, (self.level.pixel_width() - w).max(0)));
-        let x = (cx - w / 2).clamp(min_x, max_x);
+        let (min_x, max_x) = (self.camera_limits.0.unwrap_or(min_x), self.camera_limits.1.unwrap_or(max_x));
+        let x = (cx - w / 2).clamp(min_x, max_x.max(min_x));
         let y = self.level.camera_y.unwrap_or(self.camera_zones.y);
         (x, y)
     }
@@ -342,6 +395,168 @@ impl Game {
             let (x, y) = i.px();
             self.end_coins.push(EndCoin::new(x, y));
         }
+    }
+
+    /// A mini-fortress list entry whose column came up.
+    fn spawn_fortress(&mut self, s: &sma4_assets::EnemySpawn) {
+        match s.kind {
+            fortress::PODOBOO => self.podoboos.push(fortress::Podoboo::spawn(s)),
+            fortress::ROTO_DISC | fortress::ROTO_DISC_CCW => self.discs.push(fortress::RotoDisc::spawn(s)),
+            boom_boom::BOOM_BOOM => {
+                self.boom_boom = Some(boom_boom::BoomBoom::spawn(s.col as i32 * level::TILE_PX, s.row as i32 * level::TILE_PX))
+            }
+            fortress::CAMERA_MAX | fortress::CAMERA_MIN => {
+                self.camera_limits = fortress::camera_limit(s, self.camera().0, self.camera_limits);
+            }
+            fortress::CHEST => self.chest = Some(fortress::Chest::spawn(s)),
+            // 0x0804B768: the record's row byte.
+            fortress::CHEST_ITEM => self.chest_item = s.row,
+            _ => {}
+        }
+    }
+
+    /// The fortress's objects for this frame; true if one hurt the player.
+    fn step_fortress(&mut self) -> bool {
+        let frame = self.frame;
+        let mut hurt = false;
+        let (px, py) = self.player.px();
+        let pbox = (px, py, player::HITBOX_W, self.player.height());
+        let star = self.player.star != 0;
+        for (i, p) in self.podoboos.iter_mut().enumerate() {
+            let ev = p.step(&self.level, frame, self.rng.byte(i));
+            self.embers.extend(ev.ember.map(fortress::Ember::new));
+            self.lava_splashes.extend(ev.splash.map(fortress::LavaSplash::new));
+            if p.touches(pbox) {
+                if star {
+                    p.knock_out();
+                    let (x, y) = p.px();
+                    self.status.chain_popup(x, y, self.player.star_chain.min(STAR_CHAIN_MAX));
+                    self.player.star_chain += 1;
+                } else {
+                    hurt = true;
+                }
+            }
+        }
+        let height = self.level.pixel_height();
+        self.podoboos.retain(|p| p.px().1 < height + 32);
+        for d in &mut self.discs {
+            d.step();
+            hurt |= d.touches(pbox) && !star;
+        }
+        self.embers.retain_mut(|e| e.step());
+        self.lava_splashes.retain_mut(|s| s.step());
+        self.sparks.retain_mut(|s| s.step(frame));
+        self.puffs.retain_mut(|p| p.step());
+
+        let camera_x = self.camera().0;
+        if let Some(b) = &mut self.boom_boom {
+            let (bx, by) = b.px();
+            let touching = b.touches(pbox);
+            // 0x08048F80 with +0x40 set: a landing when the frame is at least 8 px above him.
+            let stomp = touching && self.player.vy >= 0 && self.player.frame().1 <= by - 8;
+            if star && touching && let Some(ball) = b.star_hit() {
+                self.status.chain_popup(bx, by, self.player.star_chain.min(STAR_CHAIN_MAX));
+                self.player.star_chain += 1;
+                self.sparks.extend(fortress::Spark::burst(b.x, b.y));
+                self.ball = Some(ball);
+                self.boom_boom = None;
+                self.clock_stopped = true;
+                return hurt;
+            }
+            let ev = b.step(&self.level, &self.player, camera_x, self.player.on_ground, stomp, frame);
+            if let Some(c) = ev.lock_camera {
+                self.camera_limits = (Some(c), Some(c));
+                self.player.vx = 0;
+                if b.phase == 1 {
+                    self.boss_freeze = true;
+                }
+            }
+            if let Some((tx, ty)) = ev.block {
+                self.level.set(tx, ty, boom_boom::INTRO_BLOCK);
+            }
+            self.puffs.extend(ev.puff.map(fortress::Puff::new));
+            if ev.camera_step {
+                self.camera_limits = (self.camera_limits.0.map(|x| x + 1), self.camera_limits.1.map(|x| x + 1));
+            }
+            if ev.fight {
+                self.boss_freeze = false;
+            }
+            if let Some(kind) = ev.stomped {
+                self.player.vy = boom_boom::STOMP_BOUNCE;
+                self.player.on_ground = false;
+                self.status.popup(bx, by, kind);
+            }
+            hurt |= ev.hurt_player || (touching && !stomp && !star);
+            if let Some(ball) = ev.burst {
+                self.clock_stopped = true;
+                self.sparks.extend(fortress::Spark::burst(b.x, b.y));
+                self.ball = Some(ball);
+                self.boom_boom = None;
+            }
+        }
+        // Player fireballs: five beat him (+0x36).
+        if let Some(b) = &mut self.boom_boom {
+            for f in &mut self.player_fireballs {
+                let (fx, fy) = f.px();
+                if f.live() && b.touches((fx, fy, 8, 8)) {
+                    b.fireball();
+                    f.hit();
+                }
+            }
+        }
+        if let Some(ball) = &mut self.ball
+            && ball.step(&self.level, pbox)
+        {
+            // 0x0806DDD4: course clear music 0x21, the clock stops and is counted.
+            self.fortress_clear = Some(goal::ClockTally::new(boom_boom::BALL_TALLY_DELAY, boom_boom::BALL_TALLY_POINTS));
+            self.ball = None;
+        }
+        if let Some(c) = &mut self.chest {
+            let ev = c.step(&self.level, self.chest_item, pbox);
+            self.puffs.extend(ev.puff.map(fortress::Puff::new));
+            self.clock_stopped |= ev.opened;
+            if let Some(item) = ev.got {
+                self.inventory.push(item);
+                self.chest = None;
+                self.exit_timer = fortress::CHEST_EXIT_FRAMES;
+            }
+        }
+        if let Some(c) = &mut self.crusher {
+            c.step(frame);
+            self.level.shift = Some((c.split_y(), c.shift()));
+            self.level.camera_y = Some(c.base());
+            // 0x08092030: the head against the spikes.
+            let (fx, fy) = self.player.frame();
+            let head = if self.player.form == Form::Small { crusher::HEAD_SMALL } else { crusher::HEAD_BIG };
+            let y = fy + head - c.shift();
+            let id = self.level.collision_id((fx + 8).div_euclid(level::TILE_PX), y.div_euclid(level::TILE_PX));
+            if id.is_some_and(|id| id == crusher::HURT_TILE || crusher::SPIKES.wrapping_sub(id) < 2) {
+                hurt = true;
+            }
+        }
+        hurt
+    }
+
+    /// The end of a fortress: the ball's tally then the map (cleared), or the chest's
+    /// countdown then the map (not cleared). The player keeps moving meanwhile. True once
+    /// the level is over.
+    fn step_fortress_end(&mut self) -> bool {
+        if self.exit_timer != 0 {
+            self.exit_timer -= 1;
+            if self.exit_timer == 0 {
+                self.to_map(world_map::Arrival::Walk);
+                return true;
+            }
+            return false;
+        }
+        let Some(t) = &mut self.fortress_clear else { return false };
+        let (points, done) = t.step(&mut self.status.clock);
+        self.status.add_score(points);
+        if done {
+            self.fortress_clear = None;
+            self.finish_level();
+        }
+        done
     }
 
     /// Coins and debris from a block hit.
@@ -587,7 +802,6 @@ impl Game {
             self.step_course_clear(camera);
             return;
         }
-
         // In a pipe: only the slide runs (the player is busy, 0x08094BD8, so the clock
         // holds too); at the end of the way in, the host switches the area.
         if let Some(pipe) = self.pipe {
@@ -607,8 +821,11 @@ impl Game {
         }
 
         // Frozen (+0x40): no input, no movement (0x080A8000 only draws the player).
-        let frozen = self.freeze > 0;
+        let frozen = self.freeze > 0 || self.boss_freeze;
         self.freeze = self.freeze.saturating_sub(1);
+        if self.step_fortress_end() {
+            return;
+        }
         let (held, pressed) = if frozen { (Buttons::empty(), Buttons::empty()) } else { (held, self.input.pressed) };
         self.player.camera_y = self.camera().1;
         let head_hit = if frozen { None } else { self.player.step(held, pressed, &self.level, self.frame) };
@@ -639,6 +856,22 @@ impl Game {
         if self.player.wants_fireball(self.input.pressed) && self.player_fireballs.len() < fire::FIREBALL_SLOTS {
             self.player_fireballs.push(fire::PlayerFireball::thrown(&self.player));
             self.player.throw = player::THROW_TIME;
+        }
+        // Doors (0x0809588C).
+        if !self.player.transforming()
+            && self.crusher.is_none_or(|c| c.door_open())
+            && let Some(snap) = doors::entry(&self.level, &self.player, pressed, self.level.class)
+        {
+            if let Some(x) = snap {
+                let fx = self.player.frame().0;
+                self.player.x += (x - fx) * player::SUB;
+            }
+            self.pending_area = pipes::destination(&self.level, &self.player);
+            if self.pending_area.is_some() {
+                self.pipe = Some(Pipe::Switching);
+                self.player.vx = 0;
+                return;
+            }
         }
         if !self.player.transforming()
             && let Some((dir, to_end)) = pipes::entry(&self.level, &self.player, held)
@@ -739,7 +972,17 @@ impl Game {
         self.spawner.spawn(camera_x, &self.player, &mut self.enemies, &mut self.goomba_pipes);
         if let Some(row) = self.spawner.take_autoscroll() {
             let camera_y = self.level.start_camera_y.unwrap_or(self.camera().1);
-            self.autoscroll = autoscroll::Autoscroll::start(row, camera_y);
+            if row >> 4 == CRUSHER_KIND {
+                match &mut self.crusher {
+                    Some(c) => c.restart(),
+                    None => self.crusher = Some(crusher::Crusher::start(self.camera().1)),
+                }
+            } else {
+                self.autoscroll = autoscroll::Autoscroll::start(row, camera_y);
+            }
+        }
+        for s in self.spawner.take_fortress() {
+            self.spawn_fortress(&s);
         }
         self.lifts.extend(self.spawner.take_lifts().iter().map(lifts::Lift::spawn));
         let (camera, level_h) = (self.camera(), self.level.pixel_height());
@@ -755,8 +998,9 @@ impl Game {
                 self.enemies.push(e);
             }
         }
-        // 0x08055B34: past World 1, fire plants spit twice per appearance.
-        let twice = self.status.world != 0;
+        // 0x08055B34: past World 1 (0x03002A69 != 0; `status.world` counts from 1), fire
+        // plants spit twice per appearance.
+        let twice = self.status.world > 1;
         let (level, player, frame) = (&self.level, &self.player, self.frame);
         let camera = self.camera();
         for (i, e) in self.enemies.iter_mut().enumerate() {
@@ -892,6 +1136,9 @@ impl Game {
                 Contact::Kicked | Contact::None => {}
             }
         }
+        if !hidden && self.step_fortress() {
+            hurt = true;
+        }
         // 0x0808CC9C -> 0x0808CAEC: a fireball hurts like an enemy (0x0804A5F4) and flies on.
         if !hidden && (self.fireballs.iter().any(|f| f.touches(&self.player)) || self.boomerangs.iter().any(|b| b.touches(&self.player))) {
             hurt = true;
@@ -904,7 +1151,7 @@ impl Game {
         self.status.step_popups(self.frame);
         // Clock (0x080044B8); running out of time kills the player.
         // 0x080044B8 holds the clock while the player is busy (0x03003D08), e.g. growing.
-        if !self.player.transforming() && self.status.tick_clock() {
+        if !self.player.transforming() && !self.clock_stopped && self.status.tick_clock() {
             self.die();
         }
         // Falling out of the level costs a life straight away.
@@ -917,6 +1164,7 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use enemies::EnemyState;
     use crate::level::{SKY, TEST_SOLIDITY, TILE_PX};
     use sma4_assets::{BlockRules, TileKind};
 
@@ -1248,6 +1496,110 @@ mod tests {
         assert_eq!(g.inventory, [WARP_WHISTLE]);
         assert_eq!(lid, Some((0x68, 0x160)), "the chest opens");
         assert_eq!(g.player.frame().0, 0x68, "held while the item is out");
+    }
+
+    #[test]
+    fn venus_fire_trap_spits_once_per_appearance_in_world_1_and_twice_later() {
+        let shots = |world: u8| {
+            let (w, h) = (40, 10);
+            let mut kinds = vec![TileKind::Empty; w * h];
+            kinds[(h - 1) * w..].fill(TileKind::Solid);
+            let list = [sma4_assets::EnemySpawn { kind: enemies::FIRE_PIRANHA, col: 6, row: 6, ..Default::default() }];
+            let mut g = Game::new();
+            g.status.world = world;
+            g.enter_level(Level::from_kinds(w, h, &kinds), (12 * TILE_PX, 9 * TILE_PX - 16), &list);
+            let (mut n, mut last) = (0, 0);
+            // One appearance: hidden 0x60, up, out 0x60, down.
+            for _ in 0..0xF0 {
+                g.invulnerable = 2;
+                g.step(Buttons::empty());
+                n += g.fireballs.len().saturating_sub(last);
+                last = g.fireballs.len();
+            }
+            n
+        };
+        assert_eq!(shots(1), 1);
+        assert_eq!(shots(2), 2);
+    }
+
+    /// A flat arena 0x100 px into a 0xA00 px level, Boom Boom in it.
+    fn arena() -> Game {
+        let (w, h) = (160, 27);
+        let mut kinds = vec![TileKind::Empty; w * h];
+        kinds[25 * w..].fill(TileKind::Solid);
+        let list = [sma4_assets::EnemySpawn { kind: boom_boom::BOOM_BOOM, col: 156, row: 23, ..Default::default() }];
+        let mut g = Game::new();
+        g.enter_level(Level::from_kinds(w, h, &kinds), (130 * TILE_PX, 25 * TILE_PX - 16), &list);
+        g.set_time_limit(300);
+        g
+    }
+
+    #[test]
+    fn the_star_bursts_boom_boom_at_once_and_the_clock_stops() {
+        let mut g = arena();
+        for _ in 0..600 {
+            g.invulnerable = 100;
+            g.step(if g.camera().0 < 0x8F0 { Buttons::RIGHT } else { Buttons::empty() });
+        }
+        assert!(g.boom_boom.is_some_and(|b| b.phase >= 2));
+        let b = g.boom_boom.unwrap();
+        let (bx, by) = b.px();
+        g.player = Player::spawn(bx + 10, by + 12);
+        g.player.star = 100;
+        g.step(Buttons::empty());
+        assert!(g.boom_boom.is_none() && g.ball.is_some(), "burst at once");
+        let clock = g.status.clock;
+        for _ in 0..120 {
+            g.step(Buttons::empty());
+        }
+        assert_eq!(g.status.clock, clock, "the clock holds after the burst");
+    }
+
+    #[test]
+    fn boom_boom_locks_the_arena_takes_three_stomps_and_leaves_the_ball() {
+        let mut g = arena();
+        // Walk in until the camera locks and the intro runs.
+        for _ in 0..600 {
+            g.invulnerable = 100;
+            g.step(if g.camera().0 < 0x8F0 { Buttons::RIGHT } else { Buttons::empty() });
+        }
+        let b = g.boom_boom.expect("Boom Boom spawned");
+        assert!(b.phase >= 2, "the fight started (phase {})", b.phase);
+        assert_eq!(g.camera().0, 0x908, "camera locked after the slide");
+        assert_eq!(g.level.metatile(144, 21), Some(boom_boom::INTRO_BLOCK), "the arena is closed behind the player");
+        let mut stomps = 0;
+        for _ in 0..4000 {
+            let Some(b) = g.boom_boom else { break };
+            // Drop onto him whenever he can be stomped.
+            if b.dazed == 0 && b.phase != 5 && g.player.vy >= 0 {
+                let (bx, by) = b.px();
+                g.player = Player::spawn(bx + 10, by - 4);
+                g.player.vy = 0x20;
+            }
+            g.invulnerable = 100;
+            let before = g.boom_boom.map(|b| b.hp);
+            g.step(Buttons::empty());
+            if g.boom_boom.is_some() && g.boom_boom.map(|b| b.hp) != before {
+                stomps += 1;
+            }
+        }
+        assert_eq!(stomps, 3);
+        assert!(g.boom_boom.is_none() && g.ball.is_some(), "he burst into the ball");
+        // Touch the ball once it falls.
+        for _ in 0..200 {
+            if let Some(ball) = g.ball {
+                let (x, y) = ball.px();
+                g.player = Player::spawn(x + 2, y);
+            }
+            g.step(Buttons::empty());
+        }
+        assert!(g.fortress_clear.is_some(), "touching the ball clears the fortress");
+        let score = g.status.score;
+        for _ in 0..2000 {
+            g.step(Buttons::empty());
+        }
+        assert!(g.status.score > score, "the clock is counted into the score");
+        assert_eq!(g.screen, Screen::Map);
     }
 
     #[test]

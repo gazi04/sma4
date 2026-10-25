@@ -52,6 +52,8 @@ pub const PARAGOOMBA: u16 = 0x73;
 pub const MICRO_PARAGOOMBA: u16 = 0x74;
 /// Boomerang Bro (World 1-3; main 0x08068F78).
 pub const BOOMERANG_BRO: u16 = 0x82;
+/// Dry Bones (the mini-fortress; init 0x0804EFD4, main 0x0806EDE8, contact 0x0806EE40).
+pub const DRY_BONES: u16 = 0x3F;
 /// Enemy-list type of the Goomba pipe opening to the right (types >= 0x190 are
 /// generators, 0x0804B768 -> 0x0804B460: generator kind = type - 0x18F = 6).
 pub const GOOMBA_PIPE: u16 = 0x195;
@@ -68,7 +70,7 @@ pub const FIRE_PIRANHA: u16 = 0xA4;
 /// 0xA5 / 0xA7 and the red Venus Fire Trap 0xA6 are not ported yet).
 pub const PIRANHA_TYPES: [u16; 4] = [PIRANHA, RED_PIRANHA, CEILING_PIRANHA, FIRE_PIRANHA];
 /// Enemy types implemented so far.
-pub const SUPPORTED: [u16; 13] = [
+pub const SUPPORTED: [u16; 14] = [
     WALKER,
     KOOPA,
     RED_KOOPA,
@@ -82,6 +84,7 @@ pub const SUPPORTED: [u16; 13] = [
     RED_PIRANHA,
     CEILING_PIRANHA,
     FIRE_PIRANHA,
+    DRY_BONES,
 ];
 
 /// 8/16 px per frame.
@@ -235,6 +238,16 @@ const BRO_STOMP_BONUS: u16 = 4;
 /// Star knockout (0x080488E4): speed 0xC8 up, 0x081698C6 = -8 / 8 across.
 const STAR_KNOCKOUT: i32 = -0x38 * 16;
 const STAR_DRIFT: i32 = 8 * 16;
+/// Dry Bones (main 0x0806EDE8): walks at 0x0816F492[1] = 8 (a Goomba's speed), frame +0x17
+/// = frame counter & 0x0816F495[1] (8) on the ground. Stomped (0x0806EE40) it collapses:
+/// +0x3A = 9, and each time timer +0x23 runs out +0x3A counts down, with frame
+/// 0x0816F497[+0x3A] and timer 0x0816F49F[+0x3A] (0x0806ED9C); at 0 it faces the player
+/// (0x0804A3AC) and walks again. Its +0x64 has bit 0x200: fireballs only burst on it.
+const DRY_BONES_FRAME_MASK: u32 = 8;
+/// 0x0816F497 then (index 8) 0x0816F49F[0].
+const DRY_BONES_COLLAPSE_FRAMES: [u8; 9] = [8, 1, 2, 3, 3, 3, 3, 3, 2];
+const DRY_BONES_COLLAPSE_TIMES: [u8; 9] = [2, 0x10, 0x0A, 6, 6, 6, 6, 0xFF, 0x0A];
+const DRY_BONES_COLLAPSE: u8 = 9;
 /// Fireball knockout (0x0808B2F0): speed 0xCC up, 0x0C across in the fireball's direction;
 /// the box of Goombas and Koopas (0x0816A516[type] = 1 -> 0x08169F44[1]: dx 1, w 13, dy 2,
 /// h 8).
@@ -268,6 +281,8 @@ pub enum EnemyState {
     Plant { phase: u8, timer: u8 },
     /// Puff of smoke left by a knocked-out Piranha Plant (state 8), with its timer.
     Puff(u8),
+    /// Dry Bones in a heap: +0x3A (9 down to 1) and timer +0x23.
+    Collapsed { step: u8, timer: u8 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -549,6 +564,16 @@ impl Enemy {
             EnemyState::Walking if self.kind == PARAGOOMBA => self.step_paragoomba(level, player),
             EnemyState::Walking if self.kind == MICRO_PARAGOOMBA => self.step_micro_paragoomba(level, player),
             EnemyState::Walking if self.kind == BOOMERANG_BRO => self.step_bro(level, player, frame),
+            EnemyState::Walking if self.kind == DRY_BONES => {
+                // 0x0804F318: move and fall, reverse at walls; 0x0806ED1C sets the speed.
+                let landed = self.move_and_turn(level);
+                // 0x0806ED1C: the speed follows the facing (+0x1A bit 6).
+                self.vx = if self.facing_right { WALK_SPEED } else { -WALK_SPEED };
+                if landed {
+                    self.body = (frame & DRY_BONES_FRAME_MASK != 0) as u8;
+                }
+            }
+            EnemyState::Collapsed { step, timer } => self.step_collapsed(level, player, step, timer.saturating_sub(1)),
             // 0x08053704 with +0x1C: out of the pipe, across only, the walk cycle +1 a frame.
             EnemyState::Walking if self.emerging > 0 => {
                 self.emerging -= 1;
@@ -624,6 +649,54 @@ impl Enemy {
             }
         }
         self.px().1 < level.pixel_height() + TILE_PX
+    }
+
+    /// 0x0806ED9C: the heap of bones, then up again facing the player.
+    fn step_collapsed(&mut self, level: &Level, player: &Player, step: u8, timer: u8) {
+        self.move_and_turn(level);
+        self.state = EnemyState::Collapsed { step, timer };
+        if timer != 0 {
+            return;
+        }
+        let step = step - 1;
+        if step == 0 {
+            // 0x0804A3AC: right when the player is at or right of it. The speed follows
+            // after next frame's move (0x0806ED1C).
+            self.facing_right = player.x - self.x >= -(SUB - 1);
+            self.state = EnemyState::Walking;
+            return;
+        }
+        self.body = DRY_BONES_COLLAPSE_FRAMES[step as usize];
+        self.state = EnemyState::Collapsed { step, timer: DRY_BONES_COLLAPSE_TIMES[step as usize] };
+    }
+
+    /// 0x0804F318 (flat tilesets): move across and down (0x08049EC0), then the probes of
+    /// 0x08046358 at the new position: a solid wall probe (class 8: dy 9, dx 0 moving left /
+    /// 15 moving right) reverses the speed without pushing the object out. Returns whether
+    /// it stands on the ground.
+    fn move_and_turn(&mut self, level: &Level) -> bool {
+        self.x += self.vx;
+        let landed = self.fall(level);
+        let (px, py) = self.px();
+        let dx = if self.vx > 0 { WALL_PROBE.2 } else { WALL_PROBE.1 };
+        if self.vx != 0 && level.at((px + dx).div_euclid(TILE_PX), (py + WALL_PROBE.0).div_euclid(TILE_PX)) == TileKind::Solid {
+            // 0x0804A028: speed and facing both turn.
+            self.vx = -self.vx;
+            self.facing_right = !self.facing_right;
+        }
+        landed
+    }
+
+    /// The stomp frame: 0x0806ED9C already runs once (+0x3A 9 -> 8).
+    fn step_collapsed_now(&mut self) {
+        let step = DRY_BONES_COLLAPSE - 1;
+        self.body = DRY_BONES_COLLAPSE_FRAMES[step as usize];
+        self.state = EnemyState::Collapsed { step, timer: DRY_BONES_COLLAPSE_TIMES[step as usize] };
+    }
+
+    /// Dry Bones' frame +0x17: walking 0 / 1, in a heap 1-3 (0x0816F497).
+    pub fn dry_bones_frame(&self) -> u8 {
+        self.body
     }
 
     /// Piranha Plant main 0x08055C88, phase handlers 0x0816E61C. `timer` has already been
@@ -1251,6 +1324,11 @@ impl Enemy {
                         self.vx = 0;
                         self.vy = 0;
                     }
+                    // 0x0806EE40: it falls into a heap at once (+0x3A = 9, speed 0).
+                    DRY_BONES => {
+                        self.vx = 0;
+                        self.step_collapsed_now();
+                    }
                     // 0x0816966C[0x74] = 0x72 too; its palette is the Goomba's.
                     MICRO_PARAGOOMBA => {
                         self.kind = WALKER;
@@ -1294,7 +1372,8 @@ impl Enemy {
     /// timer 0xFF, wings lost). Both hop up with speed byte 0xD0 and move 8/16 px per frame
     /// away from the player (0x08169D80).
     pub fn tail_hit(&mut self, (x, y, w, h): (i32, i32, i32, i32), player: &Player) -> bool {
-        if !self.alive() || self.grace > 0 || !self.overlaps_box(x, y, w, h) {
+        // 0x080496B8: types with 0x0816A3E8 bit 7 (Dry Bones) shrug off the tail.
+        if !self.alive() || self.grace > 0 || self.kind == DRY_BONES || !self.overlaps_box(x, y, w, h) {
             return false;
         }
         // 0x080496B8: a plant hidden in its pipe (+0x14 set by main) is out of reach
@@ -1348,7 +1427,7 @@ impl Enemy {
         if vertical >= h + 0xE || across >= w + 8 {
             return None;
         }
-        if self.kind == BUZZY {
+        if matches!(self.kind, BUZZY | DRY_BONES) {
             return Some(false);
         }
         if self.is_plant() {
@@ -1391,6 +1470,9 @@ impl Enemy {
             }
             (EnemyState::Puff(t), _) => (PUFF_FRAMES as usize - 1).saturating_sub((t >> 3) as usize),
             (EnemyState::Squished(_), _) => WALKER_SQUISHED,
+            // Dry Bones' sheet is its frame +0x17 (0x0806EC40: 0-1 standing, 2-3 the heap).
+            (EnemyState::Walking, DRY_BONES) | (EnemyState::Collapsed { .. }, _) => self.body as usize,
+            (EnemyState::Dead, DRY_BONES) => 0,
             (EnemyState::Walking, PARATROOPA) => ((self.age >> 2) & 3) as usize,
             // 0x08053CDC / 0x080539E8: cells by +0x3A >> 1 (body (+0x3A >> 3) & 1, wing by
             // (+0x3A + 2) & 4).
@@ -1529,6 +1611,9 @@ pub struct Spawner {
     autoscroll: Option<u8>,
     /// Lifts whose column was reached.
     lifts: Vec<EnemySpawn>,
+    /// Mini-fortress objects and level settings whose column was reached
+    /// (`crate::fortress::OBJECTS`).
+    fortress: Vec<EnemySpawn>,
 }
 
 impl Spawner {
@@ -1537,6 +1622,7 @@ impl Spawner {
         let wanted = |k: &u16| {
             SUPPORTED.contains(k)
                 || [GOOMBA_PIPE, crate::goal::GOAL, crate::autoscroll::AUTOSCROLL, crate::lifts::LIFT].contains(k)
+                || crate::fortress::OBJECTS.contains(k)
         };
         Self { pending: list.iter().copied().filter(|e| wanted(&e.kind)).collect(), ..Self::default() }
     }
@@ -1563,6 +1649,7 @@ impl Spawner {
         let mut goal = false;
         let mut autoscroll = None;
         let lifts = &mut self.lifts;
+        let fortress = &mut self.fortress;
         self.pending.retain(|s| {
             let x = s.col as i32 * TILE_PX;
             if !columns.contains(&x) {
@@ -1576,6 +1663,7 @@ impl Spawner {
                 crate::goal::GOAL => goal = true,
                 crate::autoscroll::AUTOSCROLL => autoscroll = Some(s.row),
                 crate::lifts::LIFT => lifts.push(*s),
+                k if crate::fortress::OBJECTS.contains(&k) => fortress.push(*s),
                 _ => active.push(Enemy::spawn(s, player)),
             }
             false
@@ -1587,6 +1675,11 @@ impl Spawner {
     /// Lifts whose column came up.
     pub fn take_lifts(&mut self) -> Vec<EnemySpawn> {
         std::mem::take(&mut self.lifts)
+    }
+
+    /// Mini-fortress objects whose column came up.
+    pub fn take_fortress(&mut self) -> Vec<EnemySpawn> {
+        std::mem::take(&mut self.fortress)
     }
 
     /// An autoscroll entry's column came up (once): its row.
