@@ -549,7 +549,7 @@ impl Player {
         let (fx, fy) = self.frame_at(self.seen.0, self.seen.1);
         let ground = self.seen.2;
         let dy = if self.form == Form::Small { 0x14 } else { 0x0A };
-        let (hx, hy) = ((fx + 8).div_euclid(TILE_PX), (fy + dy).div_euclid(TILE_PX));
+        let (hx, hy) = ((fx + 8).div_euclid(TILE_PX), map.row_at(fy + dy));
         let head_solid = map.at(hx, hy) != TileKind::Empty;
         if !head_solid && map.is_water(hx, hy) {
             if self.in_water {
@@ -569,7 +569,7 @@ impl Player {
             return Some(self.leave_water());
         }
         if head_solid || vy >= 0 {
-            let (tx, ty) = ((fx + 8).div_euclid(TILE_PX), (fy + 0x20).div_euclid(TILE_PX));
+            let (tx, ty) = ((fx + 8).div_euclid(TILE_PX), map.row_at(fy + 0x20));
             if map.at(tx, ty) == TileKind::Empty && !map.is_water(tx, ty) {
                 return Some(self.leave_water());
             }
@@ -969,16 +969,16 @@ impl Player {
         self.x += self.vx;
         let (px, py) = self.px();
         let lift = if map.slopes.is_some() { SLOPE_WALL_LIFT } else { 0 };
-        let rows = tile_span(py, self.height() - lift);
+        let rows = map.row_span(py, self.height() - lift);
         if self.vx > 0 {
             let tx = (px + HITBOX_W - 1).div_euclid(TILE_PX);
-            if rows.clone().any(|ty| map.at(tx, ty) == TileKind::Solid) {
+            if rows.iter().any(|&ty| map.at(tx, ty) == TileKind::Solid) {
                 self.x = (tx * TILE_PX - HITBOX_W) * SUB;
                 self.vx = 0;
             }
         } else if self.vx < 0 {
             let tx = px.div_euclid(TILE_PX);
-            if rows.clone().any(|ty| map.at(tx, ty) == TileKind::Solid) {
+            if rows.iter().any(|&ty| map.at(tx, ty) == TileKind::Solid) {
                 self.x = (tx + 1) * TILE_PX * SUB;
                 self.vx = 0;
             }
@@ -999,8 +999,8 @@ impl Player {
             return None;
         }
         if self.vy >= 0 {
-            let ty = (py + h).div_euclid(TILE_PX);
-            let top = ty * TILE_PX;
+            let ty = map.row_at(py + h);
+            let top = map.row_top(ty, py + h);
             // "Top" tiles only catch the player if they were above the tile last frame.
             let lands = cols.clone().any(|tx| match map.at(tx, ty) {
                 TileKind::Solid => true,
@@ -1012,7 +1012,8 @@ impl Player {
             }
             None
         } else {
-            let ty = py.div_euclid(TILE_PX);
+            let ty = map.row_at(py);
+            let below = map.row_top(ty + 1, py);
             // Hidden blocks (World 1-5's 0x46): passable tiles with a bump behaviour stop
             // the head-centre probe from below only (checked in mGBA: the head turns there
             // and the tile becomes 0x71).
@@ -1022,12 +1023,12 @@ impl Player {
                     m < 0x100 && map.rules.bump_behaviour[m as usize] != sma4_assets::BlockRules::NOT_BUMPABLE
                 })
             {
-                self.y = (ty + 1) * TILE_PX * SUB;
+                self.y = below * SUB;
                 self.vy = 0;
                 return Some((centre_tx, ty));
             }
             if cols.clone().any(|tx| map.at(tx, ty) == TileKind::Solid) {
-                self.y = (ty + 1) * TILE_PX * SUB;
+                self.y = below * SUB;
                 self.vy = 0;
                 // The ROM's head-centre probe (probe 1) decides which block was hit.
                 return (map.at(centre_tx, ty) == TileKind::Solid).then_some((centre_tx, ty));
@@ -1043,7 +1044,7 @@ impl Player {
             return None;
         }
         let (px, py) = self.px();
-        let (tx, ty) = ((px + HITBOX_W / 2).div_euclid(TILE_PX), (py + self.height()).div_euclid(TILE_PX));
+        let (tx, ty) = ((px + HITBOX_W / 2).div_euclid(TILE_PX), map.row_at(py + self.height()));
         let m = map.metatile(tx, ty)?;
         (m < 0x100 && map.rules.land_behaviour[m as usize] != sma4_assets::BlockRules::NOT_BUMPABLE).then_some((tx, ty))
     }

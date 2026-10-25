@@ -40,6 +40,9 @@ pub struct Level {
     pub coin_block: Option<(i32, i32)>,
     pub coin_timer: u8,
     pub coin_hi: u8,
+    /// The crushing ceiling's split screen (`crate::crusher`): pixel rows above `.0` show
+    /// (and collide as) the level `.1` px higher up.
+    pub shift: Option<(i32, i32)>,
 }
 
 impl Level {
@@ -70,7 +73,40 @@ impl Level {
             coin_block: None,
             coin_timer: 0,
             coin_hi: 0,
+            shift: None,
         }
+    }
+
+    /// How far the level is shifted down at pixel row `y` (`shift`), 0 normally.
+    pub fn offset_at(&self, y: i32) -> i32 {
+        match self.shift {
+            Some((split, d)) if y < split => d,
+            _ => 0,
+        }
+    }
+
+    /// The level row seen at pixel row `y`.
+    pub fn row_at(&self, y: i32) -> i32 {
+        (y - self.offset_at(y)).div_euclid(TILE_PX)
+    }
+
+    /// Top pixel row of level row `ty` as seen around pixel row `y`.
+    pub fn row_top(&self, ty: i32, y: i32) -> i32 {
+        ty * TILE_PX + self.offset_at(y)
+    }
+
+    /// The level rows seen by pixel rows `y .. y + h`.
+    pub fn row_span(&self, y: i32, h: i32) -> Vec<i32> {
+        let last = y + h - 1;
+        let mut rows: Vec<i32> = match self.shift {
+            Some((split, _)) if y < split && last >= split => {
+                (self.row_at(y)..=self.row_at(split - 1)).chain(self.row_at(split)..=self.row_at(last)).collect()
+            }
+            _ => (self.row_at(y)..=self.row_at(last)).collect(),
+        };
+        rows.sort_unstable();
+        rows.dedup();
+        rows
     }
 
     pub fn with_pipe_flags(mut self, flags: u8) -> Self {
