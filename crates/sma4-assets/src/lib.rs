@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub const METATILE: u32 = 16;
 pub const DEFAULT_DIR: &str = "assets/extracted";
 
-const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV15";
+const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV17";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssetError {
@@ -174,15 +174,7 @@ impl Slopes {
     /// Shape of a metatile; second-plane ids collide like `Solidity::high` (no slope for
     /// the special handlers).
     pub fn shape_of(&self, solidity: &Solidity, metatile: u16) -> u8 {
-        let id = if metatile >= 0x100 {
-            match solidity.high.get(metatile as u8 as usize) {
-                Some(&id) => id,
-                None => return 0,
-            }
-        } else {
-            metatile as u8
-        };
-        self.shape[id as usize]
+        solidity.id(metatile).map_or(0, |id| self.shape[id as usize])
     }
 
     fn write(&self, out: &mut Vec<u8>) {
@@ -370,9 +362,14 @@ pub struct LevelAsset {
     pub start_y: u16,
     /// Camera y at the start (0x03003754 = 0x0813600E[header byte 4 >> 5], 0x08014F20).
     pub start_camera_y: u16,
+    /// How the player starts (header byte 7 >> 5 -> player +0x28; 0x08094E4C, entering from
+    /// the map): 1 = already sliding (World 1-5).
+    pub start_kind: u8,
     /// Pipe flags of the tileset's class (0x08172E44[0x08172BCC[tileset]], 0x0809B598): bit
     /// 7 makes 0xBD / 0xBE pipe ends lead to the world's end room.
     pub pipe_flags: u8,
+    /// The tileset's class (0x03003CF1 = 0x08172BCC[tileset]).
+    pub class: u8,
     /// Water: per id quadrant (id >> 6), the ids above this one are water unless they
     /// collide (0x0813DD04[class * 4 + quadrant], 0x080A1E60).
     pub water: [u8; 4],
@@ -475,8 +472,10 @@ impl LevelAsset {
         }
         out.extend_from_slice(&self.start_camera_y.to_le_bytes());
         out.push(self.pipe_flags);
+        out.push(self.class);
         out.extend_from_slice(&self.water);
         self.camera.write(&mut out);
+        out.push(self.start_kind);
         write(&bin, &out)?;
         self.atlas.write_png(&png)
     }
@@ -517,7 +516,7 @@ impl LevelAsset {
                 extra: [e[5], e[6]],
             })
             .collect();
-        let (junction, camera_x, slopes, scene, start_camera_y, pipe_flags, water, camera) =
+        let (junction, camera_x, slopes, scene, start_camera_y, (pipe_flags, class), water, camera, start_kind) =
             read_area(&list[high_at + HIGH_IDS..]).ok_or_else(bad)?;
         let background = match scene {
             None => None,
@@ -546,7 +545,9 @@ impl LevelAsset {
             time_limit,
             start_y,
             start_camera_y,
+            start_kind,
             pipe_flags,
+            class,
             water,
             camera,
             junction,
@@ -574,6 +575,8 @@ pub struct CameraParams {
 }
 
 impl CameraParams {
+    const BYTES: usize = 14;
+
     fn write(&self, out: &mut Vec<u8>) {
         let [d0, d1] = self.dead_zone;
         let [f0, f1] = self.dead_zone_flying;
@@ -599,9 +602,10 @@ const EXIT_BYTES: usize = 8;
 const ENEMY_BYTES: usize = 7;
 
 /// The level file's tail: the junction, the camera limits, the slopes, the background
-/// scene (id, follows y), the start camera y, the pipe flags and the water thresholds.
+/// scene (id, follows y), the start camera y, the pipe flags, the water thresholds, the
+/// camera settings and the start kind.
 type Area =
-    (Option<Junction>, Option<(u16, u16)>, Option<Slopes>, Option<(u8, bool)>, u16, u8, [u8; 4], CameraParams);
+    (Option<Junction>, Option<(u16, u16)>, Option<Slopes>, Option<(u8, bool)>, u16, (u8, u8), [u8; 4], CameraParams, u8);
 
 fn read_area(d: &[u8]) -> Option<Area> {
     let u16_at = |o: usize| Some(u16::from_le_bytes([*d.get(o)?, *d.get(o + 1)?]));
@@ -641,8 +645,19 @@ fn read_area(d: &[u8]) -> Option<Area> {
         _ => Some((*d.get(p + 1)?, *d.get(p + 2)? != 0)),
     };
     p += if scene.is_some() { 3 } else { 1 };
-    let camera = CameraParams::read(d.get(p + 7..)?)?;
-    Some((junction, camera_x, slopes, scene, u16_at(p)?, *d.get(p + 2)?, d.get(p + 3..p + 7)?.try_into().ok()?, camera))
+    let camera = CameraParams::read(d.get(p + 8..)?)?;
+    let start_kind = *d.get(p + 8 + CameraParams::BYTES)?;
+    Some((
+        junction,
+        camera_x,
+        slopes,
+        scene,
+        u16_at(p)?,
+        (*d.get(p + 2)?, *d.get(p + 3)?),
+        d.get(p + 4..p + 8)?.try_into().ok()?,
+        camera,
+        start_kind,
+    ))
 }
 
 /// Status bar (BG0 in levels): the template map the level loader 0x08016434 decompresses
@@ -1130,7 +1145,14 @@ pub const PLAYER_THROW_AIR: usize = 34;
 /// (0x0813DE4F); the small form has its own poses (+6 / +4 in those tables).
 pub const PLAYER_SWIM: usize = 37;
 pub const PLAYER_SWIM_IDLE: usize = 43;
-pub const PLAYER_FRAMES: u32 = 47;
+/// Sliding down a slope (0x08097A94: 0x33 small, 0x31 the other forms).
+pub const PLAYER_SLIDE: usize = 47;
+/// Crouching (+0x48; checked in mGBA: pose 0x0F big and fire, 0x07 raccoon).
+pub const PLAYER_CROUCH: usize = 48;
+/// Crouched in the air: the raccoon's 0x0813DE9B[tail wag +0x65 >> 2] (3 steps; the other
+/// forms keep the crouch pose).
+pub const PLAYER_CROUCH_AIR: usize = 49;
+pub const PLAYER_FRAMES: u32 = 52;
 /// Star flashing: the player is drawn in palette 7 = 0x08133210[k], k = 0 being the
 /// form's own palette (`player_path`), 1-3 in `player_star_path`.
 pub const PLAYER_STAR_PALETTES: u32 = 4;
@@ -1231,7 +1253,9 @@ mod tests {
             time_limit: 300,
             start_y: 0x140,
             start_camera_y: 0xF0,
+            start_kind: 1,
             pipe_flags: 0x80,
+            class: 0,
             water: [0xFF, 0xFF, 0xFF, 0xC1],
             camera: CameraParams { bottom: 0x1AF, fixed: 0, dead_zone: [0x10, 0x30], dead_zone_flying: [0x10, 0x30], top: 7 },
             junction: Some(Junction {

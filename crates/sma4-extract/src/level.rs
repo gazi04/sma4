@@ -337,7 +337,9 @@ pub fn extract_at(
         time_limit: rom.u8(TIME_LIMITS + (hdr[8] >> 6) as u32)? as u16 * 100,
         start_y: rom.u16(START_Y + (hdr[4] >> 5) as u32 * 2)?,
         start_camera_y: rom.u8(START_CAMERA_Y + (hdr[4] >> 5) as u32)? as u16,
+        start_kind: hdr[7] >> 5,
         pipe_flags: rom.u8(PIPE_FLAGS + rom.u8(TILESET_CLASS + tileset as u32)? as u32)?,
+        class: rom.u8(TILESET_CLASS + tileset as u32)?,
         camera: {
             let t = rom.ptr(CAMERA_PARAMS + level_id as u32 * 4)?;
             let w = |i: u32| rom.u16(t + i);

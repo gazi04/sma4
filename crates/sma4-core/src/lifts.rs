@@ -68,6 +68,11 @@ impl Lift {
         (self.x >> 8, self.y >> 8)
     }
 
+    /// Its speed byte across (+0x10).
+    pub fn speed(&self) -> i32 {
+        self.vx
+    }
+
     pub fn falling(&self) -> bool {
         self.vy != 0
     }
@@ -113,8 +118,7 @@ impl Lift {
             p.x += dx * SUB;
             return Contact { standing: true, head: false };
         }
-        // The ROM also counts a crouching player (+0x48) as small; there is no crouch here.
-        let below = if p.form == Form::Small { SIDE_BELOW_SMALL } else { 0 };
+        let below = if p.form == Form::Small || p.crouch { SIDE_BELOW_SMALL } else { 0 };
         if fy + below < ly + SIDE_BELOW {
             // Side: against a lift that does not move across, the push stops; in front of
             // a moving one the player goes at its speed.

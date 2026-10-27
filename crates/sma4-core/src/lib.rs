@@ -697,6 +697,7 @@ impl Game {
             let form = self.player.form;
             self.enter_level(level, self.spawn, &enemies);
             self.player.set_form(form);
+            self.player.start(self.level.start_kind, &self.level);
         }
         self.status.popups.clear();
         self.status.start_clock(self.time_limit);
@@ -709,6 +710,7 @@ impl Game {
         let form = self.player.form;
         self.enter_level(level, spawn, enemies);
         self.player.set_form(form);
+        self.player.start(self.level.start_kind, &self.level);
         self.status.popups.clear();
         self.set_time_limit(time_limit);
         self.level_generation = self.level_generation.wrapping_add(1);
@@ -987,7 +989,15 @@ impl Game {
         self.lifts.extend(self.spawner.take_lifts().iter().map(lifts::Lift::spawn));
         let (camera, level_h) = (self.camera(), self.level.pixel_height());
         let player = &mut self.player;
-        self.lifts.retain_mut(|l| l.step(player, camera, level_h).0);
+        player.riding = None;
+        self.lifts.retain_mut(|l| {
+            let (alive, contact) = l.step(player, camera, level_h);
+            // 0x030038C5: the object the player stands on, for the crouch (0x0809F0F4).
+            if contact.standing {
+                player.riding = Some(l.speed());
+            }
+            alive
+        });
         for (i, e) in self.enemies.iter_mut().enumerate().skip(before) {
             e.init_random(self.rng.byte(i));
         }
@@ -1117,6 +1127,12 @@ impl Game {
                 Contact::Stomped => {
                     self.player.vy = enemies::STOMP_BOUNCE;
                     self.player.on_ground = false;
+                    let (x, y) = e.px();
+                    self.status.chain_popup(x, y, self.player.stomp_chain + e.stomp_bonus());
+                    self.player.stomp_chain += 1;
+                }
+                // 0x08048B3C scores a slide's stomp too (the slide cancels the bounce).
+                Contact::SlideKill => {
                     let (x, y) = e.px();
                     self.status.chain_popup(x, y, self.player.stomp_chain + e.stomp_bonus());
                     self.player.stomp_chain += 1;
@@ -1773,6 +1789,28 @@ mod tests {
         assert_eq!(g.player.star_chain, 1);
         assert_eq!(g.player.form, Form::Small, "no hit taken");
         assert!(g.dying.is_none());
+    }
+
+    #[test]
+    fn sliding_into_an_enemy_knocks_it_out_without_a_bounce() {
+        // Checked in mGBA (World 1-1's first Goomba, slide byte poked to 0x30): it flies off
+        // for 100 points and Mario slides on.
+        let mut g = goomba_ahead();
+        for _ in 0..3 {
+            g.step(Buttons::empty());
+        }
+        g.player.slide = 0x40;
+        let score = g.status.score;
+        let mut killed = false;
+        for _ in 0..80 {
+            g.step(Buttons::empty());
+            assert!(g.player.on_ground && g.player.vy == 0, "no bounce");
+            killed |= g.enemies.iter().any(|e| e.state == EnemyState::Dead && e.vy < 0);
+        }
+        assert!(killed, "the Goomba was knocked out");
+        assert_eq!(g.player.form, Form::Small, "no hit taken");
+        assert!(g.dying.is_none());
+        assert_eq!(g.status.score, score + 10, "100 points");
     }
 
     #[test]

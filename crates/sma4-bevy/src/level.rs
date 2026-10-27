@@ -214,13 +214,19 @@ fn spawn_tilemaps(commands: &mut Commands, images: &mut Assets<Image>, level: &L
 
 fn core_level(level: &LevelAsset) -> Level {
     let camera_x = level.camera_x.map(|(a, b)| (a as i32, b as i32));
-    Level::new(level.width, level.height, level.metatiles.clone(), level.solidity, level.rules.clone())
-        .with_area(level.level_id, level.junction.clone(), camera_x)
-        .with_slopes(level.slopes.clone())
-        .with_start_camera_y(level.start_camera_y as i32)
-        .with_pipe_flags(level.pipe_flags)
-        .with_water(level.water)
-        .with_camera(level.camera)
+    Level::new(level.width, level.height, level.metatiles.clone(), level.solidity, level.rules.clone()).with_area(
+        level.level_id,
+        level.junction.clone(),
+        camera_x,
+    )
+    .with_slopes(level.slopes.clone())
+    .with_start_camera_y(level.start_camera_y as i32)
+    .with_start_kind(level.start_kind)
+    .with_pipe_flags(level.pipe_flags)
+    .with_class(level.class)
+    .with_tileset(level.tileset)
+    .with_water(level.water)
+    .with_camera(level.camera)
 }
 
 fn spawn_level(
@@ -278,7 +284,7 @@ fn spawn_level(
     }
     if let Some((tx, ty)) = hit {
         let g = &mut game.0;
-        if let Some((bump, _)) = sma4_core::blocks::hit_block(&mut g.level, &g.player, tx, ty, sma4_core::HitFrom::Below) {
+        if let Some((Some(bump), _)) = sma4_core::blocks::hit_block(&mut g.level, &g.player, tx, ty, sma4_core::HitFrom::Below) {
             g.bumps.push(bump);
         }
     }

@@ -27,8 +27,14 @@ pub struct Level {
     /// The ROM's camera y at the start (0x0813600E[header byte 4 >> 5]); an autoscroll
     /// starting on the first frame keeps it.
     pub start_camera_y: Option<i32>,
+    /// How the player starts (`sma4_assets::LevelAsset::start_kind`): 1 = sliding.
+    pub start_kind: u8,
     /// Pipe flags of the tileset's class (`sma4_assets::LevelAsset::pipe_flags`).
     pub pipe_flags: u8,
+    /// The tileset's class (0x03003CF1).
+    pub class: u8,
+    /// The tileset (0x03003849).
+    pub tileset: u8,
     /// Slope collision, in tilesets with slopes.
     pub slopes: Option<Slopes>,
     /// Water ids per quadrant (`sma4_assets::LevelAsset::water`); 0xFF: none.
@@ -60,7 +66,10 @@ impl Level {
             camera_x: None,
             camera_y: None,
             start_camera_y: None,
+            start_kind: 0,
             pipe_flags: 0,
+            class: 0,
+            tileset: 0,
             slopes: None,
             water: [0xFF; 4],
             camera: sma4_assets::CameraParams {
@@ -111,6 +120,21 @@ impl Level {
 
     pub fn with_pipe_flags(mut self, flags: u8) -> Self {
         self.pipe_flags = flags;
+        self
+    }
+
+    pub fn with_class(mut self, class: u8) -> Self {
+        self.class = class;
+        self
+    }
+
+    pub fn with_tileset(mut self, tileset: u8) -> Self {
+        self.tileset = tileset;
+        self
+    }
+
+    pub fn with_start_kind(mut self, kind: u8) -> Self {
+        self.start_kind = kind;
         self
     }
 
@@ -185,6 +209,12 @@ impl Level {
         (!s.no_floor[k]).then(|| (s.height[k][x.rem_euclid(TILE_PX) as usize] & 0xF) as i32)
     }
 
+    /// The ceiling of a slope shape at pixel column `x` of its cell (the height map's high
+    /// nibble, 0x0816A029): the head is pushed down to it (0x0809A7E8).
+    pub fn slope_ceiling(&self, shape: u8, x: i32) -> i32 {
+        self.slopes.as_ref().map_or(0, |s| (s.height[shape as usize][x.rem_euclid(TILE_PX) as usize] >> 4) as i32)
+    }
+
     /// The id a cell collides as (second-plane ids mapped, `Solidity::id`).
     pub fn collision_id(&self, tx: i32, ty: i32) -> Option<u8> {
         self.metatile(tx, ty).and_then(|m| self.solidity.id(m))
@@ -199,6 +229,25 @@ impl Level {
         };
         let q = (id >> 6) as usize;
         id < self.solidity.top[q] && !matches!(id, 0xD7 | 0xE0 | 0xE1) && id > self.water[q]
+    }
+
+    /// The player's water test (0x080A1E60) on a cell: water (`is_water`), or ground the
+    /// tileset counts as under water (0x0817341C[tileset - 1] on a colliding id; World 1-5's
+    /// tileset 14: 0xDB-0xEF, 0x080A1F48).
+    pub fn player_water(&self, tx: i32, ty: i32) -> bool {
+        let Some(id) = self.collision_id(tx, ty) else {
+            return false;
+        };
+        if id < self.solidity.top[(id >> 6) as usize] {
+            return self.is_water(tx, ty);
+        }
+        match self.tileset {
+            1 | 2 | 5 | 6 | 9 | 11 | 13 => (0xDB..=0xE1).contains(&id),
+            3 | 12 => (0xC2..=0xE8).contains(&id) && id != 0xD7,
+            4 | 14 => (0xDB..=0xEF).contains(&id),
+            8 => (0x7B..=0x7F).contains(&id) || (0xDB..=0xE0).contains(&id),
+            _ => false,
+        }
     }
 
     /// Whether the pixel is in a water cell.

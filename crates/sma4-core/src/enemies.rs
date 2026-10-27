@@ -193,6 +193,11 @@ const KNOCKOUT_DRIFT: i32 = 16 * 16;
 /// frames (+0x24 = 0x0C).
 const TAIL_DRIFT: i32 = 8 * 16;
 const TAIL_GRACE: u8 = 0x0C;
+/// Sliding (0x08048F80 with +0x28 set): the player counts as above an enemy once his frame
+/// is 0xE px over it (0x13 otherwise, `STOMP_DEPTH`).
+const SLIDE_ABOVE: i32 = 0xE;
+/// 0x080493AC's knock-out after a slide: speed byte 0xB4 + (random & 0x1F) up.
+const SLIDE_KNOCKOUT: i32 = -0x4C;
 /// Piranha Plant init (0x0805510C / 0x08055134 -> 0x080550DC): x += 8 (centred on the
 /// two-column pipe), home y (+0x35:+0x3A) = spawn y, reach +0x3F = 0x19 / 0x21 px.
 const PLANT_X: i32 = 8;
@@ -382,6 +387,8 @@ pub enum Contact {
     Kicked,
     /// Landed on a resting shell, kicking it (0x08048E58: chain points, no bounce).
     KickedFromAbove,
+    /// Slid into it: knocked out, the stomp's chain points, no bounce (0x080493AC).
+    SlideKill,
     HurtPlayer,
 }
 
@@ -1291,6 +1298,13 @@ impl Enemy {
             }
             return Contact::StarKill;
         }
+        // 0x080493AC: sliding, a touch from above (it scores as a stomp, 0x08048B3C, whose
+        // bounce the slide cancels) knocks the object out whatever the stomp did; from the
+        // side it hurts as usual. Plants only ever hurt (+0x64 bit 0x1000).
+        if player.slide != 0 && !self.is_plant() && player.frame().1 <= self.px().1 - SLIDE_ABOVE {
+            self.slide_knock_out(player);
+            return Contact::SlideKill;
+        }
         let feet = player.px().1 + player.height();
         let stomp = feet <= self.px().1 + STOMP_DEPTH;
         match self.state {
@@ -1439,6 +1453,27 @@ impl Enemy {
             self.vx = dir * FIRE_DRIFT;
         }
         Some(true)
+    }
+
+    /// 0x0804955C then 0x080493AC: state 6, speed byte 0xB4 + (random & 0x1F) up, and
+    /// 0x08169D80[side] = -8 / 8 away (half as much again in water) plus half the player's
+    /// speed; contact ignored for 12 frames. Paratroopas lose their wings (0x0816966C).
+    fn slide_knock_out(&mut self, player: &Player) {
+        match self.kind {
+            PARATROOPA => self.kind = KOOPA,
+            RED_PARATROOPA => self.kind = RED_KOOPA,
+            _ => {}
+        }
+        let mut vx = -toward(player, self.x) * TAIL_DRIFT / 16;
+        if self.in_water {
+            vx += vx >> 1;
+        }
+        vx += (player.vx / 16) >> 1;
+        self.state = EnemyState::Dead;
+        self.flipped = false;
+        self.vx = vx * 16;
+        self.vy = (SLIDE_KNOCKOUT + (self.rand & 0x1F) as i32) * 16;
+        self.grace = TAIL_GRACE;
     }
 
     /// Knocked out by a shell moving in direction `dir`.

@@ -71,6 +71,14 @@ const RACCOON: u8 = 3;
 const SKID_POSES: u32 = 0x0813_DE41;
 /// Death pose (0x080A8FC0 draws 0x4B with the form forced to small).
 const DEATH_POSE: u8 = 0x4B;
+/// Sliding down a slope (0x08097A94): small, and the other forms.
+const SLIDE_POSE_SMALL: u8 = 0x33;
+const SLIDE_POSE: u8 = 0x31;
+/// Crouching (+0x48), as seen in mGBA; the small form cannot crouch.
+const CROUCH_POSE: u8 = 0x0F;
+const CROUCH_POSE_RACCOON: u8 = 0x07;
+/// The raccoon crouched in the air (0x080981C4): by the tail wag timer +0x65 >> 2.
+const RACCOON_CROUCH_AIR_POSES: u32 = 0x0813_DE9B;
 /// Grow / shrink poses (0x080A8000), one per 4 frames of player +0x3B.
 const GROW_POSES: u32 = 0x0813_DE2F;
 /// Fire Mario's throw poses 0x0813DE9E[(+0x67 >> 2) (+3 in the air)] (0x08098648).
@@ -1128,6 +1136,19 @@ fn player_poses(rom: &Rom, form: u8) -> Result<Vec<u8>, ExtractError> {
     let small = (form == 0) as u32;
     poses.extend(table(SWIM_POSES, small * 6, 6)?);
     poses.extend(table(SWIM_IDLE_POSES, small * 4, 4)?);
+    // 0x08097A94.
+    poses.push(if form == 0 { SLIDE_POSE_SMALL } else { SLIDE_POSE });
+    let crouch = match form {
+        0 => walk[2],
+        RACCOON => CROUCH_POSE_RACCOON,
+        _ => CROUCH_POSE,
+    };
+    poses.push(crouch);
+    if form == RACCOON {
+        poses.extend(table(RACCOON_CROUCH_AIR_POSES, 0, 3)?);
+    } else {
+        poses.extend([crouch; 3]);
+    }
     debug_assert_eq!(poses.len(), PLAYER_FRAMES as usize);
     Ok(poses)
 }

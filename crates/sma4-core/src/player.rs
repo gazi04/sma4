@@ -50,6 +50,8 @@ const SWIM_FLOOR: [i32; 3] = [-0xD0, 0x100, 0x100];
 const SWIM_AIR: [i32; 3] = [-0x20, 0x30, 0x80];
 const SWIM_FLOOR_MAX: i32 = 8;
 const SWIM_MAX: i32 = 0x18;
+/// Wading on the ground (0x08096884): the floor table up to 0x08172C88[0] << 1.
+const WADE_MAX: i32 = 0x10;
 /// A stroke (A) sets the speed byte to -0x20 from the floor, or adds -0x20; it is held
 /// within +/-0x20.
 const STROKE: i32 = -0x20;
@@ -71,15 +73,18 @@ const UPHILL_RUN_MAX: i32 = 0x16;
 /// Target speed with n Micro-Goombas stuck on the player: 0x08172C8A[n] (0x08096884),
 /// for n = 1.. (six projectile slots at most).
 const STUCK_MAX: [i32; 6] = [0x16, 0x15, 0x14, 0x13, 0x12, 0x11];
-/// With slopes, the lowest wall probes sit 8 px above the feet (0x08172DB7: frame y +
-/// 0x18), so the ground under a slope never blocks the feet.
-const SLOPE_WALL_LIFT: i32 = 8;
-/// Slope shapes that are the fill under a slope (0x0809A7E8: shapes 4 and 8): the floor
-/// is looked up one tile higher.
+/// Slope shapes that are the fill under a slope (0x0809A7E8: shapes 4 and 8): the feet
+/// are looked up one cell higher.
 const SLOPE_FILL: [u8; 2] = [4, 8];
-/// Standing on nothing this deep into a tile, the floor is looked up one tile lower (so the
+/// Standing on nothing this deep into a cell, the feet are looked up one cell lower (so the
 /// player follows a slope down); 0x0809A7E8.
 const SLOPE_FOLLOW_DOWN: i32 = 10;
+/// Sliding (+0x28, 0x0809A7E8): at most 0x40 either way.
+const SLIDE_MAX: i32 = 0x40;
+/// The frame's leftmost x in a level (px).
+const LEFT_END: i32 = 4;
+/// The x move's limit (0x080A35A0: player +0x8A >> 2, +0x8A = 0x100).
+const MOVE_MAX: i32 = 0x40;
 /// Acceleration table 0x08172C96 (1/256 of a speed unit per frame): friction (small 0xFF60,
 /// other forms 0xFF20), acceleration 0xE0, skid 0x200.
 const FRICTION_SMALL: i32 = -0xA0;
@@ -188,6 +193,12 @@ pub enum Pose {
     Morph(u8),
     /// Skidding: holding against the motion on the ground (0x08097800).
     Skid,
+    /// Sliding down a slope (0x08097A94).
+    Slide,
+    /// Crouching (+0x48).
+    Crouch,
+    /// Crouched in the air, step 0-2 (the raccoon's tail wag +0x65 >> 2).
+    CrouchAir(u8),
     /// Fire Mario throwing, step 0-2 (+0x67 >> 2), on the ground or in the air.
     Throw(u8),
     ThrowAir(u8),
@@ -214,6 +225,9 @@ impl Pose {
             Pose::Whip(s) => a::PLAYER_WHIP + s as usize,
             Pose::WhipAir(s) => a::PLAYER_WHIP_AIR + s as usize,
             Pose::Skid => a::PLAYER_SKID,
+            Pose::Slide => a::PLAYER_SLIDE,
+            Pose::Crouch => a::PLAYER_CROUCH,
+            Pose::CrouchAir(s) => a::PLAYER_CROUCH_AIR + s as usize,
             Pose::Throw(s) => a::PLAYER_THROW + s as usize,
             Pose::Swim(s) => a::PLAYER_SWIM + s as usize,
             Pose::SwimIdle(s) => a::PLAYER_SWIM_IDLE + s as usize,
@@ -261,8 +275,40 @@ pub struct Player {
     /// Smoke puff of a transformation (+0x3E): 0x17, -1 per frame; the player is hidden
     /// and frozen.
     pub puff: u8,
-    /// Standing on a slope that pushes against the motion (0x03003CE4).
+    /// Standing on a slope that pushes against the motion (0x03003CE4, set by the slope
+    /// pass 0x0809A7E8 on landing, read by the next frame's speed update).
     uphill: bool,
+    /// The push of the slope stood on (0x0816A179[shape], player +0x94), from the last
+    /// landing.
+    push: i32,
+    /// Sliding down a slope (+0x28): the speed byte, set as the speed every frame.
+    pub slide: i32,
+    /// The slope pass stopped a rise at a ceiling: the ROM's collision comes after the speed
+    /// update, so the stop is applied after the next one (`vertical`).
+    bonk: bool,
+    /// How far the last slope pass moved a grounded player to the floor (1/256 px). The
+    /// ROM's jump (or stroke) comes before its collision, which then leaves a rising player
+    /// where the move put him; the port's collision ran a step earlier, so a take-off takes
+    /// it back.
+    floor_snap: i32,
+    /// A landing the last slope pass held back only because the player was rising: the
+    /// floor y (1/256 px) and its push. The ROM's collision reads the speed after the
+    /// next update, so the landing happens if that one no longer rises (`land_late`).
+    late_landing: Option<(i32, i32)>,
+    /// Stopped at the level's left end (`move_x`).
+    at_left_end: bool,
+    /// The position after the last move, before its collision: what the ROM's next update
+    /// probes (it moves, updates, then collides).
+    moved: (i32, i32),
+    /// The frame counter of this step; the slope pass probes the walls on alternate sides
+    /// with it while standing still.
+    clock: u32,
+    /// The slide pose this frame (0x08097A94).
+    slide_pose: bool,
+    /// Crouching (+0x48, `crouch`): the collision is the small form's.
+    pub crouch: bool,
+    /// Standing on an object (0x030038C5), with its speed byte across; set by the game.
+    pub riding: Option<i32>,
     /// Micro-Goombas riding the player (0x03007820 + 7), set by the game every frame.
     pub stuck: u8,
     /// Fire Flower flash (+0x3F = 0x1F, 0x0806B1E4): the player and the objects stop.
@@ -333,7 +379,12 @@ impl Player {
     }
 
     pub fn height(&self) -> i32 {
-        self.form.height()
+        if self.crouch { Form::Small.height() } else { self.form.height() }
+    }
+
+    /// The small form's probes and box: small, or crouching (+0x48).
+    fn small_box(&self) -> bool {
+        self.form == Form::Small || self.crouch
     }
 
     /// Centre of the box in pixels.
@@ -359,12 +410,24 @@ impl Player {
 
     /// Changes form, keeping the feet where they are.
     pub fn set_form(&mut self, form: Form) {
+        self.set_crouch(false);
         self.y += (self.form.height() - form.height()) * SUB;
         self.form = form;
         if form != Form::Raccoon {
             self.flight = 0;
             self.whip = 0;
         }
+    }
+
+    /// Entering a level from the map (0x08094E4C in sub-state 0x19): standing if the probe
+    /// at frame (8, 0x21) is at least top-solid, and the header's start kind becomes the
+    /// slide byte (+0x28), so World 1-5 (kind 1) starts with Mario already sliding, in the
+    /// slide pose.
+    pub fn start(&mut self, kind: u8, map: &Level) {
+        let (fx, fy) = self.frame();
+        self.on_ground = map.at((fx + 8).div_euclid(TILE_PX), (fy + 0x21).div_euclid(TILE_PX)) != TileKind::Empty;
+        self.slide = kind as i32;
+        self.slide_pose = kind == 1;
     }
 
     /// Mushroom (0x0806B158): small -> big, with the grow animation (+0x3B = 0x2F; the form
@@ -494,11 +557,13 @@ impl Player {
             }
         }
         self.dither = (self.dither & 0xF0).wrapping_add(0x70);
+        self.clock = frame;
 
         let last = self.now.replace((self.x, self.y, self.on_ground));
         self.seen = last.unwrap_or((self.x, self.y, self.on_ground));
         self.seen.2 &= !self.took_off;
         let grounded = self.on_ground;
+        self.crouch_check(held, map);
         let mut pressed = pressed;
         let (vx, vy) = (self.vx, self.vy);
         self.splash = self.water(held, &mut pressed, map, frame);
@@ -507,19 +572,30 @@ impl Player {
             self.y = self.seen.1 + self.vy;
         }
         if self.in_water {
+            // 0x0809A7E8: no sliding in the water, but a landing still sets the uphill flag.
+            self.slide = 0;
             // 0x0809588C steps the walk cycle (0x08097800) before the swimming handlers.
             self.animate_walk(held);
             self.swim_horizontal(held);
             self.swim_vertical(pressed, frame);
+            self.land_late();
+            if self.on_ground {
+                self.set_uphill();
+            }
             self.swim_pose = None;
             if !self.seen.2 {
                 self.stroke_pose(pressed, frame);
             }
         } else {
-            self.horizontal(held);
+            self.horizontal(held, map);
             self.vertical(held, pressed);
+            self.land_late();
+            self.slide(held);
         }
         self.took_off = grounded && !self.on_ground;
+        if self.took_off {
+            self.y -= self.floor_snap;
+        }
         if flying {
             self.vx = 0;
             self.vy = (self.sky as i32 + 1) * UNIT;
@@ -528,8 +604,30 @@ impl Player {
             self.raccoon(pressed);
         }
         self.update_p_meter(frame);
+        // The ROM's next water check comes before its move: falling in stops the fall (and
+        // in the air the motion across), at the surface the rise is held (`surface_hold`),
+        // and the move goes by that; the speeds themselves change next step (`water`).
+        let (x, y, ground) = self.now.unwrap_or((self.x, self.y, self.on_ground));
+        let speeds = (self.vx, self.vy);
+        if !self.in_water && self.head_in_water(map, x, y) {
+            if self.vy >= 0 {
+                self.vy = 0;
+                if !ground {
+                    self.vx = 0;
+                }
+            }
+        } else if let Some(rise) = self.surface_hold(map, x, y, ground, frame.wrapping_add(1)) {
+            self.vy = rise * UNIT;
+        }
+        let moved_by = (self.vx, self.vy);
         self.move_x(map);
         let head_hit = self.move_y(map);
+        if self.vx == moved_by.0 {
+            self.vx = speeds.0;
+        }
+        if self.vy == moved_by.1 {
+            self.vy = speeds.1;
+        }
         self.white_block(held, map);
         self.behind_scenery(map, frame);
         if self.on_ground && !self.in_water {
@@ -548,7 +646,7 @@ impl Player {
     fn water(&mut self, held: Buttons, pressed: &mut Buttons, map: &Level, frame: u32) -> Option<WaterChange> {
         let (fx, fy) = self.frame_at(self.seen.0, self.seen.1);
         let ground = self.seen.2;
-        let dy = if self.form == Form::Small { 0x14 } else { 0x0A };
+        let dy = if self.small_box() { 0x14 } else { 0x0A };
         let (hx, hy) = ((fx + 8).div_euclid(TILE_PX), map.row_at(fy + dy));
         let head_solid = map.at(hx, hy) != TileKind::Empty;
         if !head_solid && map.is_water(hx, hy) {
@@ -584,10 +682,42 @@ impl Player {
         self.vy = rise * UNIT;
         pressed.remove(Buttons::A);
         if held.contains(Buttons::UP | Buttons::A) {
-            self.vy = if self.form == Form::Small { LEAP_SMALL } else { LEAP } * UNIT;
+            self.vy = if self.small_box() { LEAP_SMALL } else { LEAP } * UNIT;
             return Some(self.leave_water());
         }
         None
+    }
+
+    /// `water`'s head probe for a box at (x, y): in a water cell that does not collide.
+    fn head_in_water(&self, map: &Level, x: i32, y: i32) -> bool {
+        let (fx, fy) = self.frame_at(x, y);
+        let dy = if self.small_box() { 0x14 } else { 0x0A };
+        let (hx, hy) = ((fx + 8).div_euclid(TILE_PX), map.row_at(fy + dy));
+        map.at(hx, hy) == TileKind::Empty && map.is_water(hx, hy)
+    }
+
+    /// The surface part of `water` for a frame at box (x, y) with ground flag `ground`: in
+    /// the water, airborne, the head probe out of it and not in ground, and (falling) the
+    /// foot probe still in water or ground: the speed byte held to -0xC, +1 when
+    /// `frame & 7 == 0`.
+    fn surface_hold(&self, map: &Level, x: i32, y: i32, ground: bool, frame: u32) -> Option<i32> {
+        if !self.in_water || ground {
+            return None;
+        }
+        let (fx, fy) = self.frame_at(x, y);
+        let dy = if self.small_box() { 0x14 } else { 0x0A };
+        let (hx, hy) = ((fx + 8).div_euclid(TILE_PX), map.row_at(fy + dy));
+        if map.at(hx, hy) != TileKind::Empty || map.is_water(hx, hy) {
+            return None;
+        }
+        let vy = self.vy / UNIT;
+        if vy >= 0 {
+            let (tx, ty) = ((fx + 8).div_euclid(TILE_PX), map.row_at(fy + 0x20));
+            if map.at(tx, ty) == TileKind::Empty && !map.is_water(tx, ty) {
+                return None;
+            }
+        }
+        Some(vy.max(SURFACE_RISE) + (frame & 7 == 0) as i32)
     }
 
     fn leave_water(&mut self) -> WaterChange {
@@ -697,7 +827,10 @@ impl Player {
     }
 
     /// 0x08096884 / 0x08096D24.
-    fn horizontal(&mut self, held: Buttons) {
+    fn horizontal(&mut self, held: Buttons, map: &Level) {
+        // The ROM's speed update reads the air flag its last collision left: the one the
+        // port's collision left a step earlier (its position runs a frame ahead).
+        let ground = self.seen.2;
         let dir = match (held.contains(Buttons::LEFT), held.contains(Buttons::RIGHT)) {
             (true, false) => -1,
             (false, true) => 1,
@@ -705,7 +838,9 @@ impl Player {
         };
         let speed = self.vx / UNIT;
         let run = held.contains(Buttons::B);
+        let wading = self.wading(map);
         let target = match (run, self.p_meter == P_FULL) {
+            _ if wading => if ground { WADE_MAX } else { SWIM_MAX },
             _ if self.uphill => {
                 // The walk cycle also runs twice as fast (+0x4B).
                 self.walk_timer += 1;
@@ -718,15 +853,22 @@ impl Player {
         };
         // P-meter input (+0x53) and take-off permission (+0x1F); not uphill, nor with
         // Micro-Goombas on.
-        if run && self.on_ground && !self.uphill && self.stuck == 0 {
+        if run && ground && !wading && !self.uphill && self.stuck == 0 && self.slide == 0 {
             self.running = speed.abs() >= RUN_MAX;
             if speed.abs() >= WALK_MAX && dir != 0 && dir == speed.signum() && self.p_timer == 0 && self.p_meter > 0x3E {
                 self.fly_ready = true;
             }
         }
-        let friction = if self.form == Form::Small { FRICTION_SMALL } else { FRICTION };
+        let (friction, accel, skid) = match () {
+            _ if wading => {
+                let t = if ground { SWIM_FLOOR } else { SWIM_AIR };
+                (t[0], t[1], t[2])
+            }
+            _ if self.form == Form::Small => (FRICTION_SMALL, ACCEL, SKID),
+            _ => (FRICTION, ACCEL, SKID),
+        };
         if dir == 0 {
-            if self.on_ground && speed != 0 {
+            if ground && speed != 0 {
                 self.accelerate(if speed < 0 { -friction } else { friction });
             }
             return;
@@ -735,12 +877,12 @@ impl Player {
             self.facing_left = dir < 0;
         }
         let delta = if speed != 0 && speed.signum() != dir {
-            SKID
+            skid
         } else if speed.abs() == target {
             return;
         } else if speed.abs() < target {
-            ACCEL
-        } else if !self.on_ground {
+            accel
+        } else if !ground {
             return;
         } else {
             friction
@@ -748,13 +890,26 @@ impl Player {
         self.accelerate(delta * dir);
     }
 
+    /// 0x08096884: wading, out of the water (+0x4C) with the probe at frame (8, 0x1D) in it
+    /// and the one at (8, 0x14 small / 8) not (`Level::player_water`).
+    fn wading(&self, map: &Level) -> bool {
+        let (fx, fy) = self.frame_at(self.moved.0, self.moved.1);
+        let water = |dy: i32| map.player_water((fx + 8).div_euclid(TILE_PX), (fy + dy).div_euclid(TILE_PX));
+        water(0x1D) && !water(if self.small_box() { 0x14 } else { 8 })
+    }
+
     /// 0x08096F9C: jump, gravity.
     fn vertical(&mut self, held: Buttons, pressed: Buttons) {
         let mut vy = self.vy / UNIT;
-        if self.on_ground && pressed.contains(Buttons::A) {
+        // As in `horizontal`: the air flag of the ROM's last collision. Its collision comes
+        // after this update, so a landing (the port's last collision) still stops the fall.
+        let mut ground = self.seen.2;
+        let landed = self.on_ground;
+        if ground && pressed.contains(Buttons::A) {
             let speed = (self.vx / UNIT).unsigned_abs() as usize;
             vy = JUMP_BASE - JUMP_BONUS[(speed >> 4).min(7)];
             self.on_ground = false;
+            ground = false;
             self.flutter = 0;
             // 0x0809D72C: a full P-meter and a running start lets the raccoon take off.
             if self.p_meter == P_FULL && self.fly_ready {
@@ -762,7 +917,7 @@ impl Player {
                 self.flight = FLIGHT_TIME;
             }
         }
-        if self.on_ground {
+        if ground || (landed && self.on_ground) {
             if !self.is_raccoon() {
                 self.flight = 0;
             }
@@ -785,6 +940,10 @@ impl Player {
             } else {
                 vy = FLY_RISE;
             }
+        }
+        // A ceiling met in the last collision (`slope_pass`) stops what is left of the rise.
+        if std::mem::take(&mut self.bonk) && vy < 0 {
+            vy = 0;
         }
         self.vy = vy.min(MAX_FALL) * UNIT;
     }
@@ -883,6 +1042,15 @@ impl Player {
             let step = (self.whip >> 2).min(4);
             return if self.on_ground { Pose::Whip(step) } else { Pose::WhipAir(step) };
         }
+        // 0x08097A94 (from 0x08097800, before the handlers): the slide pose stays on the
+        // frame he slides off an edge; a jump's handler replaces it.
+        if self.slide_pose && (self.on_ground || self.vy >= 0) {
+            return Pose::Slide;
+        }
+        // 0x080981C4: a crouching raccoon in the air shows 0x0813DE9B[+0x65 >> 2].
+        if self.crouch {
+            return if self.on_ground { Pose::Crouch } else { Pose::CrouchAir((self.wag >> 2).min(2)) };
+        }
         if self.on_ground {
             if self.skidding {
                 return Pose::Skid;
@@ -900,7 +1068,7 @@ impl Player {
                 (false, true) => Pose::Glide(wag),
             };
         }
-        if falling && self.form == Form::Big { Pose::Fall } else { Pose::Jump }
+        if falling && matches!(self.form, Form::Big | Form::Fire) { Pose::Fall } else { Pose::Jump }
     }
 
     /// After the goal card is touched (0x080A8000 while +0x43 is set; the goal object sets it
@@ -950,6 +1118,83 @@ impl Player {
         speed.abs() > 1 && held.contains(if speed > 0 { Buttons::LEFT } else { Buttons::RIGHT })
     }
 
+    /// Sliding down a slope (+0x28). 0x08097800 ends a slide in the air or with Left, Right
+    /// or Up held (and shows the slide pose, 0x08097A94: 0x33 small, 0x31 others); then
+    /// 0x0809A7E8, on the ground: Down alone on a slope that pushes (0x0816A179: 45 degrees
+    /// +/-3, gentle +/-2) starts one; each frame the push is added (not while going up a
+    /// slope against the slide), the slide is held within +/-0x40 and loses 1, and it is
+    /// the speed. On flat ground it runs down by 1 a frame.
+    fn slide(&mut self, held: Buttons) {
+        self.slide_pose = self.slide != 0;
+        // 0x08097800 runs before the handlers: the air flag of the ROM's last collision, as
+        // in `horizontal`.
+        if self.slide != 0
+            && (!self.seen.2 || held.contains(Buttons::LEFT) || held.contains(Buttons::RIGHT) || held.contains(Buttons::UP))
+        {
+            self.slide = 0;
+        }
+        if !self.on_ground {
+            return;
+        }
+        self.set_uphill();
+        let (p, mut s) = (self.push, self.slide);
+        let against = s != 0 && (if s < 0 { -p } else { p }) < 0;
+        if !against {
+            if s == 0 {
+                // (0x03003AEA & 0xB0) == 0x80: Down, without Left or Right.
+                let down_only = held.contains(Buttons::DOWN) && !held.contains(Buttons::LEFT) && !held.contains(Buttons::RIGHT);
+                if p == 0 || !down_only {
+                    return;
+                }
+                self.slide_pose = true;
+            }
+            s = (s + p).clamp(-SLIDE_MAX, SLIDE_MAX);
+        }
+        s += if s < 0 { 1 } else { -1 };
+        self.slide = s;
+        self.vx = s * UNIT;
+    }
+
+    /// 0x03003CE4, for the next frame's speed: the push against the motion (a speed of 0
+    /// counts as rightward). Set only on landing: a jump keeps it.
+    fn set_uphill(&mut self) {
+        self.uphill = self.push != 0 && (self.push < 0) != (self.vx < 0);
+    }
+
+    /// 0x0809588C, first thing: big forms crouch (+0x48) on the ground with Down alone on
+    /// the pad, not while sliding, nor where the slope pushes a moving player (+0x46, so on
+    /// a slope Down slides); a crouch lasts through a jump and ends in the water. Not with
+    /// Micro-Goombas on.
+    fn crouch_check(&mut self, held: Buttons, map: &Level) {
+        let pad = held & (Buttons::DOWN | Buttons::UP | Buttons::LEFT | Buttons::RIGHT);
+        let crouch = if self.form == Form::Small || self.slide != 0 || self.stuck != 0 {
+            false
+        } else if self.seen.2 {
+            !(map.has_slopes() && self.push != 0 && self.vx != 0) && (pad == Buttons::DOWN || self.held_down(map))
+        } else {
+            self.crouch && !self.in_water
+        };
+        self.set_crouch(crouch);
+    }
+
+    /// 0x0809F0F4: crouched on an object, ground at frame (8, 0x0A) keeps the player down,
+    /// as does ground at (0x0E, 0x0E) on one moving right, (1, 0x0E) moving left.
+    fn held_down(&self, map: &Level) -> bool {
+        let Some(speed) = self.riding.filter(|_| self.crouch) else { return false };
+        let (fx, fy) = self.frame();
+        let solid = |dx: i32, dy: i32| map.at((fx + dx).div_euclid(TILE_PX), (fy + dy).div_euclid(TILE_PX)) == TileKind::Solid;
+        solid(8, 0x0A) || (speed != 0 && solid(if speed > 0 { 0x0E } else { 1 }, 0x0E))
+    }
+
+    /// Crouches or stands, keeping the feet where they are.
+    fn set_crouch(&mut self, crouch: bool) {
+        if crouch != self.crouch {
+            let h = self.height();
+            self.crouch = crouch;
+            self.y += (h - self.height()) * SUB;
+        }
+    }
+
     /// 0x08097800: advance the walk cycle at a speed-dependent rate; standing still with
     /// no direction held shows the standing step.
     fn animate_walk(&mut self, held: Buttons) {
@@ -965,11 +1210,48 @@ impl Player {
         }
     }
 
+    /// The x move (0x0809588C -> 0x080A35A0): on a slope, moving, the slope's push (+0x46,
+    /// kept by 0x0809A7E8 while the speed is not 0) is added for the move: downhill faster,
+    /// uphill slower. The sum is held within +/-0x40 (+0x8A >> 2) and the speed keeps what
+    /// is left of it once the push is taken off again.
     fn move_x(&mut self, map: &Level) {
-        self.x += self.vx;
+        // In the water 0x0809A7E8 returns before keeping it, and a jump leaves no landing.
+        // Stopped at the level's left end, the speed stays 0 while it points into it.
+        if self.at_left_end && self.vx < 0 {
+            self.vx = 0;
+        }
+        let from = self.frame().0;
+        let push = if self.vx != 0 && !self.in_water && self.on_ground { self.push } else { 0 };
+        let v = self.vx / UNIT + push;
+        if v.abs() >= MOVE_MAX {
+            self.vx = (v.signum() * MOVE_MAX - push) * UNIT;
+        }
+        self.x += self.vx + push * UNIT;
+        // The level's left end (checked in mGBA, 1-1 and 1-2, whatever the camera): moving
+        // left from a frame at x 4 or less stops the speed, a frame left of 4 is put back at
+        // 4 (its fraction kept), and Left no longer moves the player until he turns away.
+        if self.vx < 0 && from <= LEFT_END {
+            let fx = self.frame().0;
+            if fx < LEFT_END {
+                self.x += (LEFT_END - fx) * SUB;
+            }
+            self.vx = 0;
+            self.at_left_end = true;
+        } else if self.vx > 0 {
+            self.at_left_end = false;
+        }
+        if map.has_slopes() {
+            // The slope pass (`slope_pass`) handles the walls; the right end stops the
+            // player as before.
+            let max = (map.pixel_width() - HITBOX_W) * SUB;
+            if self.x > max {
+                self.x = max;
+                self.vx = 0;
+            }
+            return;
+        }
         let (px, py) = self.px();
-        let lift = if map.slopes.is_some() { SLOPE_WALL_LIFT } else { 0 };
-        let rows = map.row_span(py, self.height() - lift);
+        let rows = map.row_span(py, self.height());
         if self.vx > 0 {
             let tx = (px + HITBOX_W - 1).div_euclid(TILE_PX);
             if rows.iter().any(|&ty| map.at(tx, ty) == TileKind::Solid) {
@@ -993,10 +1275,10 @@ impl Player {
         let cols = tile_span(px, HITBOX_W);
         let grounded = self.on_ground;
         self.on_ground = false;
-        self.uphill = false;
-        if self.vy >= 0 && map.slopes.is_some() {
-            self.land_on_slope(map, grounded);
-            return None;
+        self.push = 0;
+        self.moved = (self.x, self.y);
+        if map.has_slopes() {
+            return self.slope_pass(map, grounded);
         }
         if self.vy >= 0 {
             let ty = map.row_at(py + h);
@@ -1082,7 +1364,7 @@ impl Player {
             self.behind -= 1;
         }
         let (fx, fy) = self.frame();
-        let dy = if self.form == Form::Small { 0x14 } else { 0x0A };
+        let dy = if self.small_box() { 0x14 } else { 0x0A };
         let id = map.metatile((fx + 8).div_euclid(TILE_PX), (fy + dy).div_euclid(TILE_PX));
         let inside = id.is_some_and(|m| m != crate::level::SKY && m != 0x41);
         if inside {
@@ -1102,39 +1384,177 @@ impl Player {
         self.stomp_chain = 0;
     }
 
-    /// 0x0809A7E8: the floor of a slope tileset, from the probe under the middle of the
-    /// feet (frame x + 8, y + 0x20).
-    fn land_on_slope(&mut self, map: &Level, grounded: bool) {
-        let (px, py) = self.px();
-        let bottom = py + self.height();
-        let cx = px + HITBOX_W / 2;
-        let tx = cx.div_euclid(TILE_PX);
-        let mut ty = bottom.div_euclid(TILE_PX);
-        let mut shape = map.slope(tx, ty);
-        if SLOPE_FILL.contains(&shape) {
-            // The fill under a slope: the slope itself is one tile up.
-            let above = map.slope(tx, ty - 1);
-            if map.slope_floor(above, cx).is_some() {
-                shape = above;
-                ty -= 1;
-            }
-        } else if shape == 0 && grounded && bottom.rem_euclid(TILE_PX) >= SLOPE_FOLLOW_DOWN {
-            let below = map.slope(tx, ty + 1);
-            if map.slope_floor(below, cx).is_some() {
-                shape = below;
-                ty += 1;
+    /// The ROM's collision for tilesets with slopes, 0x0809A7E8, on the 16x32 frame (as
+    /// 1/256 px from here on). Probes (0x08172DB7, (y, x) from the frame's top-left; x 3
+    /// for the left side, 0xD the right, by the motion, by the frame counter when still):
+    /// 0 feet (0x20, 8), 1 head (5, 8; small 0x12), 2 / 3 walls (0x18, side) and (0xC, side;
+    /// small 0x17); a probe reads the cell's slope shape (0x080A3760) or, for the walls, its
+    /// solidity.
+    /// * Feet on the fill under a slope (shapes 4, 8): the frame goes up so the feet are on
+    ///   the cell above's last line, probed again. On the ground with nothing under the feet
+    ///   and the feet 10 or more into their cell: down so the feet are on the next cell's top
+    ///   line, probed again (the player follows a slope down). Otherwise, with the head in
+    ///   ground (shapes 4, 7): down to the next cell line under the head.
+    /// * Walls: either wall probe solid pushes the frame 1 px a frame until the side probe
+    ///   lines up with the cell edge (toward the left in the cell's left half), and moving
+    ///   into the push stops the speed and any slide.
+    /// * Floor (the feet's shape has one, 0x08172DE3): not while rising unless sliding; in
+    ///   the air not rising faster than -0x1C and only once the feet reach the height map's
+    ///   floor; then the feet's line in the cell becomes the floor and the player lands
+    ///   (0x080A3A5C, which drops the fraction). The push of the shape is kept (`slide`, `move_x`).
+    /// * No floor: with the head on a shape (a ceiling slope, 5 / 6 / 0x13 / 0x14, or
+    ///   solid), the head is pushed down to the ceiling line of the height map (high nibble)
+    ///   when it is above it, stopping a rise (sound 0x60). With nothing at the head, on the
+    ///   ground: a last probe at (0x20, 0xB) in the cell's left half, (0x20, 4) in its right,
+    ///   keeps the player standing if it is solid ground (shape 3); otherwise he falls.
+    fn slope_pass(&mut self, map: &Level, grounded: bool) -> Option<(i32, i32)> {
+        let h = self.height();
+        let small = self.small_box();
+        self.floor_snap = 0;
+        self.late_landing = None;
+        let mut fx = self.x + (HITBOX_W / 2 - FRAME_W / 2) * SUB;
+        let mut fy = self.y + (h - FRAME_H) * SUB;
+        let px = |v: i32| v.div_euclid(SUB);
+        let cell = |x: i32, y: i32| (x.div_euclid(TILE_PX), y.div_euclid(TILE_PX));
+        let shape_at = |fx: i32, fy: i32, dy: i32, dx: i32| {
+            let (tx, ty) = cell(px(fx) + dx, px(fy) + dy);
+            map.slope(tx, ty)
+        };
+        let right = self.vx > 0 || (self.vx == 0 && self.clock & 1 != 0);
+        let side = if right { 0xD } else { 3 };
+        let upper = if small { 0x17 } else { 0xC };
+        let head_dy = if small { 0x12 } else { 5 };
+        let wall = |fy: i32, dy: i32| {
+            let (tx, ty) = cell(px(fx) + side, px(fy) + dy);
+            map.at(tx, ty) == TileKind::Solid
+        };
+        // All four probes come first; the wall test reads them later.
+        let walls = wall(fy, upper) || wall(fy, 0x18);
+        let mut feet = shape_at(fx, fy, 0x20, 8);
+        let mut head = shape_at(fx, fy, head_dy, 8);
+        // Hidden blocks (World 1-5's 0x46): passable tiles with a bump behaviour stop the
+        // head-centre probe from below (checked in mGBA: the head turns there and the tile
+        // becomes 0x71).
+        if self.vy < 0 {
+            let (hx, hy) = self.px();
+            let (tx, ty) = ((hx + HITBOX_W / 2).div_euclid(TILE_PX), map.row_at(hy));
+            if map.at(tx, ty) == TileKind::Empty
+                && map.metatile(tx, ty).is_some_and(|m| {
+                    m < 0x100 && map.rules.bump_behaviour[m as usize] != sma4_assets::BlockRules::NOT_BUMPABLE
+                })
+            {
+                self.y = map.row_top(ty + 1, hy) * SUB;
+                self.vy = 0;
+                return Some((tx, ty));
             }
         }
-        let Some(offset) = map.slope_floor(shape, cx) else { return };
-        let floor = ty * TILE_PX + offset;
-        // On the ground the feet follow the floor up and down; in the air they only land
-        // once they reach it.
-        if !grounded && bottom < floor {
+        let line = |fy: i32, to: i32| (fy & !(0xF * SUB)) + to * SUB;
+        // Where a rising player would be left (see `floor_snap`).
+        let mut air_y = self.y;
+        if SLOPE_FILL.contains(&feet) {
+            fy = line(fy, -1);
+            feet = shape_at(fx, fy, 0x20, 8);
+            air_y = fy - (h - FRAME_H) * SUB;
+        } else if grounded && feet == 0 && px(fy) & 0xF >= SLOPE_FOLLOW_DOWN {
+            fy = line(fy, TILE_PX);
+            feet = shape_at(fx, fy, 0x20, 8);
+        } else if head == 4 || head == 7 {
+            fy += ((-(head_dy + px(fy))) & 0xF) * SUB;
+            // 0x0809B508 with 0x08172E02: a small player's feet, a big one's head at 0x12.
+            if small {
+                feet = shape_at(fx, fy, 0x20, 8);
+            } else {
+                head = shape_at(fx, fy, 0x12, 8);
+            }
+        }
+        if walls {
+            let left_half = px(fx) & 0xF < 8;
+            let (dir, edge) = if left_half { (-1, 0xD) } else { (1, 4) };
+            if (px(fx) + edge) & 0xF != 0 {
+                fx += dir * SUB;
+                if (dir < 0) == (self.vx >= 0) {
+                    self.vx = 0;
+                    self.slide = 0;
+                }
+            }
+        }
+        self.x = fx - (HITBOX_W / 2 - FRAME_W / 2) * SUB;
+        self.y = fy - (h - FRAME_H) * SUB;
+        let col = px(fx) + 8;
+        let Some(floor) = map.slope_floor(feet, col) else {
+            if head != 0 {
+                return self.ceiling(map, head, head_dy, col, fy);
+            }
+            if grounded {
+                let dx = if px(fx) & 0xF < 8 { 0xB } else { 4 };
+                if shape_at(fx, fy, 0x20, dx) == 3 {
+                    self.on_ground = true;
+                }
+            }
+            return None;
+        };
+        // 0x080A3A5C drops the fraction.
+        let floor_y = (line(fy, floor) & !(SUB - 1)) - (h - FRAME_H) * SUB;
+        if !grounded && px(fy) & 0xF < floor {
+            return None;
+        }
+        if (self.slide == 0 && self.vy < 0) || (!grounded && self.vy < -0x1C * UNIT) {
+            if !grounded {
+                self.late_landing = Some((floor_y, map.slope_push(feet)));
+            }
+            return None;
+        }
+        self.y = floor_y;
+        self.vy = 0;
+        self.on_ground = true;
+        self.flutter = 0;
+        self.stomp_chain = 0;
+        self.push = map.slope_push(feet);
+        if grounded {
+            self.floor_snap = self.y - air_y;
+        }
+        None
+    }
+
+    /// The landing `slope_pass` held back, once this step's update has stopped the rise
+    /// (in the ROM, the collision after that update lands).
+    fn land_late(&mut self) {
+        let Some((y, push)) = self.late_landing.take() else { return };
+        if self.vy < 0 && self.slide == 0 {
             return;
         }
-        self.land(floor);
-        let push = map.slope_push(shape);
-        self.uphill = push != 0 && (push < 0) != (self.vx < 0);
+        self.y = y;
+        self.vy = 0;
+        self.on_ground = true;
+        self.flutter = 0;
+        self.stomp_chain = 0;
+        self.push = push;
+        // The ROM was standing there already at the end of the last step.
+        if let Some(now) = &mut self.now {
+            (now.1, now.2) = (y, true);
+        }
+    }
+
+    /// The ceiling part of 0x0809A7E8: the head's line in its cell against the height
+    /// map's ceiling.
+    fn ceiling(&mut self, map: &Level, head: u8, head_dy: i32, col: i32, fy: i32) -> Option<(i32, i32)> {
+        let at = (fy.div_euclid(SUB) + head_dy) & 0xF;
+        let ceiling = map.slope_ceiling(head, col);
+        if ceiling < at {
+            return None;
+        }
+        let rising = self.vy < 0;
+        if rising {
+            if self.in_water {
+                self.vy = 0;
+            } else {
+                self.bonk = true;
+            }
+        }
+        self.y += (ceiling - at) * SUB;
+        // The block under the head-centre probe takes the bump.
+        let (tx, ty) = (col.div_euclid(TILE_PX), (fy.div_euclid(SUB) + head_dy).div_euclid(TILE_PX));
+        (rising && map.at(tx, ty) == TileKind::Solid).then_some((tx, ty))
     }
 }
 
@@ -1339,9 +1759,17 @@ mod tests {
 
     #[test]
     fn wall_stops_player() {
-        let mut s = Sim::new(floor(), 32);
+        let (w, h) = (40, 6);
+        let mut kinds = vec![TileKind::Empty; w * h];
+        for x in 0..w {
+            kinds[(h - 1) * w + x] = TileKind::Solid;
+        }
+        for y in 0..h {
+            kinds[y * w + 4] = TileKind::Solid;
+        }
+        let mut s = Sim::new(Level::from_kinds(w, h, &kinds), 8 * TILE_PX);
         s.run(Buttons::LEFT, 300);
-        assert_eq!(s.p.px().0, 0);
+        assert_eq!(s.p.px().0, 5 * TILE_PX);
         assert_eq!(s.p.vx, 0);
     }
 
@@ -1526,46 +1954,8 @@ mod tests {
         assert!(!s.p.facing_left, "turned twice, facing the same way again");
     }
 
-    /// 24x8 hills level (tileset 3 thresholds): flat ground on row 7, a 45-degree hill up
-    /// from column 6 to a flat top on row 4 (columns 9-12) and back down to column 15.
     fn hill() -> Level {
-        use sma4_assets::{BlockRules, Slopes, Solidity};
-        const UP: u16 = 0x99;
-        const FLAT: u16 = 0x9A;
-        const DOWN: u16 = 0x9B;
-        const FILL: u16 = 0xAB;
-        const SKY: u16 = 0x80;
-        let (w, h) = (24, 8);
-        let mut m = vec![SKY; w * h];
-        let mut put = |x: usize, y: usize, t: u16| m[y * w + x] = t;
-        for x in 0..w {
-            put(x, 7, FLAT);
-        }
-        for (x, top, t) in [(6, 6, UP), (7, 5, UP), (8, 4, UP), (13, 4, DOWN), (14, 5, DOWN), (15, 6, DOWN)] {
-            put(x, top, t);
-            (top + 1..h).for_each(|y| put(x, y, FILL));
-        }
-        for x in 9..13 {
-            put(x, 4, FLAT);
-            (5..h).for_each(|y| put(x, y, FILL));
-        }
-        // Shapes 1 (up), 2 (down), 4 (fill), 7 (flat) as in the ROM tables.
-        let mut slopes = Slopes::default();
-        for (id, shape) in [(UP, 1), (FLAT, 7), (DOWN, 2), (FILL, 4)] {
-            slopes.shape[id as usize] = shape;
-        }
-        slopes.height[1] = std::array::from_fn(|x| 15 - x as u8);
-        slopes.height[2] = std::array::from_fn(|x| x as u8);
-        for k in [1, 2, 4, 7] {
-            slopes.no_floor[k] = false;
-        }
-        slopes.height[4] = [0; 16];
-        slopes.height[7] = [0; 16];
-        slopes.push[1] = -3;
-        slopes.push[2] = 3;
-        let solidity =
-            Solidity { top: [0x25, 0x5F, 0x99, 0xE2], solid: [0x2E, 0x5F, 0xA6, 0xF0], high: [0; sma4_assets::HIGH_IDS] };
-        Level::new(w, h, m, solidity, BlockRules::default()).with_slopes(Some(slopes))
+        crate::level::test_hill()
     }
 
     #[test]
@@ -1619,6 +2009,109 @@ mod tests {
         s.run(Buttons::empty(), 80);
         assert!(s.p.on_ground);
         assert_eq!(s.p.px().1 + s.p.height(), 5 * TILE_PX + 15 - cx % TILE_PX, "back on the slope");
+    }
+
+    #[test]
+    fn down_on_a_slope_slides_and_gathers_speed_down_it() {
+        // The hill's right side goes down to the right (push 3).
+        let mut s = Sim::new(hill(), 13 * TILE_PX + 4);
+        assert!(s.p.on_ground && s.p.slide == 0);
+        s.run(Buttons::DOWN, 1);
+        assert_eq!(s.p.slide, 2, "the push less 1");
+        assert_eq!(s.p.pose(), Pose::Slide);
+        s.run(Buttons::DOWN, 4);
+        assert_eq!((s.p.slide, s.p.vx / UNIT), (10, 10));
+        // On the flat it runs down by 1 a frame, Down or not, and stops.
+        s.run(Buttons::empty(), 120);
+        assert!(s.p.px().0 > 16 * TILE_PX, "slid off the slope");
+        assert_eq!((s.p.slide, s.p.vx), (0, 0));
+        assert_ne!(s.p.pose(), Pose::Slide);
+    }
+
+    #[test]
+    fn down_on_flat_ground_does_not_slide_and_left_right_or_up_end_a_slide() {
+        let mut s = Sim::new(hill(), 2 * TILE_PX);
+        s.run(Buttons::DOWN, 10);
+        assert_eq!(s.p.slide, 0);
+        for end in [Buttons::LEFT, Buttons::RIGHT, Buttons::UP] {
+            let mut s = Sim::new(hill(), 13 * TILE_PX + 4);
+            s.run(Buttons::DOWN, 4);
+            assert!(s.p.slide > 0);
+            s.run(end, 1);
+            assert_eq!(s.p.slide, 0, "{end:?}");
+        }
+    }
+
+    #[test]
+    fn big_forms_crouch_with_down_alone_and_keep_it_through_a_jump() {
+        let mut s = Sim::new(floor(), 64);
+        s.p.set_form(Form::Big);
+        s.run(Buttons::empty(), 4);
+        let feet = s.p.px().1 + s.p.height();
+        s.run(Buttons::DOWN, 2);
+        assert!(s.p.crouch);
+        assert_eq!((s.p.height(), s.p.px().1 + s.p.height()), (16, feet), "small box, feet kept");
+        assert_eq!(s.p.pose(), Pose::Crouch);
+        s.run(Buttons::DOWN | Buttons::A, 1);
+        s.run(Buttons::empty(), 10);
+        assert!(!s.p.on_ground && s.p.crouch, "crouched through the jump");
+        s.run(Buttons::empty(), 60);
+        assert!(s.p.on_ground && !s.p.crouch, "stands on landing without Down");
+        s.run(Buttons::DOWN | Buttons::RIGHT, 4);
+        assert!(!s.p.crouch, "not with Left or Right");
+        let mut small = Sim::new(floor(), 64);
+        small.run(Buttons::DOWN, 4);
+        assert!(!small.p.crouch);
+    }
+
+    #[test]
+    fn crouched_on_a_lift_under_a_low_ceiling_the_player_stays_down() {
+        let (w, h) = (40, 6);
+        let mut kinds = vec![TileKind::Empty; w * h];
+        for x in 0..w {
+            kinds[(h - 1) * w + x] = TileKind::Solid;
+        }
+        // Ground over the crouching head: frame (8, 0x0A) is in row 3 at column 4.
+        kinds[3 * w + 4] = TileKind::Solid;
+        let map = Level::from_kinds(w, h, &kinds);
+        for riding in [Some(0), None] {
+            let p = Player::spawn(4 * TILE_PX + 2, 5 * TILE_PX - Form::Small.height());
+            let mut s = Sim { p, map: map.clone(), frame: 0, held: Buttons::empty() };
+            s.p.set_form(Form::Big);
+            s.run(Buttons::empty(), 4);
+            assert!(s.p.on_ground);
+            s.run(Buttons::DOWN, 4);
+            assert!(s.p.crouch);
+            s.p.riding = riding;
+            s.run(Buttons::empty(), 4);
+            assert_eq!(s.p.crouch, riding.is_some(), "riding {riding:?}");
+        }
+    }
+
+    #[test]
+    fn the_level_left_end_stops_the_frame_at_x_4() {
+        // As in mGBA (1-1 / 1-2): the frame stops at x 4 (fraction kept) and Left no longer
+        // moves him; Right does.
+        let mut s = Sim::new(floor(), 40);
+        s.run(Buttons::LEFT | Buttons::B, 60);
+        let fx = s.p.frame().0;
+        assert_eq!((fx, s.p.vx), (LEFT_END, 0));
+        let x = s.p.x;
+        s.run(Buttons::LEFT, 30);
+        assert_eq!(s.p.x, x, "held at the end");
+        s.run(Buttons::RIGHT, 10);
+        assert!(s.p.x > x);
+    }
+
+    #[test]
+    fn a_jump_from_a_slope_leaves_from_where_the_move_put_the_player() {
+        // Walking down the hill, the collision follows the slope down; the ROM jumps before
+        // that collision (checked in mGBA, World 1-5), so the jump starts from the higher y.
+        let mut s = Sim::new(hill(), 14 * TILE_PX);
+        s.run(Buttons::RIGHT, 6);
+        let y = s.p.y - s.p.floor_snap;
+        s.run(Buttons::RIGHT | Buttons::A, 1);
+        assert_eq!(s.p.y, y + s.p.vy);
     }
 
     #[test]
