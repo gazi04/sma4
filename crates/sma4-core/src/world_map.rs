@@ -24,6 +24,15 @@ use crate::input::Buttons;
 /// Frames of the map intro (map sub-state 0, the "WORLD n" panel) before Mario can move:
 /// sub-state 0 for 182 frames, then 1 for one frame.
 pub const INTRO_FRAMES: u16 = 183;
+/// The world-start intro (map sub-state 0, 0x0800EB0C), by frame: the panel for 0x80
+/// frames (0x0800E88C, timer 0x03003850), on the last of them its window starts closing
+/// (0x0802F718: half width 0x03003B6A 0x3C, half height 0x03003B64 0x1C, -8 a frame);
+/// then the stars (0x08030738, `map_stars`): set up on frame 135, drawn from 136. Mario
+/// is not drawn until they have closed on him (0x0800EA10).
+const PANEL_CLOSE: u16 = 127;
+const STARS_INIT: u16 = 135;
+const INTRO_WINDOW: (u8, u8) = (0x3C, 0x1C);
+const WINDOW_STEP: u8 = 8;
 /// Walk counter for one move (16 frames at 2 px), -2 per frame.
 const WALK: u8 = 0x20;
 const STEP: i32 = 2;
@@ -72,6 +81,18 @@ const TOAD_HOUSE_TILESET: u8 = 7;
 /// distance / 32 each frame in 8.8 fixed point.
 pub const FLY_FRAMES: u8 = 0x20;
 
+/// How Mario comes back to the map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrival {
+    /// Straight to walking (a cleared level).
+    Walk,
+    /// The "WORLD n" panel, Mario on his spot (after a lost life: map sub-state 2).
+    Panel,
+    /// A world (re)start: the panel, then the stars bring Mario in (map sub-state 0: a new
+    /// game, CONTINUE).
+    World,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapPhase {
     /// The "WORLD n" panel (map sub-state 0).
@@ -115,6 +136,13 @@ pub struct WorldMap {
     anim_ticks: [u8; 4],
     /// The spot being entered.
     target: Option<MapNode>,
+    /// Screen position of map position (0, 0) with Mario's sprite offsets: his lower 16x16
+    /// is at (x, y) + this (0x0800C45C: x - scroll, y - 0x10 - scroll).
+    pub sprite_origin: (i32, i32),
+    /// The intro is a world start (stars), and its frame (0-based, map sub-state 0).
+    world_intro: bool,
+    intro_frame: u16,
+    pub stars: Option<crate::map_stars::MapStars>,
 }
 
 impl WorldMap {
@@ -145,6 +173,10 @@ impl WorldMap {
             last_dir: 0,
             cooldown: 0,
             phase: MapPhase::Intro(INTRO_FRAMES),
+            sprite_origin: (0, -0x19),
+            world_intro: true,
+            intro_frame: 0,
+            stars: None,
             anim_frame: 0,
             anim_timer: anim_ticks[0] as i8 - 1,
             anim_ticks,
@@ -152,6 +184,13 @@ impl WorldMap {
         };
         map.rebuild();
         map
+    }
+
+    /// Where the map's cell (0, 0) is on screen (`WorldMapAsset::origin`); Mario's sprite is
+    /// 0x10 above his map y.
+    pub fn with_origin(mut self, origin: (i32, i32)) -> Self {
+        self.sprite_origin = (origin.0, origin.1 - 0x10);
+        self
     }
 
     /// The completion bits a game over keeps, per column (`WorldMapAsset::game_over_keep`).
@@ -168,7 +207,7 @@ impl WorldMap {
         (self.y, self.x) = self.start;
         self.checkpoint = self.start;
         self.last_dir = 0;
-        self.show(true);
+        self.show(Arrival::World);
     }
 
     /// Game over (0x08012458): the Toad houses and spade panels are no longer done (their
@@ -196,15 +235,60 @@ impl WorldMap {
     pub fn continue_game(&mut self) {
         (self.y, self.x) = self.checkpoint;
         self.rebuild();
-        self.show(true);
+        self.show(Arrival::World);
     }
 
-    /// Back on the map, with the intro panel (start, after a lost life) or straight to
-    /// walking (after a cleared level).
-    pub fn show(&mut self, intro: bool) {
+    /// Back on the map.
+    pub fn show(&mut self, arrival: Arrival) {
         self.walk = 0;
         self.target = None;
-        self.phase = if intro { MapPhase::Intro(INTRO_FRAMES) } else { MapPhase::Idle };
+        self.phase = if arrival == Arrival::Walk { MapPhase::Idle } else { MapPhase::Intro(INTRO_FRAMES) };
+        self.world_intro = arrival == Arrival::World;
+        self.intro_frame = 0;
+        self.stars = None;
+    }
+
+    /// Mario's lower 16x16 map sprite on screen.
+    pub fn sprite_pos(&self) -> (i32, i32) {
+        (self.x as i32 + self.sprite_origin.0, self.y as i32 + self.sprite_origin.1)
+    }
+
+    /// One frame of the intro (map sub-state 0 / 2).
+    fn step_intro(&mut self) {
+        let f = self.intro_frame;
+        self.intro_frame += 1;
+        if !self.world_intro {
+            return;
+        }
+        if f == STARS_INIT {
+            self.stars = Some(crate::map_stars::MapStars::new(self.sprite_pos()));
+        } else if let Some(stars) = &mut self.stars {
+            stars.step();
+        }
+    }
+
+    /// The panel's window (x, y, w, h on screen), or `None` once it has closed. The HDMA
+    /// table built during a frame shows the next one.
+    pub fn panel_window(&self) -> Option<(i32, i32, i32, i32)> {
+        if !matches!(self.phase, MapPhase::Intro(_)) {
+            return None;
+        }
+        let (w, h) = if self.world_intro {
+            // Frames of closing up to the one before this.
+            let k = self.intro_frame.saturating_sub(PANEL_CLOSE + 1).min(0xFF) as u8;
+            let k = k.min(INTRO_WINDOW.0 / WINDOW_STEP + 1) * WINDOW_STEP;
+            (INTRO_WINDOW.0.saturating_sub(k), INTRO_WINDOW.1.saturating_sub(k))
+        } else {
+            INTRO_WINDOW
+        };
+        let (w, h) = (w as i32, h as i32);
+        use crate::screens::{MENU_WINDOW_X, MENU_WINDOW_Y};
+        (w > 0 && h > 0).then_some((MENU_WINDOW_X - w, MENU_WINDOW_Y - h - 1, 2 * w, 2 * h))
+    }
+
+    /// Mario is drawn only once the stars have brought him in.
+    pub fn mario_hidden(&self) -> bool {
+        matches!(self.phase, MapPhase::Intro(_)) && self.world_intro && !self.stars.as_ref().is_some_and(|s| s.done)
     }
 
     fn cell(&self, y: i32, x: i32) -> (i32, i32) {
@@ -336,6 +420,7 @@ impl WorldMap {
         }
         match self.phase {
             MapPhase::Intro(t) => {
+                self.step_intro();
                 self.phase = if t > 1 { MapPhase::Intro(t - 1) } else { MapPhase::Idle };
                 None
             }
@@ -433,7 +518,7 @@ pub(crate) mod tests {
         (keep[4], keep[6], keep[8], keep[10]) = (0x91, 0x08, 0x81, 0xA0);
         let mut m = WorldMap::new(grid, (16, 12), (0x40, 0x20), [0x03, 0x67, 0xBF, 0xE9], nodes, [17; 4])
             .with_game_over_keep(keep);
-        m.show(false);
+        m.show(Arrival::Walk);
         m
     }
 
@@ -537,7 +622,7 @@ pub(crate) mod tests {
     #[test]
     fn intro_lasts_183_frames() {
         let mut m = world1();
-        m.show(true);
+        m.show(Arrival::Panel);
         run(&mut m, &[(Buttons::empty(), 182)]);
         assert!(matches!(m.phase, MapPhase::Intro(1)));
         run(&mut m, &[(Buttons::empty(), 1)]);
@@ -596,5 +681,40 @@ pub(crate) mod tests {
         assert_eq!(m.x, 0xBB, "-0x9D / 32 = -4.9: the borrow rounds down");
         m.fly(FLY_FRAMES);
         assert_eq!((m.y, m.x), (0x40, 0x23));
+    }
+
+    #[test]
+    fn a_world_start_closes_the_panel_then_the_stars_bring_mario_in() {
+        let mut m = world1().with_origin((0, -9));
+        m.show(Arrival::World);
+        assert_eq!(m.sprite_pos(), (0x20, 0x27), "the ROM's OAM for Mario on START");
+        let full = m.panel_window();
+        let mut first_star = None;
+        let mut mario_at = None;
+        for f in 0..INTRO_FRAMES {
+            m.step(Buttons::empty(), Buttons::empty());
+            if f < PANEL_CLOSE {
+                assert_eq!(m.panel_window(), full, "frame {f}");
+            }
+            if f == PANEL_CLOSE + 7 {
+                assert_eq!(m.panel_window(), None, "closed");
+            }
+            if first_star.is_none() && m.stars.as_ref().is_some_and(|s| s.stars().next().is_some()) {
+                first_star = Some(f);
+            }
+            if mario_at.is_none() && !m.mario_hidden() {
+                mario_at = Some(f);
+            }
+        }
+        assert_eq!((first_star, mario_at), (Some(136), Some(181)));
+        assert_eq!(m.phase, MapPhase::Idle);
+
+        // After a lost life: the panel only, Mario on his spot.
+        m.show(Arrival::Panel);
+        assert!(!m.mario_hidden());
+        for _ in 0..INTRO_FRAMES {
+            m.step(Buttons::empty(), Buttons::empty());
+            assert!(m.stars.is_none());
+        }
     }
 }

@@ -309,7 +309,7 @@ fn load_pending_level(
             }
             info!("map spot {:#x} (tileset {}) has no playable level here", node.level, node.tileset);
             if let Some(map) = &mut game.0.world_map {
-                map.show(false);
+                map.show(sma4_core::world_map::Arrival::Walk);
             }
             return;
         }

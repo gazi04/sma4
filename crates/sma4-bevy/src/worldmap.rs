@@ -3,14 +3,15 @@
 //! Walking, entering and clearing spots run in `sma4_core::world_map`; this draws the
 //! tiles, Mario and the iris that closes on him before a level. The game-over menu sits on
 //! this map too: dimmed while its panel is up, then with Mario spinning as he flies
-//! back to the checkpoint (`_mario_spin.png`).
+//! back to the checkpoint (`_mario_spin.png`). A world start brings Mario in with the
+//! circle of stars (`_stars.png`, `sma4_core::map_stars`).
 
 use bevy::{
     asset::RenderAssetUsages,
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
-use sma4_assets::{MAP_ANIM_FRAMES, MAP_SPIN_SIZE, MAP_MARIO_H, MAP_MARIO_W, WorldMapAsset};
+use sma4_assets::{MAP_ANIM_FRAMES, MAP_MARIO_H, MAP_MARIO_W, MAP_SPIN_SIZE, MAP_STAR_SIZE, WorldMapAsset};
 use sma4_core::screens::MenuMario;
 use sma4_core::{Form, MapPhase, SCREEN_H, SCREEN_W, Screen, WorldMap};
 
@@ -28,6 +29,7 @@ impl Plugin for WorldMapPlugin {
 /// Over the static map view (z 41), under the panel (42) and the status bar (43).
 const Z_TILES: f32 = 41.2;
 const Z_MARIO: f32 = 41.5;
+const Z_STARS: f32 = 41.6;
 const Z_IRIS: f32 = 41.8;
 
 /// Debug: map cells to mark cleared at the start (`--cleared`).
@@ -44,6 +46,8 @@ struct MapArt {
     spin: Vec<Handle<Image>>,
     origin: (i32, i32),
     iris: Handle<Image>,
+    /// The world-start stars, [tile].
+    stars: Vec<Handle<Image>>,
 }
 
 #[derive(Component)]
@@ -54,6 +58,9 @@ struct MapMario;
 
 #[derive(Component)]
 struct Iris;
+
+#[derive(Component)]
+struct MapStar(usize);
 
 /// Camera-local transform of something `w` x `h` whose top-left is at GBA screen (x, y).
 fn at(x: i32, y: i32, w: i32, h: i32, z: f32) -> Transform {
@@ -97,6 +104,12 @@ fn spawn_map(
     } else {
         asset.mario_spin.cells(MAP_SPIN_SIZE, MAP_SPIN_SIZE).into_iter().map(|c| images.add(sprite_image(c))).collect()
     };
+    let stars = if asset.stars.width == 0 {
+        warn!("no map/world1_stars.png; re-run sma4-extract");
+        vec![]
+    } else {
+        asset.stars.cells(MAP_STAR_SIZE, MAP_STAR_SIZE).into_iter().map(|c| images.add(sprite_image(c))).collect()
+    };
     let iris = images.add(Image::new(
         Extent3d { width: SCREEN_W, height: SCREEN_H, depth_or_array_layers: 1 },
         TextureDimension::D2,
@@ -123,15 +136,19 @@ fn spawn_map(
         }
         cam.spawn((MapMario, Sprite::default(), Transform::default(), Visibility::Hidden));
         cam.spawn((Iris, Sprite::from_image(iris.clone()), at(0, 0, 240, 160, Z_IRIS), Visibility::Hidden));
+        for i in 0..8 {
+            cam.spawn((MapStar(i), Sprite::default(), Transform::default(), Visibility::Hidden));
+        }
     });
     let mut map =
         WorldMap::new(asset.grid, (asset.cols, asset.rows), asset.start, asset.thresholds, asset.nodes, asset.anim_ticks)
-            .with_game_over_keep(asset.game_over_keep);
+            .with_game_over_keep(asset.game_over_keep)
+            .with_origin(origin);
     for &(c, r) in cleared.iter().flat_map(|c| c.0.iter()) {
         map.clear_cell(c, r);
     }
     game.0.world_map = Some(map);
-    commands.insert_resource(MapArt { tiles, mario, spin, origin, iris });
+    commands.insert_resource(MapArt { tiles, mario, spin, origin, iris, stars });
 }
 
 /// Iris (0x0802F44C): everything outside a circle of `r` px round (cx, cy) is black.
@@ -153,6 +170,10 @@ fn sync_map(
     mut tiles: Query<(&MapTile, &mut Sprite, &mut Visibility), (Without<MapMario>, Without<Iris>)>,
     mut mario: Query<(&mut Sprite, &mut Transform, &mut Visibility), (With<MapMario>, Without<Iris>)>,
     mut iris: Query<&mut Visibility, (With<Iris>, Without<MapTile>, Without<MapMario>)>,
+    mut stars: Query<
+        (&MapStar, &mut Sprite, &mut Transform, &mut Visibility),
+        (Without<MapTile>, Without<MapMario>, Without<Iris>),
+    >,
 ) {
     let (Some(art), Some(map)) = (art, &game.0.world_map) else { return };
     let menu = match game.0.screen {
@@ -198,7 +219,8 @@ fn sync_map(
             }
             Some(Some(MenuMario::Normal)) => {}
         }
-        *v = vis(shown);
+        // A world start: the stars bring him in (0x0800EA10).
+        *v = vis(shown && !map.mario_hidden());
         let form = match game.0.player.form {
             Form::Small => 0,
             // TODO(re): Fire Mario's own map sprite (not extracted yet).
@@ -210,6 +232,28 @@ fn sync_map(
             sprite.image = image.clone();
         }
         *t = at(sx, sy - 16, MAP_MARIO_W as i32, MAP_MARIO_H as i32, Z_MARIO);
+    }
+    // The stars: 16x16 OBJs at their byte-sized screen positions, cut at the GBA screen.
+    let drawn: Vec<(i32, i32, usize)> = map.stars.iter().flat_map(|s| s.stars()).collect();
+    for (star, mut sprite, mut t, mut v) in &mut stars {
+        let Some(&(x, y, cell)) = drawn.get(star.0).filter(|_| shown) else {
+            *v = Visibility::Hidden;
+            continue;
+        };
+        let Some(image) = art.stars.get(cell) else { continue };
+        // OAM y 160-255 is above the screen.
+        let y = if y >= SCREEN_H as i32 { y - 256 } else { y };
+        let size = MAP_STAR_SIZE as i32;
+        let (x0, x1) = (x.max(0), (x + size).min(SCREEN_W as i32));
+        let (y0, y1) = (y.max(0), (y + size).min(SCREEN_H as i32));
+        if x0 >= x1 || y0 >= y1 {
+            *v = Visibility::Hidden;
+            continue;
+        }
+        sprite.image = image.clone();
+        sprite.rect = Some(Rect::new((x0 - x) as f32, (y0 - y) as f32, (x1 - x) as f32, (y1 - y) as f32));
+        *t = at(x0, y0, x1 - x0, y1 - y0, Z_STARS);
+        *v = Visibility::Inherited;
     }
     let radius = match map.phase {
         MapPhase::Entering(r) if shown => Some(r as i32),

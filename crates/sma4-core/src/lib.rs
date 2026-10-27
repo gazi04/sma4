@@ -16,10 +16,13 @@ pub mod goal;
 pub mod input;
 pub mod level;
 pub mod lifts;
+pub mod map_stars;
 pub mod pipes;
 pub mod player;
 pub mod rng;
 pub mod screens;
+pub mod spade;
+pub mod title;
 pub mod world_map;
 pub mod status;
 pub mod toad_house;
@@ -123,6 +126,16 @@ pub struct Game {
     pub pending_house: Option<u16>,
     /// In a Toad House.
     pub house: Option<toad_house::ToadHouse>,
+    /// The spade panel's game (`sma4_assets::SpadeAsset`); without it the spade is just
+    /// left again.
+    pub spade_data: Option<sma4_assets::SpadeAsset>,
+    pub spade: Option<spade::Spade>,
+    /// Its wins in a row (0x03002CD8 / D9).
+    pub spade_streak: spade::Streak,
+    /// The title screen's graphics, maps and tables (`sma4_assets::TitleAsset`); without
+    /// them QUIT starts a new game on the map straight away.
+    pub title_data: Option<std::sync::Arc<sma4_assets::TitleAsset>>,
+    pub title: Option<title::Title>,
     /// The player is frozen (+0x40, 0x080A8000): only drawn; counts down.
     freeze: u8,
     /// Items got (0x03002C2E, inventory item ids; not usable yet).
@@ -649,7 +662,7 @@ impl Game {
         if ev.leave {
             // The level is not cleared: Mario is back on its spot.
             self.house = None;
-            self.to_map(false);
+            self.to_map(world_map::Arrival::Walk);
             return true;
         }
         false
@@ -670,7 +683,7 @@ impl Game {
         if let Some(map) = &mut self.world_map {
             map.clear_here();
         }
-        self.to_map(false);
+        self.to_map(world_map::Arrival::Walk);
     }
 
     /// After a death (0x080270B8): one life less, back to the map small; with no life
@@ -684,10 +697,31 @@ impl Game {
             if let Some(map) = &mut self.world_map {
                 map.game_over();
             }
+            // The game-over menu (0x08012458) ends the spade streak.
+            self.spade_streak = spade::Streak::default();
             self.screen = Screen::GameOver(GameOver::new());
         } else {
-            self.to_map(true);
+            self.to_map(world_map::Arrival::Panel);
         }
+    }
+
+    /// QUIT's fade is over: the title screen (sub-state 9).
+    pub fn show_title(&mut self) {
+        self.title = self.title_data.clone().map(title::Title::new);
+        self.screen = Screen::Title;
+    }
+
+    /// A new game from the title (0x0802DF94 -> sub-states 0x0A, 0x0F: a new file): World
+    /// 1's map with its "WORLD 1" panel, 4 lives, nothing cleared or carried.
+    fn new_game(&mut self) {
+        self.status = Status::default();
+        self.spade_streak = spade::Streak::default();
+        self.inventory.clear();
+        self.player.set_form(Form::Small);
+        if let Some(map) = &mut self.world_map {
+            map.reset();
+        }
+        self.screen = Screen::Map;
     }
 
     /// Enters the level again from the map: the level as it was first entered, a fresh
@@ -717,10 +751,20 @@ impl Game {
         self.screen = Screen::Level;
     }
 
-    /// Back to the map: with the "WORLD n" panel or straight to walking.
-    fn to_map(&mut self, intro: bool) {
+    /// A spade spot (tileset 15, game kind 0x030038EC = enemy word & 0x7FFF) starts its
+    /// game (0x08009790); false for anything else.
+    pub fn enter_spade(&mut self, node: &sma4_assets::MapNode) -> bool {
+        let slots = node.tileset == spade::TILESET && node.enemies & 0x7FFF == spade::KIND_SLOTS;
+        let Some(data) = self.spade_data.as_ref().filter(|_| slots) else { return false };
+        self.spade = Some(spade::Spade::new(data.clone(), self.spade_streak));
+        self.screen = Screen::Spade;
+        true
+    }
+
+    /// Back to the map.
+    fn to_map(&mut self, arrival: world_map::Arrival) {
         if let Some(map) = &mut self.world_map {
-            map.show(intro);
+            map.show(arrival);
         }
         self.screen = Screen::Map;
     }
@@ -741,7 +785,9 @@ impl Game {
         match &mut self.screen {
             Screen::Map => {
                 if let Some(map) = &mut self.world_map {
-                    if let Some(node) = map.step(held, self.input.pressed) {
+                    if let Some(node) = map.step(held, self.input.pressed)
+                        && !self.enter_spade(&node)
+                    {
                         self.pending_level = Some(node);
                     }
                 } else if self.input.pressed.contains(Buttons::A) || self.input.pressed.contains(Buttons::START) {
@@ -770,20 +816,42 @@ impl Game {
                         if let Some(map) = &mut self.world_map {
                             map.continue_game();
                         }
-                        self.to_map(true);
+                        self.to_map(world_map::Arrival::World);
                     }
-                    // Quit goes to the title screen in the ROM; there is none here yet, so
-                    // a new game starts on the map.
-                    Some(MenuChoice::Quit) => {
-                        let world = self.status.world;
-                        self.status = Status::default();
-                        self.status.world = world;
-                        if let Some(map) = &mut self.world_map {
-                            map.reset();
-                        }
-                        self.screen = Screen::Map;
-                    }
+                    // The fade, then the title screen.
+                    Some(MenuChoice::Quit) => {}
+                    Some(MenuChoice::Quitted) => self.show_title(),
                     None => {}
+                }
+                return;
+            }
+            Screen::Title => {
+                let pressed = self.input.pressed;
+                match self.title.as_mut().map(|t| t.step(pressed)) {
+                    // Without the title's assets: a new game straight away.
+                    None => self.new_game(),
+                    Some(Some(title::TitleEvent::Seed(b))) => self.rng.set_first(b),
+                    Some(Some(title::TitleEvent::Start { .. })) => {
+                        self.title = None;
+                        self.new_game();
+                    }
+                    Some(None) => {}
+                }
+                return;
+            }
+            Screen::Spade => {
+                let pressed = self.input.pressed;
+                let done = match &mut self.spade {
+                    Some(s) => s.step(pressed, &self.rng, self.frame, &mut self.spade_streak, &mut self.status.lives),
+                    None => true,
+                };
+                if done {
+                    // State 3 (0x080343FC) leaves like a cleared level (sub-state 0x1C).
+                    self.spade = None;
+                    if let Some(map) = &mut self.world_map {
+                        map.clear_here();
+                    }
+                    self.to_map(world_map::Arrival::Walk);
                 }
                 return;
             }
@@ -1411,7 +1479,7 @@ mod tests {
     fn map_spots_lead_into_levels_and_clearing_one_changes_its_tile() {
         let mut g = Game::new();
         let mut map = world_map::tests::world1();
-        map.show(false);
+        map.show(world_map::Arrival::Walk);
         g.world_map = Some(map);
         g.screen = Screen::Map;
         let tap = |g: &mut Game, b: Buttons| {
@@ -2053,6 +2121,48 @@ mod tests {
     }
 
     #[test]
+    fn quit_fades_out_to_the_title_which_starts_a_new_game() {
+        let mut g = Game::new();
+        g.title_data = Some(std::sync::Arc::new(sma4_assets::TitleAsset::default()));
+        g.enter_level(block_level((20, 2)), (8 * TILE_PX, 9 * TILE_PX - 16), &[]);
+        g.status.lives = 0;
+        g.status.score = 500;
+        g.die();
+        while !matches!(g.screen, Screen::GameOverMenu(_)) {
+            g.step(Buttons::empty());
+        }
+        for _ in 0..0x10 {
+            g.step(Buttons::empty());
+        }
+        g.step(Buttons::DOWN);
+        g.step(Buttons::empty());
+        g.step(Buttons::A);
+        // Sub-state 8: 8 palette steps every other frame, the 8th on the 15th frame.
+        let mut fades = Vec::new();
+        while let Screen::GameOverMenu(m) = g.screen {
+            fades.push(m.fade().expect("fading"));
+            g.step(Buttons::empty());
+        }
+        assert_eq!(fades, [0, 4, 4, 8, 8, 12, 12, 16, 16, 20, 20, 24, 24, 28, 28]);
+        assert_eq!(g.screen, Screen::Title);
+        // The title: Start skips the scene once it is up, A opens the file select, A on File
+        // 1 the mode select, A starts.
+        let mut started = None;
+        for f in 0..400 {
+            let t = g.title.as_ref().map(|t| t.phase);
+            let keys = if f % 20 == 19 { if t == Some(0) || t.is_none() { Buttons::START } else { Buttons::A } } else { Buttons::empty() };
+            g.step(keys);
+            if g.screen == Screen::Map {
+                started = Some(f);
+                break;
+            }
+        }
+        assert!(started.is_some(), "a new game on the map");
+        assert_eq!((g.status.lives, g.status.score), (status::START_LIVES, 0));
+        assert!(g.title.is_none());
+    }
+
+    #[test]
     fn continue_closes_the_panel_and_flies_mario_back_to_the_world_start() {
         use crate::screens::{MenuMario, MenuStage};
         let mut g = Game::new();
@@ -2118,5 +2228,39 @@ mod tests {
         let m = g.world_map.as_ref().unwrap();
         assert!(matches!(m.phase, MapPhase::Intro(_)), "with the WORLD 1 panel");
         assert_eq!(m.tile(12, 3), 0x50, "the Toad house is back");
+    }
+
+    #[test]
+    fn the_spade_spot_plays_the_bonus_game_then_is_cleared() {
+        let mut g = Game::new();
+        let mut map = world_map::tests::world1();
+        map.nodes.push(sma4_assets::MapNode { y: 0x60, x: 0x80, tileset: 15, level: 0x8000, enemies: 0x8001 });
+        (map.y, map.x) = (0x60, 0x80);
+        g.world_map = Some(map);
+        g.screen = Screen::Map;
+        g.spade_data = Some(spade::tests::data());
+        g.status.lives = 4;
+        g.step(Buttons::A);
+        let mut frames = 0;
+        while g.screen == Screen::Map {
+            g.step(Buttons::empty());
+            frames += 1;
+            assert!(frames < 100, "the iris closes, then the game");
+        }
+        assert_eq!(g.screen, Screen::Spade);
+        assert!(g.pending_level.is_none(), "no level to load");
+        // Tap A until the rows have stopped and the game is over.
+        let mut frames = 0;
+        while g.screen == Screen::Spade {
+            g.step(if frames % 30 == 0 { Buttons::A } else { Buttons::empty() });
+            frames += 1;
+            assert!(frames < 3000);
+        }
+        assert_eq!(g.screen, Screen::Map);
+        let m = g.world_map.as_ref().unwrap();
+        assert_eq!(m.tile(8, 5), 0xC0, "the spade's done tile");
+        assert_eq!(m.phase, MapPhase::Idle);
+        assert_eq!(m.checkpoint, (0x40, 0x20), "not a checkpoint (tileset 15)");
+        assert!(g.status.lives == 4 || g.status.lives >= 6, "lost, or 2 lives or more won");
     }
 }

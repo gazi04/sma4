@@ -329,6 +329,37 @@ pub fn extract_world_map(
         }
     }
     m.w8(GAME_OVER_LOOK, 0)?;
+
+    // The world-start stars: one 16x16 OBJ per tile of 0x0813A676 in star slot 38.
+    use sma4_assets::{MAP_STAR_FRAMES, MAP_STAR_SIZE};
+    let ss = MAP_STAR_SIZE;
+    let mut stars = Rgba {
+        width: ss * MAP_STAR_FRAMES,
+        height: ss,
+        pixels: vec![0; (ss * MAP_STAR_FRAMES * ss * 4) as usize],
+    };
+    for f in 0..MAP_STAR_FRAMES {
+        for s in 0..128 {
+            m.w16(OAM_BUF + s * 8, 0xA0)?;
+        }
+        let tile = rom.u8(STAR_TILES + f)? as u16;
+        m.w16(OAM_BUF + STAR_SLOT * 8, 0)?;
+        m.w16(OAM_BUF + STAR_SLOT * 8 + 2, STAR_ATTR1)?;
+        m.w16(OAM_BUF + STAR_SLOT * 8 + 4, tile | STAR_ATTR2)?;
+        let mut canvas = Rgba {
+            width: 240,
+            height: 160,
+            pixels: vec![0; 240 * 160 * 4],
+        };
+        draw_oam(m, &mut canvas, STAR_SLOT..STAR_SLOT + 1)?;
+        for y in 0..ss {
+            let s = (y * 240 * 4) as usize;
+            let d = ((y * stars.width + f * ss) * 4) as usize;
+            stars.pixels[d..d + (ss * 4) as usize]
+                .copy_from_slice(&canvas.pixels[s..s + (ss * 4) as usize]);
+        }
+    }
+
     let game_over_keep = (0..cols as u32)
         .map(|c| rom.u8(GAME_OVER_KEEP + world as u32 * 0x40 + c))
         .collect::<Result<Vec<u8>, _>>()?;
@@ -353,10 +384,18 @@ pub fn extract_world_map(
         mario,
         game_over_keep,
         mario_spin,
+        stars,
     }
     .write(out_dir, world)
     .map_err(|e| ExtractError(e.to_string()))
 }
+
+/// World-start stars (0x08030488): OAM slots 38-45 (0x03002EF8), 16x16 (attr1 0x4000),
+/// tile 0x0813A676[toggle], attr2 0x2C00 (palette 2, priority 3).
+const STAR_SLOT: u32 = 38;
+const STAR_TILES: u32 = 0x0813_A676;
+const STAR_ATTR1: u16 = 0x4000;
+const STAR_ATTR2: u16 = 0x2C00;
 
 /// Tiles A always enters on (0x0801112C checks 0x0813A616 before the thresholds).
 const ENTER_ALWAYS: u32 = 0x0813_A616;

@@ -750,6 +750,10 @@ pub const MAP_MARIO_FORMS: u32 = 3;
 /// 16x16 cells in `world{n}_mario_spin.png`, in that table's order.
 pub const MAP_SPIN_SIZE: u32 = 16;
 pub const MAP_SPIN_PHASES: u32 = 4;
+/// The world-start stars (0x08030488): 16x16 OBJ tile 0x0813A676[i] (0x8C, 0x8E), palette 2,
+/// two cells side by side in `world{n}_stars.png`.
+pub const MAP_STAR_SIZE: u32 = 16;
+pub const MAP_STAR_FRAMES: u32 = 2;
 
 /// The interactive world map: the tile grid (map tile ids, one per 16x16 cell), where
 /// Mario starts, the enterable spots, and the metatile pictures.
@@ -777,6 +781,8 @@ pub struct WorldMapAsset {
     pub game_over_keep: Vec<u8>,
     /// Mario spinning, see `MAP_SPIN_*` (empty when extracted by an older version).
     pub mario_spin: Rgba,
+    /// The world-start stars, see `MAP_STAR_*` (empty when extracted by an older version).
+    pub stars: Rgba,
 }
 
 /// Version 1 lacks `game_over_keep` (read as "keep everything").
@@ -816,7 +822,8 @@ impl WorldMapAsset {
         write(&stem.with_extension("bin"), &out)?;
         self.atlas.write_png(&dir.join("map").join(format!("world{}_meta.png", world + 1)))?;
         self.mario.write_png(&dir.join("map").join(format!("world{}_mario.png", world + 1)))?;
-        self.mario_spin.write_png(&dir.join("map").join(format!("world{}_mario_spin.png", world + 1)))
+        self.mario_spin.write_png(&dir.join("map").join(format!("world{}_mario_spin.png", world + 1)))?;
+        self.stars.write_png(&dir.join("map").join(format!("world{}_stars.png", world + 1)))
     }
 
     pub fn read(dir: &Path, world: u8) -> Result<Self> {
@@ -850,7 +857,9 @@ impl WorldMapAsset {
         let mario = Rgba::read_png(&dir.join("map").join(format!("world{}_mario.png", world + 1)))?;
         let mario_spin = Rgba::read_png(&dir.join("map").join(format!("world{}_mario_spin.png", world + 1)))
             .unwrap_or(Rgba { width: 0, height: 0, pixels: vec![] });
-        Ok(Self { cols, rows, grid, start, thresholds, nodes, origin, atlas, mario, anim_ticks, game_over_keep, mario_spin })
+        let stars = Rgba::read_png(&dir.join("map").join(format!("world{}_stars.png", world + 1)))
+            .unwrap_or(Rgba { width: 0, height: 0, pixels: vec![] });
+        Ok(Self { cols, rows, grid, start, thresholds, nodes, origin, atlas, mario, anim_ticks, game_over_keep, mario_spin, stars })
     }
 }
 

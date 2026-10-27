@@ -142,7 +142,7 @@ fn sync_map(
     game: Res<GameRes>,
     art: Res<ScreenArt>,
     mut cover: Query<&mut Visibility, (With<OffLevelCover>, Without<OnMap>)>,
-    mut parts: Query<(&mut Visibility, Option<&MapCell>, Has<MapView>, &mut Sprite), With<OnMap>>,
+    mut parts: Query<(&mut Visibility, Option<&MapCell>, Has<MapView>, &mut Sprite, &mut Transform), With<OnMap>>,
 ) {
     let off_level = game.0.screen != Screen::Level;
     for mut v in &mut cover {
@@ -155,10 +155,12 @@ fn sync_map(
     let (bar, panel) =
         if bar_shown { (game.0.status.map_bar(&m.bar, hud), game.0.status.map_panel(&m.panel, hud)) } else { (vec![], vec![]) };
     // With the walkable map, the static picture is not needed and the "WORLD n" panel only
-    // shows during the map intro.
+    // shows during the map intro, inside its window (WIN0, 0x0802F718), which closes at
+    // a world start.
     let walkable = game.0.world_map.as_ref();
-    let panel_shown = on_map && walkable.is_none_or(|m| matches!(m.phase, sma4_core::MapPhase::Intro(_)));
-    for (mut vis, cell, is_view, mut sprite) in &mut parts {
+    let window = walkable.and_then(|m| m.panel_window());
+    let panel_shown = on_map && walkable.is_none_or(|_| window.is_some());
+    for (mut vis, cell, is_view, mut sprite, mut transform) in &mut parts {
         let shown = match cell {
             Some(&MapCell(0, _)) => bar_shown,
             _ if is_view => on_map && walkable.is_none(),
@@ -167,6 +169,38 @@ fn sync_map(
         if !shown {
             *vis = Visibility::Hidden;
             continue;
+        }
+        // The panel's part (its cells, its sprites) cut to the window.
+        let rect = match cell {
+            Some(&MapCell(0, _)) => None,
+            Some(&MapCell(_, i)) => cell_on_screen(i, m.panel_scroll).map(|(x, y)| (x, y, 8, 8)),
+            None => Some((0, 0, SCREEN_W as i32, SCREEN_H as i32)),
+        };
+        if let (Some((x, y, w, h)), Some((wx, wy, ww, wh))) = (rect, window) {
+            let (x0, x1) = (x.max(wx), (x + w).min(wx + ww));
+            let (y0, y1) = (y.max(wy), (y + h).min(wy + wh));
+            if x0 >= x1 || y0 >= y1 {
+                *vis = Visibility::Hidden;
+                continue;
+            }
+            // The rect is in the image's own pixels and the flips apply after it, so a
+            // flipped cell (the right and bottom borders) keeps the mirrored part.
+            let entry = match cell {
+                Some(&MapCell(_, i)) => panel.get(i).copied().unwrap_or(0),
+                None => 0,
+            };
+            let (mut sx0, mut sx1) = (x0 - x, x1 - x);
+            let (mut sy0, mut sy1) = (y0 - y, y1 - y);
+            if entry & 0x400 != 0 {
+                (sx0, sx1) = (w - sx1, w - sx0);
+            }
+            if entry & 0x800 != 0 {
+                (sy0, sy1) = (h - sy1, h - sy0);
+            }
+            sprite.rect = Some(Rect::new(sx0 as f32, sy0 as f32, sx1 as f32, sy1 as f32));
+            // Exact centre: a cut sprite can be an odd number of pixels wide or tall.
+            transform.translation.x = (x0 + x1) as f32 / 2.0 - SCREEN_W as f32 / 2.0;
+            transform.translation.y = SCREEN_H as f32 / 2.0 - (y0 + y1) as f32 / 2.0;
         }
         let Some(&MapCell(layer, i)) = cell else {
             *vis = Visibility::Inherited;
