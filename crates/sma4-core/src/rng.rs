@@ -26,6 +26,11 @@ impl Rng {
         }
     }
 
+    /// Sets byte 0 (the title, 0x0802C044, writes 0x88 there).
+    pub fn set_first(&mut self, b: u8) {
+        self.0[0] = b;
+    }
+
     /// 0x03003879[slot] (slots wrap at 18).
     pub fn byte(&self, slot: usize) -> u8 {
         self.0[1 + slot % 18]

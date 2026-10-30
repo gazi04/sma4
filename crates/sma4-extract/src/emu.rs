@@ -79,6 +79,10 @@ impl Machine {
             .map_err(err)
     }
 
+    pub fn write(&mut self, addr: u32, data: &[u8]) -> Result<()> {
+        self.uc.mem_write(addr as u64, data).map_err(err)
+    }
+
     pub fn r32(&self, addr: u32) -> Result<u32> {
         let b = self.read(addr, 4)?;
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))

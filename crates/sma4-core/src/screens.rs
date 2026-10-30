@@ -122,6 +122,10 @@ impl Default for GameOver {
 ///   frames), then 0x080131B0 clears +0x17: Mario looks like himself again.
 /// * 8 (0x08013838): 0x10 more frames.
 /// * 9 (0x08012BA8): 4 lives, and the map starts over with its "WORLD n" panel.
+///
+/// QUIT (0x08012FE4 with 0x03003BBB set: one player) goes to sub-state 8, 0x0800373C: every
+/// other frame 4 comes off each colour channel of every palette, 8 times, nothing else
+/// moving; then sub-state 9, the title screen (`crate::title`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameOverMenu {
     delay: u8,
@@ -149,6 +153,8 @@ pub enum MenuStage {
     Fly(u8),
     /// Handler 8 and the frame of handler 9: frames left.
     Land(u8),
+    /// QUIT: the fade's steps done and its frame counter (0x03003783 / 0x03003784).
+    Quit { steps: u8, timer: u8 },
 }
 
 /// What the menu decided.
@@ -158,7 +164,10 @@ pub enum MenuChoice {
     Continue,
     /// The sequence is over: back to the map.
     Continued,
+    /// QUIT chosen: the fade starts.
     Quit,
+    /// The fade is over: the title screen.
+    Quitted,
 }
 
 /// How Mario is drawn on the map behind the menu.
@@ -225,6 +234,16 @@ impl GameOverMenu {
                 }
                 return Some(MenuChoice::Continued);
             }
+            MenuStage::Quit { steps, timer } => {
+                let timer = timer.wrapping_sub(1);
+                if (timer as i8) >= 0 {
+                    self.stage = MenuStage::Quit { steps, timer };
+                    return None;
+                }
+                let steps = steps + 1;
+                self.stage = MenuStage::Quit { steps, timer: 1 };
+                return (steps > 7).then_some(MenuChoice::Quitted);
+            }
         }
         if self.delay > 0 {
             self.delay -= 1;
@@ -235,6 +254,7 @@ impl GameOverMenu {
             self.blink = 0;
         } else if pressed.contains(Buttons::A) || pressed.contains(Buttons::START) {
             if self.quit {
+                self.stage = MenuStage::Quit { steps: 0, timer: 0 };
                 return Some(MenuChoice::Quit);
             }
             self.stage = MenuStage::Close;
@@ -244,17 +264,27 @@ impl GameOverMenu {
         None
     }
 
-    /// Cursor position on screen, or None on the frames it blinks off (and once chosen).
+    /// Cursor position on screen, or None on the frames it blinks off (and once CONTINUE is
+    /// chosen; through QUIT's fade it stays as it was).
     pub fn cursor(&self) -> Option<(i32, i32)> {
         let y = if self.quit { MENU_QUIT_Y } else { MENU_CONTINUE_Y } - 0x16;
-        (self.stage == MenuStage::Choose && self.blink & 0x10 == 0).then_some((MENU_CURSOR_X, y))
+        let shown = matches!(self.stage, MenuStage::Choose | MenuStage::Quit { .. });
+        (shown && self.blink & 0x10 == 0).then_some((MENU_CURSOR_X, y))
+    }
+
+    /// While QUIT fades the screen out: how much has come off each colour channel (of 31).
+    pub fn fade(&self) -> Option<u8> {
+        match self.stage {
+            MenuStage::Quit { steps, .. } => Some(steps * 4),
+            _ => None,
+        }
     }
 
     /// The panel's window as (left, top, width, height) on screen, while it is open: x from
     /// 0x78 - w to 0x78 + w, lines from 0x46 - h - 1 (the HDMA table is one line ahead).
     pub fn window(&self) -> Option<(i32, i32, i32, i32)> {
         let (w, h) = match self.stage {
-            MenuStage::Choose => WINDOW,
+            MenuStage::Choose | MenuStage::Quit { .. } => WINDOW,
             MenuStage::Close => self.drawn,
             _ => return None,
         };
@@ -264,14 +294,14 @@ impl GameOverMenu {
 
     /// Whether the map is dimmed (BLDCNT 0x0300376D until the window has closed).
     pub fn dimmed(&self) -> bool {
-        matches!(self.stage, MenuStage::Choose | MenuStage::Close)
+        matches!(self.stage, MenuStage::Choose | MenuStage::Close | MenuStage::Quit { .. })
     }
 
     /// Mario on the map: not drawn while the menu is up (handlers 0-2 skip 0x0800C9E8).
     pub fn mario(&self) -> Option<MenuMario> {
         match self.stage {
             // Wait(0x10) is what the frame the window closed on leaves.
-            MenuStage::Choose | MenuStage::Close | MenuStage::Wait(MENU_WAIT) => None,
+            MenuStage::Choose | MenuStage::Close | MenuStage::Wait(MENU_WAIT) | MenuStage::Quit { .. } => None,
             MenuStage::Wait(_) | MenuStage::Fly(_) => Some(MenuMario::Spin((self.spin_timer & 6) >> 1)),
             MenuStage::Land(_) => Some(MenuMario::Normal),
         }
@@ -301,6 +331,10 @@ pub enum Screen {
     Level,
     GameOver(GameOver),
     GameOverMenu(GameOverMenu),
+    /// The spade panel's bonus game (`Game::spade`).
+    Spade,
+    /// The title screen (`Game::title`), after QUIT.
+    Title,
 }
 
 #[cfg(test)]
@@ -336,7 +370,10 @@ mod tests {
             m.step(Buttons::empty());
         }
         assert_eq!(m.cursor(), None, "blinks");
-        assert_eq!(m.step(Buttons::START), Some(MenuChoice::Quit));
+        let mut quit = m;
+        assert_eq!(quit.step(Buttons::START), Some(MenuChoice::Quit));
+        quit.step(Buttons::UP);
+        assert_eq!(quit.step(Buttons::A), None, "the fade runs, the menu is done");
         m.step(Buttons::UP);
         assert_eq!(m.step(Buttons::A), Some(MenuChoice::Continue));
     }

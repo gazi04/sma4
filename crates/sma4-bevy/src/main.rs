@@ -15,6 +15,7 @@ mod level;
 mod pacing;
 mod player;
 mod screens;
+mod title;
 mod viewer;
 mod worldmap;
 
@@ -47,6 +48,7 @@ const USAGE: &str = "usage: sma4 [--assets <dir>] [--level <hex id>] [--viewer]
   --lives <n>  debug: start with n lives
   --cleared <col>,<row>  debug: mark the world-map spot at that cell cleared (repeatable)
   --popup <type>  debug: show a score popup (1-15) over the player at the start
+  --title  debug: start on the title screen (where the game-over menu's QUIT goes)
   --script <spec> --screenshot <png>
             play scripted input (e.g. \"-30 R120 RA20 R60\"), save a screenshot, exit
 
@@ -77,6 +79,7 @@ struct Args {
     map: bool,
     lives: Option<u16>,
     cleared: Vec<(usize, usize)>,
+    title: bool,
 }
 
 fn parse_args() -> Option<Args> {
@@ -97,6 +100,7 @@ fn parse_args() -> Option<Args> {
         map: false,
         lives: None,
         cleared: Vec::new(),
+        title: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -117,6 +121,7 @@ fn parse_args() -> Option<Args> {
                 args.cleared.push((c.parse().ok()?, r.parse().ok()?));
             }
             "--popup" => args.popup = Some(it.next()?.parse().ok()?),
+            "--title" => args.title = true,
             "--form" => args.form = it.next()?.parse().ok()?,
             "--behind" => args.behind = true,
             "--hit" => {
@@ -216,6 +221,7 @@ fn main() -> AppExit {
             })
             .insert_resource(level::LevelRes(level))
             .insert_resource(worldmap::ClearedSpots(args.cleared.clone()))
+            .insert_resource(title::DebugTitle(args.title))
             .add_plugins((
                 input::InputPlugin,
                 level::LevelPlugin,
@@ -227,6 +233,7 @@ fn main() -> AppExit {
                 hud::HudPlugin,
                 screens::ScreensPlugin,
                 worldmap::WorldMapPlugin,
+                title::TitlePlugin,
             ));
     }
     app.run()

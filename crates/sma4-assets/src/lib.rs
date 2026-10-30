@@ -1475,3 +1475,165 @@ pub fn read_end_rooms(dir: &Path) -> Result<[EndRoom; WORLDS]> {
         EndRoom { level: u16::from_le_bytes([e[0], e[1]]), enemies: u16::from_le_bytes([e[2], e[3]]), tileset: e[4] }
     }))
 }
+
+struct Cursor<'a>(&'a [u8]);
+
+impl Cursor<'_> {
+    fn bytes(&mut self, n: usize) -> Option<&[u8]> {
+        let (a, b) = (self.0.get(..n)?, self.0.get(n..)?);
+        self.0 = b;
+        Some(a)
+    }
+    fn u8(&mut self) -> Option<u8> {
+        Some(self.bytes(1)?[0])
+    }
+    fn u16(&mut self) -> Option<u16> {
+        self.bytes(2).map(|b| u16::from_le_bytes([b[0], b[1]]))
+    }
+    fn i16(&mut self) -> Option<i16> {
+        self.u16().map(|v| v as i16)
+    }
+    fn u16s(&mut self) -> Option<Vec<u16>> {
+        let n = self.u16()? as usize;
+        (0..n).map(|_| self.u16()).collect()
+    }
+}
+
+/// The title screen the game-over menu's QUIT goes back to (mode 1 sub-state 9): what
+/// `sma4_core::title` needs from the ROM, in `screens/title.bin`. Built by running the
+/// ROM's graphics load 0x0802AE30 and its player-tile routines (0x08035AB0, 0x08035B88).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TitleAsset {
+    /// VRAM (0x06000000-0x06017FFF) after the graphics load: BG chars and OBJ tiles.
+    pub vram: Vec<u8>,
+    /// ROM bytes the title's logic reads (tables, palettes, sprite lists): `TITLE_ROM`.
+    pub rom: Vec<(u32, Vec<u8>)>,
+    /// The LZ77 streams the logic unpacks into VRAM (BG maps), by stream address: `TITLE_LZ`.
+    pub lz: Vec<(u32, Vec<u8>)>,
+    /// Mario's and Luigi's tiles, `TITLE_PLAYER_BLOCK` bytes per player, form and pose
+    /// (`title_player_block`): the four rows the player DMA leaves at 0x06011000 + row *
+    /// 0x400 (+ 0x80 for Luigi), 0x80 bytes each.
+    pub players: Vec<Vec<u8>>,
+}
+
+pub const TITLE_DATA: &str = "title.bin";
+const TITLE_MAGIC: &[u8; 8] = b"SMA4TI01";
+/// ROM ranges (start, end) copied into `TitleAsset::rom`: colour curves 0x08132DE4 /
+/// 0x08132EE4, the logo fade's tables, the menus' map entries and sprite lists, the
+/// palette cycle and input scripts, the actors' tables, the palettes.
+pub const TITLE_ROM: &[(u32, u32)] = &[
+    (0x0813_2DE4, 0x0813_2FE4),
+    (0x0813_30E8, 0x0813_31B0),
+    (0x0813_F8B0, 0x0814_0D00),
+    (0x0814_25C0, 0x0814_2700),
+    (0x0814_4130, 0x0814_4600),
+    (0x0821_DB80, 0x0821_ED40),
+];
+/// LZ77 maps: curtain, stage, BG2 scenery, BG3 floor, the English file-select and
+/// mode-select screens (0x08140850[0], 0x08140864[0]).
+pub const TITLE_LZ: &[u32] = &[0x0821_F8C0, 0x0822_1040, 0x0822_B114, 0x0823_ADD0, 0x0821_FCB8, 0x0822_0980];
+pub const TITLE_POSES: usize = 32;
+pub const TITLE_FORMS: usize = 3;
+pub const TITLE_PLAYER_BLOCK: usize = 4 * 0x80;
+
+/// Index into `TitleAsset::players`.
+pub fn title_player_block(player: usize, form: usize, pose: usize) -> usize {
+    (player * TITLE_FORMS + form) * TITLE_POSES + pose
+}
+
+impl TitleAsset {
+    pub fn path(dir: &Path) -> PathBuf {
+        dir.join("screens").join(TITLE_DATA)
+    }
+
+    /// The ROM byte at `addr`; 0 outside `TITLE_ROM`.
+    pub fn rom_u8(&self, addr: u32) -> u8 {
+        self.rom
+            .iter()
+            .find(|(a, d)| (*a..*a + d.len() as u32).contains(&addr))
+            .map_or(0, |(a, d)| d[(addr - a) as usize])
+    }
+
+    pub fn rom_u16(&self, addr: u32) -> u16 {
+        u16::from_le_bytes([self.rom_u8(addr), self.rom_u8(addr + 1)])
+    }
+
+    pub fn rom_u32(&self, addr: u32) -> u32 {
+        u32::from_le_bytes([self.rom_u8(addr), self.rom_u8(addr + 1), self.rom_u8(addr + 2), self.rom_u8(addr + 3)])
+    }
+
+    /// The unpacked LZ77 stream at `addr`.
+    pub fn lz(&self, addr: u32) -> Option<&[u8]> {
+        self.lz.iter().find(|(a, _)| *a == addr).map(|(_, d)| d.as_slice())
+    }
+
+    pub fn write(&self, dir: &Path) -> Result<()> {
+        let mut out = TITLE_MAGIC.to_vec();
+        let blob = |out: &mut Vec<u8>, d: &[u8]| {
+            out.extend_from_slice(&(d.len() as u32).to_le_bytes());
+            out.extend_from_slice(d);
+        };
+        blob(&mut out, &self.vram);
+        for list in [&self.rom, &self.lz] {
+            out.extend_from_slice(&(list.len() as u16).to_le_bytes());
+            for (a, d) in list.iter() {
+                out.extend_from_slice(&a.to_le_bytes());
+                blob(&mut out, d);
+            }
+        }
+        out.extend_from_slice(&(self.players.len() as u16).to_le_bytes());
+        for p in &self.players {
+            blob(&mut out, p);
+        }
+        write(&Self::path(dir), &out)
+    }
+
+    pub fn read(dir: &Path) -> Result<Self> {
+        let path = Self::path(dir);
+        let d = read(&path)?;
+        let bad = || AssetError::BadLevel(path.clone());
+        if d.get(..8) != Some(TITLE_MAGIC) {
+            return Err(bad());
+        }
+        let mut c = Cursor(&d[8..]);
+        (|| {
+            let blob = |c: &mut Cursor| {
+                let n = u32::from_le_bytes(c.bytes(4)?.try_into().ok()?) as usize;
+                Some(c.bytes(n)?.to_vec())
+            };
+            let mut a = TitleAsset { vram: blob(&mut c)?, ..Default::default() };
+            for list in [&mut a.rom, &mut a.lz] {
+                for _ in 0..c.u16()? {
+                    let addr = u32::from_le_bytes(c.bytes(4)?.try_into().ok()?);
+                    list.push((addr, blob(&mut c)?));
+                }
+            }
+            a.players = (0..c.u16()?).map(|_| blob(&mut c)).collect::<Option<_>>()?;
+            Some(a)
+        })()
+        .ok_or_else(bad)
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    #[test]
+    fn title_asset_round_trips_and_reads_rom_bytes() {
+        let dir = std::env::temp_dir().join(format!("sma4_title_{}", std::process::id()));
+        let a = TitleAsset {
+            vram: vec![1, 2, 3],
+            rom: vec![(0x0814_0000, vec![0x34, 0x12, 0x78, 0x56])],
+            lz: vec![(0x0822_0000, vec![9; 5])],
+            players: vec![vec![7; 4], vec![]],
+        };
+        a.write(&dir).unwrap();
+        let b = TitleAsset::read(&dir).unwrap();
+        assert_eq!(b, a);
+        assert_eq!((b.rom_u16(0x0814_0000), b.rom_u32(0x0814_0000)), (0x1234, 0x5678_1234));
+        assert_eq!(b.rom_u8(0x0814_0004), 0, "outside the copied ranges");
+        assert_eq!(b.lz(0x0822_0000).map(<[u8]>::len), Some(5));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

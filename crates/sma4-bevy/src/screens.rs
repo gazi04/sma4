@@ -64,6 +64,14 @@ struct MenuScreen;
 #[derive(Component)]
 struct MenuCursor;
 
+/// QUIT's fade (0x0800373C takes 4 off each colour channel every other frame): drawn as
+/// black over everything, as opaque as the share of 31 taken off.
+#[derive(Component)]
+struct QuitShade;
+
+/// Over the map, its bar, the panel and the sprites.
+const Z_SHADE: f32 = 45.0;
+
 /// Camera-local position of something `w` x `h` whose top-left is at GBA screen (x, y).
 fn at(x: i32, y: i32, w: i32, h: i32, z: f32) -> Transform {
     Transform::from_xyz(
@@ -100,6 +108,12 @@ fn spawn_screens(
     });
 
     commands.entity(*camera).with_children(|cam| {
+        cam.spawn((
+            QuitShade,
+            Sprite { color: Color::NONE, custom_size: Some(Vec2::splat(4096.0)), ..default() },
+            Transform::from_xyz(0.0, 0.0, Z_SHADE),
+            Visibility::Hidden,
+        ));
         // Covers the level (and any view area beyond the GBA screen) off-level.
         cam.spawn((
             OffLevelCover,
@@ -246,15 +260,26 @@ fn sync_game_over(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn sync_menu(
     game: Res<GameRes>,
-    mut screen: Query<(&mut Sprite, &mut Transform, &mut Visibility), (With<MenuScreen>, Without<MenuCursor>)>,
-    mut cursor: Query<(&mut Transform, &mut Visibility), (With<MenuCursor>, Without<MenuScreen>)>,
+    mut screen: Query<(&mut Sprite, &mut Transform, &mut Visibility), (With<MenuScreen>, Without<MenuCursor>, Without<QuitShade>)>,
+    mut cursor: Query<(&mut Transform, &mut Visibility), (With<MenuCursor>, Without<MenuScreen>, Without<QuitShade>)>,
+    mut shade: Query<(&mut Sprite, &mut Visibility), (With<QuitShade>, Without<MenuScreen>, Without<MenuCursor>)>,
 ) {
     let menu = match game.0.screen {
         Screen::GameOverMenu(m) => Some(m),
         _ => None,
     };
+    for (mut sprite, mut v) in &mut shade {
+        match menu.and_then(|m| m.fade()) {
+            Some(n) => {
+                sprite.color = Color::srgba(0.0, 0.0, 0.0, (n as f32 / 31.0).min(1.0));
+                *v = Visibility::Inherited;
+            }
+            None => *v = Visibility::Hidden,
+        }
+    }
     for (mut sprite, mut t, mut v) in &mut screen {
         // With the walkable map drawn (dimmed) underneath, only the panel's window of the
         // menu picture is shown (0x0802F718: it closes after CONTINUE).
