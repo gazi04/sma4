@@ -291,7 +291,8 @@ fn spawn_level(
 }
 
 /// A spot entered on the world map: load its level (extracted by `sma4-extract`) and play
-/// it. Spots without a level asset (Toad houses, the spade game) just return to the map.
+/// it. Spots without a level asset (Toad houses) just return to the map; the spade starts
+/// its game in the core.
 fn load_pending_level(
     mut commands: Commands,
     mut game: ResMut<GameRes>,

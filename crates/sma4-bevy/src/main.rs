@@ -15,6 +15,7 @@ mod level;
 mod pacing;
 mod player;
 mod screens;
+mod spade;
 mod title;
 mod viewer;
 mod worldmap;
@@ -49,6 +50,8 @@ const USAGE: &str = "usage: sma4 [--assets <dir>] [--level <hex id>] [--viewer]
   --cleared <col>,<row>  debug: mark the world-map spot at that cell cleared (repeatable)
   --popup <type>  debug: show a score popup (1-15) over the player at the start
   --title  debug: start on the title screen (where the game-over menu's QUIT goes)
+  --spade  debug: start in the spade panel's game (Toad's room)
+  --streak <n>  debug: with --spade, the wins in a row so far (0-7: the bonus rounds from 3)
   --script <spec> --screenshot <png>
             play scripted input (e.g. \"-30 R120 RA20 R60\"), save a screenshot, exit
 
@@ -79,6 +82,7 @@ struct Args {
     map: bool,
     lives: Option<u16>,
     cleared: Vec<(usize, usize)>,
+    spade: Option<u8>,
     title: bool,
 }
 
@@ -100,6 +104,7 @@ fn parse_args() -> Option<Args> {
         map: false,
         lives: None,
         cleared: Vec::new(),
+        spade: None,
         title: false,
     };
     let mut it = std::env::args().skip(1);
@@ -121,7 +126,9 @@ fn parse_args() -> Option<Args> {
                 args.cleared.push((c.parse().ok()?, r.parse().ok()?));
             }
             "--popup" => args.popup = Some(it.next()?.parse().ok()?),
+            "--spade" => args.spade = Some(args.spade.unwrap_or(0)),
             "--title" => args.title = true,
+            "--streak" => args.spade = Some(it.next()?.parse().ok()?),
             "--form" => args.form = it.next()?.parse().ok()?,
             "--behind" => args.behind = true,
             "--hit" => {
@@ -221,6 +228,7 @@ fn main() -> AppExit {
             })
             .insert_resource(level::LevelRes(level))
             .insert_resource(worldmap::ClearedSpots(args.cleared.clone()))
+            .insert_resource(spade::DebugSpade(args.spade))
             .insert_resource(title::DebugTitle(args.title))
             .add_plugins((
                 input::InputPlugin,
@@ -233,6 +241,7 @@ fn main() -> AppExit {
                 hud::HudPlugin,
                 screens::ScreensPlugin,
                 worldmap::WorldMapPlugin,
+                spade::SpadePlugin,
                 title::TitlePlugin,
             ));
     }

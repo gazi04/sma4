@@ -163,8 +163,9 @@ fn sync_map(
         *v = if off_level { Visibility::Inherited } else { Visibility::Hidden };
     }
     let on_map = game.0.screen == Screen::Map;
-    // The game-over menu sits on the map screen too and keeps its status bar.
-    let bar_shown = on_map || matches!(game.0.screen, Screen::GameOverMenu(_));
+    // The game-over menu sits on the map screen too and keeps its status bar; the spade
+    // game shows the same bar (BG0 scrolled to the bottom, 0x0300374C = 0xFF88).
+    let bar_shown = on_map || matches!(game.0.screen, Screen::GameOverMenu(_) | Screen::Spade);
     let (Some(m), Some(hud)) = (&art.map, &art.hud) else { return };
     let (bar, panel) =
         if bar_shown { (game.0.status.map_bar(&m.bar, hud), game.0.status.map_panel(&m.panel, hud)) } else { (vec![], vec![]) };

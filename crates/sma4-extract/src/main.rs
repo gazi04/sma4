@@ -8,6 +8,7 @@ mod level;
 mod oam;
 mod objects;
 mod screens;
+mod spade;
 mod title;
 mod worldmap;
 
@@ -209,6 +210,7 @@ fn run(args: &Args) -> Result<(), String> {
             worldmap::extract_world_map(&rom, &mut m, 0, &args.out).map_err(|e| e.0)?;
             screens::extract_game_over(rom.bytes(), &mut m, &args.out).map_err(|e| e.0)?;
             screens::extract_game_over_menu(&mut m, &args.out).map_err(|e| e.0)?;
+            spade::extract(&rom, &mut m, &args.out).map_err(|e| e.0)?;
             title::extract(&rom, &mut m, &args.out).map_err(|e| e.0)?;
         }
         n += 1;

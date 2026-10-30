@@ -1476,6 +1476,88 @@ pub fn read_end_rooms(dir: &Path) -> Result<[EndRoom; WORLDS]> {
     }))
 }
 
+/// The spade panel's bonus game (`spade/`): Toad's room (sub-state 0x24, set up by
+/// 0x08015F10) and the picture-matching slots (sub-states 0x26-0x28). Pictures as PNGs, the
+/// rest in `spade/spade.bin`.
+pub fn spade_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join("spade").join(name)
+}
+/// Toad's room, BG2 under BG1 on the backdrop (240x160).
+pub const SPADE_HOST: &str = "host.png";
+/// Toad's OBJs (0x08033418), on a transparent 240x160 screen.
+pub const SPADE_HOST_TOAD: &str = "host_toad.png";
+/// BG3 with the message box drawn (240x160).
+pub const SPADE_HOST_BOX: &str = "host_box.png";
+/// BG3 with the box and message `k` drawn whole (`host_text_<k>.png`).
+pub fn spade_host_text(k: usize) -> String {
+    format!("host_text_{k}.png")
+}
+/// BG1 of the slots for streak count `c`: the whole 512x256 layer (`slot_reels_<c>.png`).
+pub fn spade_reels(c: usize) -> String {
+    format!("slot_reels_{c}.png")
+}
+/// BG3 of the slots: the frame (240x160).
+pub const SPADE_FRAME: &str = "slot_frame.png";
+/// BG2 tiles of the slots, one 8x8 cell per `SpadeAsset::tile_keys` entry.
+pub const SPADE_TILES: &str = "slot_tiles.png";
+/// The prize's "nUP" sprite (0x0814409C[prize]).
+pub fn spade_prize(prize: u8) -> String {
+    format!("slot_prize_{prize}.png")
+}
+pub const SPADE_DATA: &str = "spade.bin";
+const SPADE_MAGIC: &[u8; 8] = b"SMA4SP01";
+/// Streak counts with their own slot maps (0x08143D00 / 0x08143D20).
+pub const SPADE_COUNTS: usize = 8;
+/// Toad's messages by streak count (0x08032FC8: the count, at most 3).
+pub const SPADE_MESSAGES: usize = 4;
+/// Message box: rows from BG3 map row `SPADE_BOX_AT.1`, column `SPADE_BOX_AT.0` (0x08032FC8:
+/// map + 0x84 + row * 0x40), `SPADE_BOX_W` entries each (0x08143DDC[row]); the text from
+/// map entry `SPADE_TEXT_AT` (+100).
+pub const SPADE_BOX_AT: (u32, u32) = (2, 2);
+pub const SPADE_BOX_W: u32 = 0x1A;
+pub const SPADE_BOX_ROWS: u32 = 8;
+pub const SPADE_TEXT_AT: u32 = 100;
+
+/// What a win changes on the slots' BG2 (0x08033E54, 0x08034578): map entry indices of the
+/// four "nUP" signs and their three entries, the 2x2 icons blanked (tile 0xFD) and later
+/// sparkling, the icons blanked at the end of the first sparkle, and the four 2x2 sparkle
+/// steps.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SlotWin {
+    pub prize: u8,
+    pub sign_at: [u16; 4],
+    pub sign: [u16; 3],
+    pub sparkle_at: [Vec<u16>; 2],
+    pub end_at: Vec<u16>,
+    pub sparkles: [[u16; 4]; 4],
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpadeAsset {
+    /// Toad's messages: BG tile ids, 0xF0 next line, 0xFE skip, 0xFF end.
+    pub messages: [Vec<u8>; SPADE_MESSAGES],
+    /// BG3 scroll in Toad's room.
+    pub host_scroll: (u16, u16),
+    /// The slots' BG2 map (32x32) by streak count.
+    pub bg2: Vec<Vec<u16>>,
+    pub wins: Vec<SlotWin>,
+    /// Icons sparkling after the first sparkle, by (frame >> 5) & 3 (0x0814408C).
+    pub cycle: [Vec<u16>; 4],
+    /// The slots' backdrop.
+    pub backdrop: [u8; 4],
+    /// BG2 entries, in `SPADE_TILES` cell order.
+    pub tile_keys: Vec<u16>,
+    /// Prize sprites: the prize and where its image's top-left is from (0x78, y).
+    pub prizes: Vec<(u8, i32, i32)>,
+}
+
+fn put_u16s(out: &mut Vec<u8>, v: &[u16]) {
+    out.extend_from_slice(&(v.len() as u16).to_le_bytes());
+    for x in v {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+}
+
 struct Cursor<'a>(&'a [u8]);
 
 impl Cursor<'_> {
@@ -1496,6 +1578,112 @@ impl Cursor<'_> {
     fn u16s(&mut self) -> Option<Vec<u16>> {
         let n = self.u16()? as usize;
         (0..n).map(|_| self.u16()).collect()
+    }
+}
+
+impl SpadeAsset {
+    pub fn write(&self, dir: &Path) -> Result<()> {
+        let mut out = SPADE_MAGIC.to_vec();
+        for m in &self.messages {
+            out.extend_from_slice(&(m.len() as u16).to_le_bytes());
+            out.extend_from_slice(m);
+        }
+        out.extend_from_slice(&self.host_scroll.0.to_le_bytes());
+        out.extend_from_slice(&self.host_scroll.1.to_le_bytes());
+        out.push(self.bg2.len() as u8);
+        for m in &self.bg2 {
+            put_u16s(&mut out, m);
+        }
+        out.push(self.wins.len() as u8);
+        for w in &self.wins {
+            out.push(w.prize);
+            for v in w.sign_at.iter().chain(&w.sign).chain(w.sparkles.iter().flatten()) {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            put_u16s(&mut out, &w.sparkle_at[0]);
+            put_u16s(&mut out, &w.sparkle_at[1]);
+            put_u16s(&mut out, &w.end_at);
+        }
+        for c in &self.cycle {
+            put_u16s(&mut out, c);
+        }
+        out.extend_from_slice(&self.backdrop);
+        put_u16s(&mut out, &self.tile_keys);
+        out.push(self.prizes.len() as u8);
+        for &(p, x, y) in &self.prizes {
+            out.push(p);
+            out.extend_from_slice(&(x as i16).to_le_bytes());
+            out.extend_from_slice(&(y as i16).to_le_bytes());
+        }
+        write(&spade_path(dir, SPADE_DATA), &out)
+    }
+
+    pub fn read(dir: &Path) -> Result<Self> {
+        let path = spade_path(dir, SPADE_DATA);
+        let d = read(&path)?;
+        let bad = || AssetError::BadLevel(path.clone());
+        if d.get(..8) != Some(SPADE_MAGIC) {
+            return Err(bad());
+        }
+        let mut c = Cursor(&d[8..]);
+        (|| {
+            let mut a = SpadeAsset::default();
+            for m in &mut a.messages {
+                let n = c.u16()? as usize;
+                *m = c.bytes(n)?.to_vec();
+            }
+            a.host_scroll = (c.u16()?, c.u16()?);
+            a.bg2 = (0..c.u8()?).map(|_| c.u16s()).collect::<Option<_>>()?;
+            for _ in 0..c.u8()? {
+                let mut w = SlotWin { prize: c.u8()?, ..Default::default() };
+                for v in w.sign_at.iter_mut().chain(&mut w.sign).chain(w.sparkles.iter_mut().flatten()) {
+                    *v = c.u16()?;
+                }
+                w.sparkle_at = [c.u16s()?, c.u16s()?];
+                w.end_at = c.u16s()?;
+                a.wins.push(w);
+            }
+            for v in &mut a.cycle {
+                *v = c.u16s()?;
+            }
+            a.backdrop = c.bytes(4)?.try_into().ok()?;
+            a.tile_keys = c.u16s()?;
+            for _ in 0..c.u8()? {
+                a.prizes.push((c.u8()?, c.i16()? as i32, c.i16()? as i32));
+            }
+            Some(a)
+        })()
+        .ok_or_else(bad)
+    }
+}
+
+#[cfg(test)]
+mod spade_tests {
+    use super::*;
+
+    #[test]
+    fn spade_asset_round_trips() {
+        let dir = std::env::temp_dir().join(format!("sma4_spade_{}", std::process::id()));
+        let a = SpadeAsset {
+            messages: [vec![1, 0xF0, 2, 0xFF], vec![], vec![3], vec![0xFF]],
+            host_scroll: (4, 0xFFFC),
+            bg2: vec![vec![0xFD; 4], vec![1, 2]],
+            wins: vec![SlotWin {
+                prize: 2,
+                sign_at: [1, 2, 3, 4],
+                sign: [5, 6, 7],
+                sparkle_at: [vec![8], vec![9, 10]],
+                end_at: vec![11],
+                sparkles: [[12; 4], [13; 4], [14; 4], [15; 4]],
+            }],
+            cycle: [vec![1], vec![], vec![2], vec![3, 4]],
+            backdrop: [1, 2, 3, 255],
+            tile_keys: vec![0xFD, 0x21AB],
+            prizes: vec![(2, -12, -8), (10, -16, -8)],
+        };
+        a.write(&dir).unwrap();
+        assert_eq!(SpadeAsset::read(&dir).unwrap(), a);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
