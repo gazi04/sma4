@@ -231,7 +231,7 @@ pub fn extract_at(
     m.call(FN_LOAD_BG_GFX, &[])?;
     m.call(FN_LOAD_PALETTES, &[])?;
 
-    let background = background(rom, m, hdr[10])?;
+    let background = background(rom, m, hdr[10], hdr[9] & 0xF)?;
     let pages = m.read(PAGE_BUFFERS, 0x4000)?;
     let high = m.read(HIGH_LAYER, 0x4000)?;
     let palette = parse_palette(&m.read(PAL_BUFFER, 0x200)?);
@@ -488,7 +488,16 @@ const V_SCENE_FOLLOW_Y: u32 = 0x0300_3BBD;
 /// that many rows lower (0x08025460).
 const V_SCENE_DY: u32 = 0x0300_3DC6;
 
-fn background(rom: &Rom, m: &mut Machine, scene: u8) -> Result<Option<Background>> {
+/// Scene 0x12, the clouds of World 1-5's sky area (0x154): its loader 0x08024620 unpacks
+/// nothing; the level init 0x08016434 calls 0x080257BC -> 0x080245F0 instead, which unpacks
+/// LZ77 0x0822123C (a whole 512x512 map) straight into BG2's screen block.
+const SCENE_CLOUDS: u8 = 0x12;
+const FN_CLOUD_MAP: u32 = 0x0802_45F0;
+/// BG2CNT's shadow; the cloud map goes to a screen block clear of the BG tiles.
+const V_BG2_CNT: u32 = 0x0300_2DA8;
+const CLOUD_BG2_CNT: u16 = 0xDC02;
+
+fn background(rom: &Rom, m: &mut Machine, scene: u8, mode: u8) -> Result<Option<Background>> {
     let data = rom.ptr(SCENE_DATA + scene as u32 * 4)?;
     m.w8(V_SCENE_FOLLOW_Y, rom.u8(data + 1)?)?;
     m.call(rom.u32(SCENE_LOADERS + scene as u32 * 4)?, &[])?;
@@ -499,7 +508,15 @@ fn background(rom: &Rom, m: &mut Machine, scene: u8) -> Result<Option<Background
         return Ok(None);
     }
     let follow_y = m.read(V_SCENE_FOLLOW_Y, 1)?[0] != 0;
-    let map = m.read(SCENE_MAP, 0x2000)?;
+    let map = if scene == SCENE_CLOUDS {
+        let cnt = m.read(V_BG2_CNT, 2)?;
+        m.w16(V_BG2_CNT, CLOUD_BG2_CNT)?;
+        m.call(FN_CLOUD_MAP, &[])?;
+        m.write(V_BG2_CNT, &cnt)?;
+        m.read(0x0600_0000 + (CLOUD_BG2_CNT as u32 & 0x1F00) * 8, 0x2000)?
+    } else {
+        m.read(SCENE_MAP, 0x2000)?
+    };
     let chars = m.read(0x0600_0000, 0x8000)?;
     let palette = parse_palette(&m.read(PAL_BUFFER, 0x200)?);
     // 512x512 text BG: four 32x32 screen blocks, top-left, top-right, bottom-left,
@@ -530,6 +547,7 @@ fn background(rom: &Rom, m: &mut Machine, scene: u8) -> Result<Option<Background
     Ok(Some(Background {
         scene,
         follow_y,
+        mode,
         image: Rgba {
             width: BACKGROUND_PX,
             height: BACKGROUND_PX,

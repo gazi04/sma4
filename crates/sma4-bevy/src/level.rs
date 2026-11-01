@@ -145,7 +145,36 @@ const Z_SKID_DUST: f32 = 9.5;
 #[derive(Resource, Default)]
 struct BackgroundArt {
     image: Option<Handle<Image>>,
-    follow_y: bool,
+    scroll: BackgroundScroll,
+}
+
+/// How BG2 follows the camera (VBlank 0x0800092C).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum BackgroundScroll {
+    /// x / 2 and y * 3/4 + 8 (0x0300375C).
+    #[default]
+    Normal,
+    /// The scene's flag 0x03003BBD: y with the camera.
+    FollowY,
+    /// Scene 0x12 (the clouds) with a scene mode (0x03003B9A) other than 0: x / 2 (0x03003AB4)
+    /// and y * 7/8 + 0x20 (0x03003BA2 + 0x20).
+    Clouds,
+}
+
+/// Scene 0x12: the clouds of World 1-5's sky area.
+const SCENE_CLOUDS: u8 = 0x12;
+
+impl BackgroundScroll {
+    fn of(b: &sma4_assets::Background) -> Self {
+        if b.scene == SCENE_CLOUDS && b.mode != 0 {
+            Self::Clouds
+        } else if b.follow_y {
+            Self::FollowY
+        } else {
+            // TODO(re): scene 0x12 with mode 0 scrolls by 0x03003BA6 / 0x03003BA8.
+            Self::Normal
+        }
+    }
 }
 
 #[derive(Component)]
@@ -190,7 +219,7 @@ fn spawn_tilemaps(commands: &mut Commands, images: &mut Assets<Image>, level: &L
     });
     commands.insert_resource(BackgroundArt {
         image: background,
-        follow_y: level.background.as_ref().is_some_and(|b| b.follow_y),
+        scroll: level.background.as_ref().map(BackgroundScroll::of).unwrap_or_default(),
     });
 
     let size = UVec2::new(level.width as u32, level.height as u32);
@@ -699,10 +728,16 @@ fn sync_skid_dust(
 }
 
 /// BG2 scroll from the camera (the player loop 0x0809869C, written by VBlank 0x0800092C):
-/// x = camera x / 2; y = camera y * 3/4 + 8, or the camera y when the scene follows it.
-fn background_scroll(camera: (i32, i32), follow_y: bool) -> (i32, i32) {
+/// x = camera x / 2; y = camera y * 3/4 + 8, the camera y when the scene follows it, or
+/// camera y * 7/8 + 0x20 for the clouds.
+fn background_scroll(camera: (i32, i32), scroll: BackgroundScroll) -> (i32, i32) {
     let (x, y) = camera;
-    (x >> 1, if follow_y { y } else { y - (y >> 2) + 8 })
+    let y = match scroll {
+        BackgroundScroll::Normal => y - (y >> 2) + 8,
+        BackgroundScroll::FollowY => y,
+        BackgroundScroll::Clouds => y - (y >> 3) + 0x20,
+    };
+    (x >> 1, y)
 }
 
 /// The background, repeated every 512 px (the BG wraps) to cover the view.
@@ -728,7 +763,7 @@ fn sync_background(
     // Top-left of the view in level pixels.
     let left = (transform.translation.x - view.x / 2.0).round() as i32;
     let top = (-transform.translation.y - view.y / 2.0).round() as i32;
-    let (hofs, vofs) = background_scroll((left, top), art.as_ref().is_some_and(|a| a.follow_y));
+    let (hofs, vofs) = background_scroll((left, top), art.as_ref().map(|a| a.scroll).unwrap_or_default());
     let size = sma4_assets::BACKGROUND_PX as i32;
     // The background pixel at the view's top-left is (hofs, vofs), modulo the BG size.
     let x0 = left - hofs.rem_euclid(size);
@@ -776,11 +811,17 @@ fn spawn_point(map: &Level, tx: i32) -> (i32, i32) {
 
 #[cfg(test)]
 mod tests {
-    use super::background_scroll;
+    use super::{BackgroundScroll, background_scroll};
 
     #[test]
     fn background_scrolls_at_half_speed_across_and_three_quarters_down() {
-        assert_eq!(background_scroll((0x200, 0x110), false), (0x100, 0x110 - 0x44 + 8));
-        assert_eq!(background_scroll((0x201, 0x110), true), (0x100, 0x110));
+        assert_eq!(background_scroll((0x200, 0x110), BackgroundScroll::Normal), (0x100, 0x110 - 0x44 + 8));
+        assert_eq!(background_scroll((0x201, 0x110), BackgroundScroll::FollowY), (0x100, 0x110));
+    }
+
+    #[test]
+    fn the_clouds_scroll_at_seven_eighths_down() {
+        // Measured in mGBA in World 1-5's sky area: camera (0x68, 0x110) -> BG2 (0x34, 0x10E).
+        assert_eq!(background_scroll((0x68, 0x110), BackgroundScroll::Clouds), (0x34, 0x10E));
     }
 }

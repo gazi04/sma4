@@ -71,6 +71,16 @@ above the band's row. Sliding shells keep the ROM's floor speed (0x0C), so they 
 ledges and drop into one-tile gaps as in the ROM.
 Debug: `--level 82 --spawn-col 26` starts in the first pool.
 
+Levels have the ROM's background scene behind them (BG2, 512x512, extracted from your ROM
+into `levels/level_XXX_bg.png`): World 1-1's distant blocks and bushes, 1-2's tall hills.
+It scrolls as in the ROM: half the camera's speed across, 3/4 down (+8). World 1-5's
+sky area (through the hidden orange note block) has the ROM's clouds: the ROM unpacks that
+scene's map from its own routine, so the port used to show one tile repeated over the whole
+sky; the clouds scroll as in the ROM, 7/8 down (+0x20). Checked by playing into the room in
+both the port and the real game (mGBA) through the hidden block at the top of the narrow
+shaft (column 57). Not ported: 1-5's farther cave background (BG3, olive arches behind the
+brown ones). Re-run `sma4-extract` (the level files now carry the scene mode).
+
 World 1's Hammer Bro works as in the ROM. On the map he stands by the bridge, stepping
 from side to side, until you lose a life: then Mario goes back to the last level he cleared
 (as after any death) and the Hammer Bro walks off: a step or two along the paths, picking

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub const METATILE: u32 = 16;
 pub const DEFAULT_DIR: &str = "assets/extracted";
 
-const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV18";
+const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV19";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssetError {
@@ -209,6 +209,9 @@ pub struct Background {
     /// The scene's flag 0x08139A2C[scene][1] (0x03003BBD): the background scrolls with the
     /// camera vertically instead of at 3/4 speed.
     pub follow_y: bool,
+    /// The scene mode 0x03003B9A (header byte 9, low nibble): with scene 0x12 (the clouds)
+    /// and a mode other than 0 the VBlank handler 0x0800092C scrolls BG2 its own way.
+    pub mode: u8,
     pub image: Rgba,
 }
 
@@ -466,7 +469,7 @@ impl LevelAsset {
         match &self.background {
             None => out.push(0),
             Some(b) => {
-                out.extend_from_slice(&[1, b.scene, b.follow_y as u8]);
+                out.extend_from_slice(&[1, b.scene, b.follow_y as u8, b.mode]);
                 b.image.write_png(&Self::background_path(dir, self.level_id))?;
             }
         }
@@ -520,9 +523,12 @@ impl LevelAsset {
             read_area(&list[high_at + HIGH_IDS..]).ok_or_else(bad)?;
         let background = match scene {
             None => None,
-            Some((scene, follow_y)) => {
-                Some(Background { scene, follow_y, image: Rgba::read_png(&Self::background_path(dir, level_id))? })
-            }
+            Some((scene, follow_y, mode)) => Some(Background {
+                scene,
+                follow_y,
+                mode,
+                image: Rgba::read_png(&Self::background_path(dir, level_id))?,
+            }),
         };
         let atlas = Rgba::read_png(&png)?;
         if atlas.width != METATILE || atlas.height != METATILE * METATILES * ANIM_FRAMES {
@@ -611,7 +617,7 @@ const ENEMY_BYTES: usize = 7;
 /// scene (id, follows y), the start camera y, the pipe flags, the water thresholds, the
 /// camera settings and the start kind.
 type Area =
-    (Option<Junction>, Option<(u16, u16)>, Option<Slopes>, Option<(u8, bool)>, u16, (u8, u8), [u8; 4], CameraParams, u8);
+    (Option<Junction>, Option<(u16, u16)>, Option<Slopes>, Option<(u8, bool, u8)>, u16, (u8, u8), [u8; 4], CameraParams, u8);
 
 fn read_area(d: &[u8]) -> Option<Area> {
     let u16_at = |o: usize| Some(u16::from_le_bytes([*d.get(o)?, *d.get(o + 1)?]));
@@ -648,9 +654,9 @@ fn read_area(d: &[u8]) -> Option<Area> {
     p += if slopes.is_some() { 1 + Slopes::BYTES } else { 1 };
     let scene = match *d.get(p)? {
         0 => None,
-        _ => Some((*d.get(p + 1)?, *d.get(p + 2)? != 0)),
+        _ => Some((*d.get(p + 1)?, *d.get(p + 2)? != 0, *d.get(p + 3)?)),
     };
-    p += if scene.is_some() { 3 } else { 1 };
+    p += if scene.is_some() { 4 } else { 1 };
     let camera = CameraParams::read(d.get(p + 8..)?)?;
     let start_kind = *d.get(p + 8 + CameraParams::BYTES)?;
     Some((
@@ -1381,6 +1387,7 @@ mod tests {
             background: Some(Background {
                 scene: 5,
                 follow_y: true,
+                mode: 0xC,
                 image: Rgba { width: 2, height: 1, pixels: vec![1, 2, 3, 255, 0, 0, 0, 0] },
             }),
             atlas: Rgba {
