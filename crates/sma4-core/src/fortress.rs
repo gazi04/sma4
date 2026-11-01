@@ -428,9 +428,19 @@ const ITEM_SHOW: u8 = 0x70;
 /// Level effect 7: frames from the item to the end of the level (+0xBE9 = 0x60).
 pub const CHEST_EXIT_FRAMES: u8 = 0x60;
 
+/// Level effect 7's chest (0x0804D12C): object slot 0, y 0x170; x the camera + 0xC0, or +
+/// 0x30 with the player at or right of x 0x80.
+pub const CHEST_DROP_Y: i32 = 0x170;
+pub const CHEST_SIDE: i32 = 0x80;
+
 impl Chest {
     pub fn spawn(s: &EnemySpawn) -> Self {
-        Self { x: s.col as i32 * TILE_PX * SUB, y: s.row as i32 * TILE_PX * SUB, vy: 0, appear: CHEST_APPEAR, item: None, show: 0 }
+        Self::at(s.col as i32 * TILE_PX, s.row as i32 * TILE_PX)
+    }
+
+    /// A chest appearing at pixel (x, y).
+    pub fn at(x: i32, y: i32) -> Self {
+        Self { x: x * SUB, y: y * SUB, vy: 0, appear: CHEST_APPEAR, item: None, show: 0 }
     }
 
     pub fn px(&self) -> (i32, i32) {

@@ -68,6 +68,22 @@ above the band's row. Sliding shells keep the ROM's floor speed (0x0C), so they 
 ledges and drop into one-tile gaps as in the ROM.
 Debug: `--level 82 --spawn-col 26` starts in the first pool.
 
+World 1's Hammer Bro works as in the ROM. On the map he stands by the bridge, stepping
+from side to side, until you lose a life: then Mario goes back to the last level he cleared
+(as after any death) and the Hammer Bro walks off: a step or two along the paths, picking
+his way with the game's own random bytes, never stopping on a level panel, a Toad House or
+START. Meeting him on a path junction starts a battle at once (no iris) in a one-screen
+arena: he walks to and fro, jumps up through a row of bricks and hops down again, and
+throws spinning hammers that fly in an arc. Knock him out (stomp, fire, tail, star) and once
+his hammers are gone a chest drops in on the far side; it holds a Starman, and the map is
+back without him (the junction becomes the checkpoint). Lose and he stays. His moves on the
+map, the fight and the hammers were checked frame by frame against the real game in mGBA.
+Graphics (the Bro, the hammer, the chest, his map sprite) are extracted from your ROM; the
+two arenas (levels 0x4E / 0x4F) too: re-run `sma4-extract`. Not ported: the walking sound,
+the puff when he leaves the map.
+Debug: `--map --map-bro 4,3` puts him on the junction right of START; `--level 4e` starts
+the arena.
+
 Current state: World 1-1 is drawn natively (Bevy `TilemapChunk`) from the ROM's tiles and
 palettes. The player is "Pip", an original placeholder character, with placeholder physics
 (`crates/sma4-core/src/player.rs`, to be replaced by the reverse-engineered values).

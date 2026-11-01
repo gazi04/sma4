@@ -825,6 +825,69 @@ pub fn extract_boomerang_bro(rom: &Rom, m: &mut Machine, out_dir: &std::path::Pa
     Ok(())
 }
 
+/// Hammer Bro (type 0x81, main 0x08068CF8): the Boomerang Bro's draw 0x08068BB8 in its own
+/// palette; its hammer is projectile type 1, drawn by 0x0808D05C -> 0x0808CDF8.
+const HAMMER_BRO: u16 = 0x81;
+const HAMMER_TYPE: u8 = 1;
+/// The battle chest's item (0x08139FE0[world 1][2]: a Starman).
+const BATTLE_ITEM: u8 = 9;
+
+pub fn extract_hammer_bro(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{BRO_CELLS, BRO_RAISE, HAMMER_FRAMES, boomerang_bro_cell, hammer_bro_path, hammer_path};
+    let raise = (oam::AT - BRO_RAISE) as u8;
+    let mut bytes = Vec::new();
+    for right in [false, true] {
+        for throwing in [false, true] {
+            for step in 0..2u8 {
+                debug_assert_eq!(boomerang_bro_cell(right, throwing, step as usize), bytes.len());
+                bytes.push(vec![(0x09, raise), (0x1A, if right { 0x40 } else { 0 }), (0x3B, step * 0x10), (0x23, throwing as u8)]);
+            }
+        }
+    }
+    let poses: Vec<Pose> =
+        bytes.iter().map(|b| Pose { kind: HAMMER_BRO, state: 2, draw: FN_DRAW_BOOMERANG_BRO, bytes: b, globals: &[] }).collect();
+    debug_assert_eq!(poses.len(), BRO_CELLS as usize);
+    oam::render(m, rom.bytes(), &poses)?.write_png(&hammer_bro_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
+    // The hammer flying right (speed +0x12, 0x0816F040), then left.
+    let mut bytes = Vec::new();
+    for vx in [0x0012u16, 0xFFEE] {
+        for f in 0..HAMMER_FRAMES as u8 {
+            let [lo, hi] = vx.to_le_bytes();
+            bytes.push([
+                (0x05, oam::AT as u8),
+                (0x08, 0),
+                (0x09, 0),
+                (0x0A, lo),
+                (0x0B, hi),
+                (0x0E, HAMMER_TYPE),
+                (0x13, f * 4),
+                (0x14, 0),
+                (0xCCD, FIREBALL_OAM),
+                (0xCD2, 0),
+            ]);
+        }
+    }
+    let globals = [(PAUSED, 0)];
+    let poses: Vec<Pose> =
+        bytes.iter().map(|b| Pose { kind: 0, state: 0, draw: FN_DRAW_BOOMERANG, bytes: b, globals: &globals }).collect();
+    oam::render(m, rom.bytes(), &poses)?.write_png(&hammer_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
+    // The chest effect 7 makes, and its item.
+    let item_draw = if rom.u8(CHEST_ITEM_DRAW + BATTLE_ITEM as u32).map_err(|e| ExtractError(e.to_string()))? & 0x80 != 0 {
+        FN_DRAW_ITEM
+    } else {
+        FN_DRAW_CHEST
+    };
+    let chest = [(0x17, 0)];
+    let item = [(0x17, BATTLE_ITEM)];
+    let poses = [
+        Pose { kind: 0x52, state: 2, draw: FN_DRAW_CHEST, bytes: &chest, globals: &[] },
+        Pose { kind: 0x52, state: 2, draw: item_draw, bytes: &item, globals: &[] },
+    ];
+    write_sheet(rom, m, out_dir, sma4_assets::BATTLE_CHEST_SHEET, &poses)?;
+    println!("  hammer bro, hammer, battle chest");
+    Ok(())
+}
+
 /// Puff of smoke, object state 8 (0x08044550, entered from state 6 by enemies whose
 /// 0x0816A89D class is 7): timer +0x23 starts at 0x1F; two 8x16 OBJs at x and x + 8, tile
 /// 0x08169484[timer >> 3], palette 1, the halves h-flipped by turns (0x03003CF6 >> 1).

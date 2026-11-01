@@ -16,10 +16,14 @@
 //!   (0x080270B8, any tileset below 0x0F except Toad houses, 7) moves it to that level's
 //!   spot. After a game over Mario flies back to it (0x080131EC) and the Toad houses and
 //!   spade panels come back (0x08012458, mask 0x0813C12E).
+//! * After a lost life (sub-state 2, the panel) Mario goes back to the checkpoint in 0x20
+//!   frames (sub-state 3, 0x0800ECFC), then the map objects move (0x0C; `map_objects`). A
+//!   walker met on a junction starts its battle (`map_objects`).
 
 use sma4_assets::MapNode;
 
 use crate::input::Buttons;
+use crate::map_objects::{self, MapObjects};
 
 /// Frames of the map intro (map sub-state 0, the "WORLD n" panel) before Mario can move:
 /// sub-state 0 for 182 frames, then 1 for one frame.
@@ -101,7 +105,15 @@ pub enum MapPhase {
     Idle,
     /// The iris closing on Mario before a level (sub-states 0x12-0x14); the radius.
     Entering(i16),
+    /// After a lost life, Mario going back to the checkpoint (sub-state 3, 0x0800ECFC): the
+    /// frame, 1 to `RETURN_FRAMES`.
+    Return(u8),
+    /// Then the map objects' move (sub-state 0x0C); whether it has started.
+    ObjectsMove(bool),
 }
+
+/// Sub-state 3: 0x20 frames, the distance split as the game-over flight.
+pub const RETURN_FRAMES: u8 = 0x20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldMap {
@@ -143,6 +155,16 @@ pub struct WorldMap {
     world_intro: bool,
     intro_frame: u16,
     pub stars: Option<crate::map_stars::MapStars>,
+    /// The map objects (Hammer Bros).
+    pub objects: MapObjects,
+    /// This frame's random bytes (0x03003879..) and frame counter (0x03003AE8), set by the
+    /// game before each step.
+    pub rand: [u8; 18],
+    pub frame: u32,
+    /// The map object Mario met (its slot and item), whose battle is being played.
+    pub meeting: Option<(usize, u8)>,
+    /// Where the way back to the checkpoint started.
+    return_from: (u8, u16),
 }
 
 impl WorldMap {
@@ -181,6 +203,11 @@ impl WorldMap {
             anim_timer: anim_ticks[0] as i8 - 1,
             anim_ticks,
             target: None,
+            objects: MapObjects::default(),
+            rand: [0; 18],
+            frame: 0,
+            meeting: None,
+            return_from: start,
         };
         map.rebuild();
         map
@@ -190,6 +217,12 @@ impl WorldMap {
     /// 0x10 above his map y.
     pub fn with_origin(mut self, origin: (i32, i32)) -> Self {
         self.sprite_origin = (origin.0, origin.1 - 0x10);
+        self
+    }
+
+    /// The world's map objects (`sma4_assets::MapObjectsAsset`).
+    pub fn with_objects(mut self, spawns: &[sma4_assets::MapObjectSpawn]) -> Self {
+        self.objects = MapObjects::new(spawns);
         self
     }
 
@@ -207,6 +240,7 @@ impl WorldMap {
         (self.y, self.x) = self.start;
         self.checkpoint = self.start;
         self.last_dir = 0;
+        self.objects.reset();
         self.show(Arrival::World);
     }
 
@@ -242,6 +276,10 @@ impl WorldMap {
     pub fn show(&mut self, arrival: Arrival) {
         self.walk = 0;
         self.target = None;
+        self.meeting = None;
+        self.return_from = (self.y, self.x);
+        // 0x0800D5B4: the objects on their cells, facing at random.
+        self.objects.set_up(&self.rand);
         self.phase = if arrival == Arrival::Walk { MapPhase::Idle } else { MapPhase::Intro(INTRO_FRAMES) };
         self.world_intro = arrival == Arrival::World;
         self.intro_frame = 0;
@@ -420,8 +458,38 @@ impl WorldMap {
         }
         match self.phase {
             MapPhase::Intro(t) => {
+                // The objects sway on the world-start panel (sub-state 0), not on the one
+                // after a lost life (2).
+                if self.world_intro {
+                    self.objects.step_idle(self.frame);
+                }
                 self.step_intro();
-                self.phase = if t > 1 { MapPhase::Intro(t - 1) } else { MapPhase::Idle };
+                self.phase = if t > 1 {
+                    MapPhase::Intro(t - 1)
+                } else if self.world_intro {
+                    MapPhase::Idle
+                } else {
+                    MapPhase::Return(0)
+                };
+                None
+            }
+            MapPhase::Return(k) => {
+                // 0x0800ECFC: the distance to the checkpoint in 32 steps of 8.8 fixed point.
+                let k = k + 1;
+                let along = |from: i32, to: i32| ((from << 8) + (to - from) * 8 * k as i32) >> 8;
+                self.y = along(self.return_from.0 as i32, self.checkpoint.0 as i32) as u8;
+                self.x = along(self.return_from.1 as i32, self.checkpoint.1 as i32) as u16;
+                self.phase = if k < RETURN_FRAMES { MapPhase::Return(k) } else { MapPhase::ObjectsMove(false) };
+                None
+            }
+            MapPhase::ObjectsMove(started) => {
+                let mut objects = std::mem::take(&mut self.objects);
+                if !started {
+                    objects.start_move();
+                }
+                let done = objects.step_move(&self.rand, self);
+                self.objects = objects;
+                self.phase = if done { MapPhase::Idle } else { MapPhase::ObjectsMove(true) };
                 None
             }
             MapPhase::Entering(r) => {
@@ -435,9 +503,35 @@ impl WorldMap {
             }
             MapPhase::Idle => {
                 self.idle(held, pressed);
+                self.objects.step_idle(self.frame);
+                // 0x08031DDC: Mario standing on a walker's junction starts its battle at
+                // once (map sub-state 0x16, no iris).
+                if self.walk == 0
+                    && self.target.is_none()
+                    && let Some(slot) = self.objects.meeting(self.y, self.x, self.tile_at(self.y as i32, self.x as i32))
+                    && let Some(node) = self.node_here()
+                {
+                    self.meeting = Some((slot, self.objects.slots[slot].item));
+                    return Some(node);
+                }
                 None
             }
         }
+    }
+
+    /// The battle with the map object Mario met was won (its chest opened): the object is
+    /// gone (0x0800F8C8) and, as for a cleared level, the spot is the checkpoint
+    /// (0x080270B8; recorded in mGBA).
+    pub fn battle_won(&mut self) {
+        if let Some((slot, _)) = self.meeting.take() {
+            self.objects.remove(slot);
+            self.checkpoint = (self.y, self.x);
+        }
+    }
+
+    /// The map objects as drawn.
+    pub fn object_sprites(&self) -> Vec<map_objects::MapObjectSprite> {
+        self.objects.sprites(self.frame, matches!(self.phase, MapPhase::ObjectsMove(_)))
     }
 
     /// Map sub-state 0x0E (0x0801112C), with the cooldown update of 0x0800D5B4 before it.
@@ -489,12 +583,21 @@ impl WorldMap {
     }
 }
 
+impl map_objects::Grid for WorldMap {
+    fn tile_at(&self, y: i32, x: i32) -> u8 {
+        WorldMap::tile_at(self, y, x)
+    }
+    fn enterable(&self, tile: u8) -> bool {
+        WorldMap::enterable(self, tile)
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
 
     /// World 1's grid (rows 0-11), as the map init builds it.
-    const W1: [&str; 12] = [
+    pub(crate) const W1: [&str; 12] = [
         "b4 b4 b4 b4 42 42 42 42 42 42 42 42 42 b4 b4 b4",
         "b4 b4 b4 b4 03 45 47 45 04 45 05 45 47 b4 b4 b4",
         "b4 b4 b4 b4 46 b4 b4 b4 46 b4 b4 b4 46 b4 b4 b4",
@@ -626,7 +729,42 @@ pub(crate) mod tests {
         run(&mut m, &[(Buttons::empty(), 182)]);
         assert!(matches!(m.phase, MapPhase::Intro(1)));
         run(&mut m, &[(Buttons::empty(), 1)]);
-        assert_eq!(m.phase, MapPhase::Idle);
+        assert_eq!(m.phase, MapPhase::Return(0));
+    }
+
+    #[test]
+    fn walking_onto_the_hammer_bro_starts_its_battle() {
+        // As set up in mGBA: the Hammer Bro (slot 2, item 9) moved onto the junction right
+        // of START; walking right onto it loads that cell's level (0x4E) at once.
+        let mut m = world1();
+        m.nodes.push(MapNode { y: 0x40, x: 0x40, tileset: 3, level: 0x4E, enemies: 0x61 });
+        m = m.with_objects(&[sma4_assets::MapObjectSpawn { slot: 2, kind: map_objects::HAMMER_BRO, y: 0x40, x: 0x40, item: 9 }]);
+        m.show(Arrival::Walk);
+        let node = run(&mut m, &[(Buttons::empty(), 1), (Buttons::RIGHT, 1), (Buttons::empty(), 20)]).expect("a battle");
+        assert_eq!((node.level, node.enemies), (0x4E, 0x61));
+        assert_eq!(m.meeting, Some((2, 9)));
+        assert_eq!(m.phase, MapPhase::Idle, "no iris");
+        // Won: the Bro is gone and the junction is the checkpoint.
+        m.battle_won();
+        assert_eq!(m.objects.slots[2].kind, 0);
+        assert_eq!(m.checkpoint, (0x40, 0x40));
+    }
+
+    #[test]
+    fn after_a_lost_life_mario_goes_back_to_the_checkpoint() {
+        // Recorded in mGBA: dying in 1-1 (0x20, 0x40) slides Mario back to START (0x40,
+        // 0x20) in 0x20 frames (sub-state 3), then the objects move (0x0C).
+        let mut m = world1();
+        (m.y, m.x) = (0x20, 0x40);
+        m.show(Arrival::Panel);
+        run(&mut m, &[(Buttons::empty(), INTRO_FRAMES as u32)]);
+        run(&mut m, &[(Buttons::empty(), 1)]);
+        assert_eq!((m.y, m.x), (0x21, 0x3F));
+        run(&mut m, &[(Buttons::empty(), RETURN_FRAMES as u32 - 1)]);
+        assert_eq!((m.y, m.x), (0x40, 0x20));
+        assert_eq!(m.phase, MapPhase::ObjectsMove(false));
+        run(&mut m, &[(Buttons::empty(), 1)]);
+        assert_eq!(m.phase, MapPhase::Idle, "no objects: the move is over at once");
     }
 
     #[test]

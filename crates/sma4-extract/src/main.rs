@@ -82,6 +82,9 @@ fn extract_gfx(rom: &Rom, args: &Args) -> Result<usize, String> {
 
 /// World 1-3 (level 0x0C), whose object graphics include the Boomerang Bro.
 const BOOMERANG_BRO_LEVEL: u16 = 0x0C;
+/// World 1's first Hammer Bro arena (level 0x4E), whose object graphics include the Hammer
+/// Bro and the chest.
+const HAMMER_BRO_LEVEL: u16 = 0x4E;
 /// World 1-5 (level 0x82), with the Buzzy Beetles.
 const BUZZY_LEVEL: u16 = 0x82;
 /// World 1-4 (level 0xD2), with the falling lifts and the red Paratroopa.
@@ -113,8 +116,16 @@ fn run(args: &Args) -> Result<(), String> {
     } else {
         args.levels.clone()
     };
-    let course_levels = levels.len();
     let mut levels = levels;
+    // The battle arenas of the map's path junctions (Hammer Bros).
+    if args.levels.is_empty() {
+        for l in worldmap::battle_levels(&rom, &mut m, 0).map_err(|e| e.0)? {
+            if !levels.iter().any(|k| k.0 == l.0) {
+                levels.push(l);
+            }
+        }
+    }
+    let course_levels = levels.len();
     // Where end-of-level pipes lead (0x080056A0), and World 1's end room with the areas.
     let rooms = level::end_rooms(&rom).map_err(|e| e.0)?;
     sma4_assets::write_end_rooms(&args.out, &rooms).map_err(|e| e.to_string())?;
@@ -170,6 +181,9 @@ fn run(args: &Args) -> Result<(), String> {
         if id == LIFT_LEVEL {
             objects::extract_lift(&rom, &mut m, &args.out).map_err(|e| e.0)?;
         }
+        if id == HAMMER_BRO_LEVEL {
+            objects::extract_hammer_bro(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+        }
         if id == BOOMERANG_BRO_LEVEL {
             objects::extract_boomerang_bro(&rom, &mut m, &args.out).map_err(|e| e.0)?;
             // Its hidden Toad House (trigger 0x07, 0x0804E718), with the list the trigger
@@ -208,6 +222,7 @@ fn run(args: &Args) -> Result<(), String> {
             // These reset the machine.
             screens::extract_map(&mut m, 0, &args.out).map_err(|e| e.0)?;
             worldmap::extract_world_map(&rom, &mut m, 0, &args.out).map_err(|e| e.0)?;
+            worldmap::extract_map_objects(&rom, &mut m, 0, &args.out).map_err(|e| e.0)?;
             screens::extract_game_over(rom.bytes(), &mut m, &args.out).map_err(|e| e.0)?;
             screens::extract_game_over_menu(&mut m, &args.out).map_err(|e| e.0)?;
             spade::extract(&rom, &mut m, &args.out).map_err(|e| e.0)?;

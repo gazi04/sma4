@@ -45,6 +45,7 @@ struct Art {
     spark: Vec<Handle<Image>>,
     smoke: Vec<Handle<Image>>,
     chest: Vec<Handle<Image>>,
+    battle_chest: Vec<Handle<Image>>,
 }
 
 #[derive(Component)]
@@ -63,6 +64,7 @@ fn load_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMu
         spark: load(SPARK_SHEET),
         smoke: load(SMOKE_SHEET),
         chest: load(CHEST_SHEET),
+        battle_chest: load(sma4_assets::BATTLE_CHEST_SHEET),
     });
 }
 
@@ -131,11 +133,14 @@ fn sync_fortress(mut commands: Commands, game: Res<GameRes>, art: Res<Art>, old:
         spawn(c, SMOKE_SHEET, &art.smoke, (p.life >> 3) as usize, (p.x, p.y), Z_EFFECT);
     }
     if let Some(ch) = &g.chest {
+        // A map object's battle has its own chest sheet (its item: a Starman in World 1).
+        let (sheet, cells) =
+            if g.battle.is_some() { (sma4_assets::BATTLE_CHEST_SHEET, &art.battle_chest) } else { (CHEST_SHEET, &art.chest) };
         if ch.item.is_none() && ch.visible() {
-            spawn(c, CHEST_SHEET, &art.chest, 0, ch.px(), Z_OBJECT);
+            spawn(c, sheet, cells, 0, ch.px(), Z_OBJECT);
         }
         if ch.item_shown().is_some() {
-            spawn(c, CHEST_SHEET, &art.chest, 1, ch.px(), Z_EFFECT);
+            spawn(c, sheet, cells, 1, ch.px(), Z_EFFECT);
         }
     }
 }

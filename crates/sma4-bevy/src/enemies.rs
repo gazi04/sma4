@@ -33,11 +33,12 @@ const Z_BEHIND: f32 = -1.0;
 /// Riding Micro-Goombas show over the player (0x0808D7E0 uses OBJ priority 1, like it).
 const Z_MICRO: f32 = 10.5;
 
-/// Sprite cells per enemy type, the puff of smoke, the fireball, the Micro-Goomba and the
-/// boomerang.
+/// Sprite cells per enemy type, the puff of smoke, the fireball, the Micro-Goomba, the
+/// boomerang and the hammer.
 #[derive(Resource)]
 struct Art(
     HashMap<u16, Vec<Handle<Image>>>,
+    Vec<Handle<Image>>,
     Vec<Handle<Image>>,
     Vec<Handle<Image>>,
     Vec<Handle<Image>>,
@@ -76,7 +77,13 @@ fn load_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMu
         load_cells(&sma4_assets::boomerang_bro_path(&dir.0), KOOPA_CELL_W, KOOPA_CELL_H, &mut images),
     );
     let boomerang = load_cells(&sma4_assets::boomerang_path(&dir.0), KOOPA_CELL_W, KOOPA_CELL_H, &mut images);
-    commands.insert_resource(Art(art, puff, fireball, micro, boomerang));
+    // The map's Hammer Bro battles.
+    art.insert(enemies::HAMMER_BRO, load_cells(&sma4_assets::hammer_bro_path(&dir.0), KOOPA_CELL_W, KOOPA_CELL_H, &mut images));
+    let hammer = load_cells(&sma4_assets::hammer_path(&dir.0), KOOPA_CELL_W, KOOPA_CELL_H, &mut images);
+    if hammer.is_empty() {
+        warn!("no objects/hammer.png; re-run sma4-extract");
+    }
+    commands.insert_resource(Art(art, puff, fireball, micro, boomerang, hammer));
 }
 
 fn sync_enemies(mut commands: Commands, game: Res<GameRes>, art: Res<Art>, old: Query<Entity, With<EnemySprite>>) {
@@ -117,6 +124,15 @@ fn sync_enemies(mut commands: Commands, game: Res<GameRes>, art: Res<Art>, old: 
             let (x, y) = b.px();
             let (w, h) = (KOOPA_CELL_W as i32, KOOPA_CELL_H as i32);
             let (cx, cy) = (x - KOOPA_ORIGIN.0 + w / 2, y - KOOPA_ORIGIN.1 + h / 2);
+            commands.spawn((EnemySprite, Sprite::from_image(image.clone()), Transform::from_xyz(cx as f32, -(cy as f32), Z_ENEMY + 0.5)));
+        }
+    }
+    // Hammers: the slot position at KOOPA_ORIGIN.
+    for h in &game.0.hammers {
+        if let Some(image) = art.5.get(h.cell()) {
+            let (x, y) = h.px();
+            let (w, ch) = (KOOPA_CELL_W as i32, KOOPA_CELL_H as i32);
+            let (cx, cy) = (x - KOOPA_ORIGIN.0 + w / 2, y - KOOPA_ORIGIN.1 + ch / 2);
             commands.spawn((EnemySprite, Sprite::from_image(image.clone()), Transform::from_xyz(cx as f32, -(cy as f32), Z_ENEMY + 0.5)));
         }
     }
@@ -180,7 +196,7 @@ fn sync_enemies(mut commands: Commands, game: Res<GameRes>, art: Res<Art>, old: 
             sprite.flip_x = e.is_koopa() && e.state == EnemyState::Walking && e.vx > 0;
             let (w, h) = (KOOPA_CELL_W as i32, KOOPA_CELL_H as i32);
             // The Bro's cells sit BRO_RAISE px higher (its body hangs below its y).
-            let raise = if kind == enemies::BOOMERANG_BRO { sma4_assets::BRO_RAISE } else { 0 };
+            let raise = if enemies::is_bro(kind) { sma4_assets::BRO_RAISE } else { 0 };
             (x - KOOPA_ORIGIN.0 + w / 2, y - KOOPA_ORIGIN.1 + raise + h / 2 + if dead { 16 } else { 0 })
         };
         let z = if e.emerging > 0 { Z_BEHIND } else { Z_ENEMY };

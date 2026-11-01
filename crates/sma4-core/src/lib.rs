@@ -16,6 +16,7 @@ pub mod goal;
 pub mod input;
 pub mod level;
 pub mod lifts;
+pub mod map_objects;
 pub mod map_stars;
 pub mod pipes;
 pub mod player;
@@ -83,6 +84,8 @@ pub struct Game {
     pub rng: rng::Rng,
     /// Boomerang Bros' boomerangs (the same projectile slots).
     pub boomerangs: Vec<enemies::Boomerang>,
+    /// Hammer Bros' hammers (the same projectile slots).
+    pub hammers: Vec<enemies::Hammer>,
     /// Micro-Goombas from the 0x74 Paragoomba (the same projectile slots).
     pub micro_goombas: Vec<enemies::MicroGoomba>,
     pub spawner: Spawner,
@@ -173,6 +176,11 @@ pub struct Game {
     chest_item: u8,
     /// Level effect 7's countdown to the end of the level (+0xBE9).
     exit_timer: u8,
+    /// Level effect 7 is on (list type 0x166, 0x03003CF7 = 7): a chest comes once the
+    /// Bros and their projectiles are gone (0x0804D12C).
+    chest_effect: bool,
+    /// A map object's battle: the item its chest holds (0x0300379D).
+    pub battle: Option<u8>,
     pub crusher: Option<crusher::Crusher>,
     /// Camera x limits set by objects (min: player +0xA0, max: +0x9E).
     camera_limits: (Option<i32>, Option<i32>),
@@ -223,6 +231,7 @@ impl Game {
         self.micro_goombas.clear();
         self.player_fireballs.clear();
         self.boomerangs.clear();
+        self.hammers.clear();
         self.debris.clear();
         self.goomba_pipes.clear();
         self.player.stuck = 0;
@@ -260,6 +269,7 @@ impl Game {
         self.chest = None;
         self.chest_item = 0;
         self.exit_timer = 0;
+        self.chest_effect = false;
         self.crusher = None;
         self.level.shift = None;
         self.camera_limits = (None, None);
@@ -424,6 +434,7 @@ impl Game {
             fortress::CHEST => self.chest = Some(fortress::Chest::spawn(s)),
             // 0x0804B768: the record's row byte.
             fortress::CHEST_ITEM => self.chest_item = s.row,
+            fortress::CHEST_EXIT => self.chest_effect = true,
             _ => {}
         }
     }
@@ -524,8 +535,23 @@ impl Game {
             self.fortress_clear = Some(goal::ClockTally::new(boom_boom::BALL_TALLY_DELAY, boom_boom::BALL_TALLY_POINTS));
             self.ball = None;
         }
+        // 0x0804D12C: no projectile and no Bro left, a chest drops in on the far side
+        // (camera + 0xC0, or + 0x30 with the player right of 0x80).
+        if self.chest_effect
+            && self.chest.is_none()
+            && self.exit_timer == 0
+            && self.fireballs.is_empty()
+            && self.micro_goombas.is_empty()
+            && self.boomerangs.is_empty()
+            && self.hammers.is_empty()
+            && !self.enemies.iter().any(|e| enemies::is_bro(e.kind))
+        {
+            let x = self.camera().0 + if self.player.x < fortress::CHEST_SIDE * player::SUB { 0xC0 } else { 0x30 };
+            self.chest = Some(fortress::Chest::at(x, fortress::CHEST_DROP_Y));
+        }
         if let Some(c) = &mut self.chest {
-            let ev = c.step(&self.level, self.chest_item, pbox);
+            let item = self.battle.unwrap_or(self.chest_item);
+            let ev = c.step(&self.level, item, pbox);
             self.puffs.extend(ev.puff.map(fortress::Puff::new));
             self.clock_stopped |= ev.opened;
             if let Some(item) = ev.got {
@@ -557,6 +583,12 @@ impl Game {
         if self.exit_timer != 0 {
             self.exit_timer -= 1;
             if self.exit_timer == 0 {
+                // A battle won: its map object is gone.
+                if self.battle.take().is_some()
+                    && let Some(map) = &mut self.world_map
+                {
+                    map.battle_won();
+                }
                 self.to_map(world_map::Arrival::Walk);
                 return true;
             }
@@ -690,6 +722,7 @@ impl Game {
     /// left (lives & 0x8000), the game-over screen.
     fn lose_life(&mut self) {
         self.dying = None;
+        self.battle = None;
         self.player.set_form(Form::Small);
         // Lives go below zero (0xFFFF: the bars show 0) on game over.
         self.status.lives = self.status.lives.wrapping_sub(1);
@@ -785,10 +818,13 @@ impl Game {
         match &mut self.screen {
             Screen::Map => {
                 if let Some(map) = &mut self.world_map {
-                    if let Some(node) = map.step(held, self.input.pressed)
-                        && !self.enter_spade(&node)
-                    {
-                        self.pending_level = Some(node);
+                    map.rand = self.rng.bytes();
+                    map.frame = self.frame;
+                    if let Some(node) = map.step(held, self.input.pressed) {
+                        self.battle = map.meeting.map(|(_, item)| item);
+                        if !self.enter_spade(&node) {
+                            self.pending_level = Some(node);
+                        }
                     }
                 } else if self.input.pressed.contains(Buttons::A) || self.input.pressed.contains(Buttons::START) {
                     self.restart_level();
@@ -1104,16 +1140,26 @@ impl Game {
         // 0x08055938 takes a free slot among the first four, or does not spit; 0x0808C8FC
         // gives a Micro-Goomba any free slot.
         for e in &mut self.enemies {
-            let used = self.fireballs.len() + self.micro_goombas.len() + self.boomerangs.len();
+            let used = self.fireballs.len() + self.micro_goombas.len() + self.boomerangs.len() + self.hammers.len();
+            let taken: Vec<u8> = self.boomerangs.iter().map(|b| b.slot).chain(self.hammers.iter().map(|h| h.slot)).collect();
             // 0x08068B04 -> 0x0808C8FC: any free slot.
             if let Some(mut b) = e.thrown.take()
                 && used < enemies::PROJECTILE_SLOTS
-                && let Some(slot) = enemies::free_slot(self.boomerangs.iter().map(|b| b.slot))
+                && let Some(slot) = enemies::free_slot(taken.iter().copied())
             {
                 b.slot = slot;
                 self.boomerangs.push(b);
             }
-            let used = self.fireballs.len() + self.micro_goombas.len() + self.boomerangs.len();
+            // 0x08068A84 -> 0x0808C8FC: the same.
+            let taken: Vec<u8> = self.boomerangs.iter().map(|b| b.slot).chain(self.hammers.iter().map(|h| h.slot)).collect();
+            if let Some(mut h) = e.hammer.take()
+                && used < enemies::PROJECTILE_SLOTS
+                && let Some(slot) = enemies::free_slot(taken.iter().copied())
+            {
+                h.slot = slot;
+                self.hammers.push(h);
+            }
+            let used = self.fireballs.len() + self.micro_goombas.len() + self.boomerangs.len() + self.hammers.len();
             if let Some(f) = e.spit.take()
                 && self.fireballs.len() < enemies::FIREBALL_SLOTS
                 && used < enemies::PROJECTILE_SLOTS
@@ -1132,6 +1178,10 @@ impl Game {
         self.boomerangs.retain_mut(|b| {
             let owner = enemies.iter().find(|e| e.id == b.owner);
             b.step(owner, player, camera, frame)
+        });
+        self.hammers.retain_mut(|h| {
+            let owner = enemies.iter().find(|e| e.id == h.owner);
+            h.step(owner, camera)
         });
         // Fire Mario's fireballs: move and bounce, then knock out what they touch
         // (0x0808B648; a fireball bursting this frame still hits everything it touches).
@@ -1224,7 +1274,11 @@ impl Game {
             hurt = true;
         }
         // 0x0808CC9C -> 0x0808CAEC: a fireball hurts like an enemy (0x0804A5F4) and flies on.
-        if !hidden && (self.fireballs.iter().any(|f| f.touches(&self.player)) || self.boomerangs.iter().any(|b| b.touches(&self.player))) {
+        if !hidden
+            && (self.fireballs.iter().any(|f| f.touches(&self.player))
+                || self.boomerangs.iter().any(|b| b.touches(&self.player))
+                || self.hammers.iter().any(|h| h.touches(&self.player)))
+        {
             hurt = true;
         }
         if hurt {
@@ -1604,6 +1658,66 @@ mod tests {
         };
         assert_eq!(shots(1), 1);
         assert_eq!(shots(2), 2);
+    }
+
+    /// A Hammer Bro battle like World 1's arena 0x4E: one screen, ground on row 26, bricks
+    /// on row 22 (columns 7-13), the Bro at (12, 24) and level effect 7 (list type 0x166).
+    fn battle() -> Game {
+        let (w, h) = (16, 27);
+        let mut kinds = vec![TileKind::Empty; w * h];
+        kinds[26 * w..].fill(TileKind::Solid);
+        kinds[22 * w + 7..22 * w + 14].fill(TileKind::Solid);
+        let list = [
+            sma4_assets::EnemySpawn { kind: enemies::HAMMER_BRO, col: 12, row: 24, ..Default::default() },
+            sma4_assets::EnemySpawn { kind: fortress::CHEST_EXIT, col: 13, row: 20, ..Default::default() },
+        ];
+        let mut g = Game::new();
+        g.enter_level(Level::from_kinds(w, h, &kinds), (2 * TILE_PX, 26 * TILE_PX - 16), &list);
+        g.set_time_limit(200);
+        g.battle = Some(9);
+        g
+    }
+
+    #[test]
+    fn the_hammer_bro_throws_hammers_and_its_chest_comes_once_it_is_gone() {
+        let mut g = battle();
+        let mut thrown = 0;
+        for _ in 0..300 {
+            g.invulnerable = 100;
+            let before = g.hammers.len();
+            g.step(Buttons::empty());
+            thrown += g.hammers.len().saturating_sub(before);
+            assert!(g.chest.is_none(), "not while the Bro is there");
+        }
+        assert!(g.enemies.iter().any(|e| e.kind == enemies::HAMMER_BRO));
+        assert!(thrown >= 3, "it throws hammers ({thrown})");
+        // Knocked out: once its hammers have gone too, the chest drops on the far side
+        // (the player is left of x 0x80: camera + 0xC0, y 0x170, 0x0804D12C).
+        g.enemies.clear();
+        for _ in 0..200 {
+            g.invulnerable = 100;
+            g.step(Buttons::empty());
+            if g.chest.is_some() {
+                break;
+            }
+        }
+        assert!(g.hammers.is_empty());
+        let c = g.chest.expect("a chest");
+        assert_eq!(c.px(), (0xC0, 0x170));
+        // Opened: its item (the map object's, a Starman) goes into the inventory and the
+        // level ends 0x60 frames later.
+        let mut got = false;
+        for _ in 0..400 {
+            g.invulnerable = 100;
+            g.step(if g.player.px().0 < 0xB8 { Buttons::RIGHT } else { Buttons::empty() });
+            got |= g.inventory.contains(&9);
+            if g.screen == Screen::Map {
+                break;
+            }
+        }
+        assert!(got, "the Starman");
+        assert_eq!(g.screen, Screen::Map);
+        assert_eq!(g.battle, None);
     }
 
     /// A flat arena 0x100 px into a 0xA00 px level, Boom Boom in it.

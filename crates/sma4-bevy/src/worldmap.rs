@@ -28,6 +28,8 @@ impl Plugin for WorldMapPlugin {
 
 /// Over the static map view (z 41), under the panel (42) and the status bar (43).
 const Z_TILES: f32 = 41.2;
+/// Map objects: OBJ priority 3, over the map (BG1) and under Mario.
+const Z_OBJECTS: f32 = 41.4;
 const Z_MARIO: f32 = 41.5;
 const Z_STARS: f32 = 41.6;
 const Z_IRIS: f32 = 41.8;
@@ -35,6 +37,10 @@ const Z_IRIS: f32 = 41.8;
 /// Debug: map cells to mark cleared at the start (`--cleared`).
 #[derive(Resource, Default)]
 pub struct ClearedSpots(pub Vec<(usize, usize)>);
+
+/// Debug: the map's Hammer Bro on this cell (column, row).
+#[derive(Resource, Default)]
+pub struct MapBro(pub Option<(usize, usize)>);
 
 #[derive(Resource)]
 struct MapArt {
@@ -48,7 +54,12 @@ struct MapArt {
     iris: Handle<Image>,
     /// The world-start stars, [tile].
     stars: Vec<Handle<Image>>,
+    /// Map objects (Hammer Bros), [`sma4_assets::map_object_cell`].
+    objects: Vec<Handle<Image>>,
 }
+
+#[derive(Component)]
+struct MapObjectSprite(usize);
 
 #[derive(Component)]
 struct MapTile(usize);
@@ -78,6 +89,7 @@ fn spawn_map(
     mut images: ResMut<Assets<Image>>,
     camera: Single<Entity, With<Camera2d>>,
     cleared: Option<Res<ClearedSpots>>,
+    bro: Option<Res<MapBro>>,
 ) {
     let asset = match WorldMapAsset::read(&dir.0, 0) {
         Ok(a) => a,
@@ -117,6 +129,20 @@ fn spawn_map(
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     ));
+    let objects_asset = match sma4_assets::MapObjectsAsset::read(&dir.0, 0) {
+        Ok(a) => Some(a),
+        Err(e) => {
+            warn!("{e}; re-run sma4-extract for the map's Hammer Bros");
+            None
+        }
+    };
+    let objects = objects_asset
+        .as_ref()
+        .map(|a| {
+            let s = sma4_assets::MAP_OBJECT_SIZE;
+            a.sprites.cells(s, s).into_iter().map(|c| images.add(sprite_image(c))).collect()
+        })
+        .unwrap_or_default();
     let origin = asset.origin;
     commands.entity(*camera).with_children(|cam| {
         // Only what the GBA screen shows: cells are cut at its edges.
@@ -139,16 +165,23 @@ fn spawn_map(
         for i in 0..8 {
             cam.spawn((MapStar(i), Sprite::default(), Transform::default(), Visibility::Hidden));
         }
+        for i in 0..sma4_core::map_objects::SLOTS {
+            cam.spawn((MapObjectSprite(i), Sprite::default(), Transform::default(), Visibility::Hidden));
+        }
     });
     let mut map =
         WorldMap::new(asset.grid, (asset.cols, asset.rows), asset.start, asset.thresholds, asset.nodes, asset.anim_ticks)
             .with_game_over_keep(asset.game_over_keep)
-            .with_origin(origin);
+            .with_origin(origin)
+            .with_objects(objects_asset.as_ref().map(|a| a.objects.as_slice()).unwrap_or(&[]));
     for &(c, r) in cleared.iter().flat_map(|c| c.0.iter()) {
         map.clear_cell(c, r);
     }
+    if let Some((c, r)) = bro.and_then(|b| b.0) {
+        map.objects.place(sma4_core::map_objects::HAMMER_BRO, (r * 16 + 0x10) as u8, (c * 16) as u16);
+    }
     game.0.world_map = Some(map);
-    commands.insert_resource(MapArt { tiles, mario, spin, origin, iris, stars });
+    commands.insert_resource(MapArt { tiles, mario, spin, origin, iris, stars, objects });
 }
 
 /// Iris (0x0802F44C): everything outside a circle of `r` px round (cx, cy) is black.
@@ -163,6 +196,7 @@ fn draw_iris(image: &mut Image, (cx, cy): (i32, i32), r: i32) {
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn sync_map(
     game: Res<GameRes>,
     art: Option<Res<MapArt>>,
@@ -173,6 +207,10 @@ fn sync_map(
     mut stars: Query<
         (&MapStar, &mut Sprite, &mut Transform, &mut Visibility),
         (Without<MapTile>, Without<MapMario>, Without<Iris>),
+    >,
+    mut objects: Query<
+        (&MapObjectSprite, &mut Sprite, &mut Transform, &mut Visibility),
+        (Without<MapTile>, Without<MapMario>, Without<Iris>, Without<MapStar>),
     >,
 ) {
     let (Some(art), Some(map)) = (art, &game.0.world_map) else { return };
@@ -253,6 +291,24 @@ fn sync_map(
         sprite.image = image.clone();
         sprite.rect = Some(Rect::new((x0 - x) as f32, (y0 - y) as f32, (x1 - x) as f32, (y1 - y) as f32));
         *t = at(x0, y0, x1 - x0, y1 - y0, Z_STARS);
+        *v = Visibility::Inherited;
+    }
+    // Map objects (0x08031DDC): 16x16 OBJs placed as Mario's lower half, under him.
+    let drawn = map.object_sprites();
+    for (o, mut sprite, mut t, mut v) in &mut objects {
+        let Some(d) = drawn.get(o.0).filter(|_| shown) else {
+            *v = Visibility::Hidden;
+            continue;
+        };
+        let Some(image) = art.objects.get(sma4_assets::map_object_cell(d.kind, d.frame) as usize) else {
+            *v = Visibility::Hidden;
+            continue;
+        };
+        sprite.image = image.clone();
+        sprite.color = tint;
+        sprite.flip_x = d.flip;
+        let size = sma4_assets::MAP_OBJECT_SIZE as i32;
+        *t = at(d.x + art.origin.0, d.y - 0x10 + art.origin.1, size, size, Z_OBJECTS);
         *v = Visibility::Inherited;
     }
     let radius = match map.phase {

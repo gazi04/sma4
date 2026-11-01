@@ -1084,6 +1084,95 @@ pub fn boomerang_path(dir: &Path) -> PathBuf {
 }
 pub const BOOMERANG_FRAMES: u32 = 4;
 
+/// Hammer Bro (type 0x81): drawn by the Boomerang Bro's routine (0x08068BB8) in its own
+/// palette (0x0816A770[0x81] = 0x2B), so the same cells as `boomerang_bro_cell`.
+pub fn hammer_bro_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("hammer_bro.png")
+}
+/// The hammer (projectile type 1): `KOOPA_CELL_W` x `KOOPA_CELL_H` cells, the projectile's
+/// position at `KOOPA_ORIGIN`; the eight spin steps (0x08170AA8 / 0x08170AA0[(+0x13 >> 2) &
+/// 7]) flying right, then left.
+pub fn hammer_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("hammer.png")
+}
+pub const HAMMER_FRAMES: u32 = 8;
+
+/// A Hammer Bro battle's chest (level effect 7, 0x0804D12C) and its item (0x0300379D, the
+/// map object's 0x08139FE0 byte; World 1's Hammer Bro holds 9, a Starman): laid out as
+/// `CHEST_SHEET`.
+pub const BATTLE_CHEST_SHEET: FortressSheet = FortressSheet { name: "battle_chest", cell: (32, 32), origin: (8, 8), cells: 2 };
+
+/// A world's map objects (World 1: a Hammer Bro), as a new game sets them (0x08039AC8: six
+/// slots per world from 0x08139F60 y, 0x08139F80 screen, 0x08139FA0 x, 0x08139FC0 kind; the
+/// world start 0x0802FC00 copies 0x08139FE0, the item each holds, to 0x03003790), and their
+/// map sprites.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapObjectsAsset {
+    pub objects: Vec<MapObjectSpawn>,
+    /// `MAP_OBJECT_FRAMES` 16x16 cells per kind (0 .. `MAP_OBJECT_KINDS`), see
+    /// `map_object_cell`.
+    pub sprites: Rgba,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MapObjectSpawn {
+    pub slot: u8,
+    pub kind: u8,
+    /// Map y and x (screen << 8 | x), as Mario's.
+    pub y: u8,
+    pub x: u16,
+    pub item: u8,
+}
+
+/// Map object sprite frames (0x08031DDC: 0x0813A678 / 0x0813A6A8[(kind - 1) * 3 + frame]):
+/// 0 still, 1 and 2 its two steps.
+pub const MAP_OBJECT_FRAMES: u32 = 3;
+pub const MAP_OBJECT_KINDS: u32 = 16;
+pub const MAP_OBJECT_SIZE: u32 = 16;
+pub fn map_object_cell(kind: u8, frame: u32) -> u32 {
+    kind as u32 * MAP_OBJECT_FRAMES + frame
+}
+
+const MAP_OBJECTS_MAGIC: &[u8; 8] = b"SMA4MO01";
+
+impl MapObjectsAsset {
+    fn stem(dir: &Path, world: u8) -> PathBuf {
+        dir.join("map").join(format!("world{}_objects", world + 1))
+    }
+
+    pub fn write(&self, dir: &Path, world: u8) -> Result<()> {
+        let stem = Self::stem(dir, world);
+        let mut out = MAP_OBJECTS_MAGIC.to_vec();
+        out.push(self.objects.len() as u8);
+        for o in &self.objects {
+            out.extend_from_slice(&[o.slot, o.kind, o.y]);
+            out.extend_from_slice(&o.x.to_le_bytes());
+            out.push(o.item);
+        }
+        write(&stem.with_extension("bin"), &out)?;
+        self.sprites.write_png(&stem.with_extension("png"))
+    }
+
+    pub fn read(dir: &Path, world: u8) -> Result<Self> {
+        let stem = Self::stem(dir, world);
+        let path = stem.with_extension("bin");
+        let d = read(&path)?;
+        let bad = || AssetError::BadLevel(path.clone());
+        if d.get(..8) != Some(MAP_OBJECTS_MAGIC) {
+            return Err(bad());
+        }
+        let n = *d.get(8).ok_or_else(bad)? as usize;
+        let objects = (0..n)
+            .map(|i| {
+                let b = d.get(9 + i * 6..15 + i * 6)?;
+                Some(MapObjectSpawn { slot: b[0], kind: b[1], y: b[2], x: u16::from_le_bytes([b[3], b[4]]), item: b[5] })
+            })
+            .collect::<Option<_>>()
+            .ok_or_else(bad)?;
+        Ok(Self { objects, sprites: Rgba::read_png(&stem.with_extension("png"))? })
+    }
+}
+
 /// Puff of smoke left by an enemy knocked out that has no body to fall (object state 8,
 /// e.g. a Piranha Plant hit by the tail): four 16x16 cells in the order they are shown.
 pub fn puff_path(dir: &Path) -> PathBuf {
@@ -1654,6 +1743,23 @@ impl SpadeAsset {
             Some(a)
         })()
         .ok_or_else(bad)
+    }
+}
+
+#[cfg(test)]
+mod map_objects_tests {
+    use super::*;
+
+    #[test]
+    fn map_objects_round_trip() {
+        let dir = std::env::temp_dir().join(format!("sma4_mapobj_{}", std::process::id()));
+        let a = MapObjectsAsset {
+            objects: vec![MapObjectSpawn { slot: 2, kind: 3, y: 0x80, x: 0x1A0, item: 9 }],
+            sprites: Rgba { width: 2, height: 1, pixels: vec![1, 2, 3, 255, 0, 0, 0, 0] },
+        };
+        a.write(&dir, 0).unwrap();
+        assert_eq!(MapObjectsAsset::read(&dir, 0).unwrap(), a);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 

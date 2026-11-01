@@ -31,6 +31,11 @@ impl Rng {
         self.0[0] = b;
     }
 
+    /// 0x03003879.. (the slots' bytes).
+    pub fn bytes(&self) -> [u8; 18] {
+        std::array::from_fn(|i| self.0[1 + i])
+    }
+
     /// 0x03003879[slot] (slots wrap at 18).
     pub fn byte(&self, slot: usize) -> u8 {
         self.0[1 + slot % 18]

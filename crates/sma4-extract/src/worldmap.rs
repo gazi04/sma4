@@ -443,3 +443,90 @@ pub fn course_levels(
     }
     Ok(out)
 }
+
+/// The battle arenas: the level-table entries of the path junctions (tiles that cannot be
+/// entered), where a map object meeting Mario starts a battle (0x08031DDC -> map sub-state
+/// 0x16 with 0x03003AF7 = the object's kind; 0x08009A3C then loads the entry for Mario's
+/// cell as for any spot). World 1: levels 0x4E and 0x4F, tileset 3, enemy list 0x61.
+/// Tiles (second plane << 8 | tile) on which a map object can meet Mario (0x08031D5C).
+const CONTACT_TILES: u32 = 0x0814_26EC;
+const CONTACT_TILES_LEN: u32 = 13;
+
+pub fn battle_levels(rom: &Rom, m: &mut Machine, world: u8) -> Result<Vec<(u16, u8, u16)>, ExtractError> {
+    setup(m, world)?;
+    let nodes = nodes(rom, world)?;
+    let screens = nodes.iter().map(|n| (n.x >> 8) as usize + 1).max().unwrap_or(1);
+    let grid = read_grid(m, rom, screens)?;
+    let t = m.read(THRESHOLDS, 4)?;
+    let always: Vec<u8> = (0..ENTER_ALWAYS_LEN).map(|i| rom.u8(ENTER_ALWAYS + i)).collect::<Result<_, _>>()?;
+    let mut out: Vec<(u16, u8, u16)> = Vec::new();
+    for n in nodes {
+        let (row, col) =
+            (((n.y as usize).wrapping_sub(0x10) >> 4) & 0xF, ((n.x >> 8) as usize) * COLS + (n.x as usize & 0xFF) / 16);
+        let Some(&tile) = grid.get(row * COLS * screens + col) else {
+            continue;
+        };
+        let enterable = always.contains(&tile) || tile >= t[(tile >> 6) as usize];
+        let meets = (0..CONTACT_TILES_LEN).any(|i| rom.u16(CONTACT_TILES + i * 2).is_ok_and(|c| c == tile as u16));
+        if !enterable && meets && n.level & 0x8000 == 0 && n.enemies & 0x8000 == 0 && !out.iter().any(|l| l.0 == n.level) {
+            out.push((n.level, n.tileset, n.enemies));
+        }
+    }
+    Ok(out)
+}
+
+/// Map objects of a new game (0x08039AC8): six slots per world, from the per-world tables
+/// below; 0x0802FC00 copies the world's items (nine bytes) to 0x03003790.
+const OBJ_Y: u32 = 0x0813_9F60;
+const OBJ_SCREEN: u32 = 0x0813_9F80;
+const OBJ_X: u32 = 0x0813_9FA0;
+const OBJ_KIND: u32 = 0x0813_9FC0;
+const OBJ_ITEM: u32 = 0x0813_9FE0;
+const OBJ_SLOTS: u32 = 6;
+/// Sprite of map object kind k, frame f (0x08031DDC): i = (k - 1) * 3 + f; tile =
+/// 0x0813A678[i] & 0xF | (0x0813A678[i] & 0xF0) << 1 | (0x0813A6A8[i] & 1) << 4, palette
+/// (0x0813A6A8[i] & 0xE) >> 1; 16x16 (attr1 0x4000), priority 3.
+const OBJ_TILES: u32 = 0x0813_A678;
+const OBJ_ATTRS: u32 = 0x0813_A6A8;
+const OBJ_SLOT: u32 = 40;
+
+pub fn extract_map_objects(rom: &Rom, m: &mut Machine, world: u8, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{MAP_OBJECT_FRAMES, MAP_OBJECT_KINDS, MAP_OBJECT_SIZE, MapObjectSpawn, MapObjectsAsset, map_object_cell};
+    setup(m, world)?;
+    let w = world as u32 * 4;
+    let mut objects = Vec::new();
+    for slot in 0..OBJ_SLOTS {
+        let at = |t: u32| -> Result<u8, ExtractError> { Ok(rom.u8(rom.ptr(t + w)? + slot)?) };
+        let kind = at(OBJ_KIND)?;
+        if kind != 0 {
+            let x = (at(OBJ_SCREEN)? as u16) << 8 | at(OBJ_X)? as u16;
+            objects.push(MapObjectSpawn { slot: slot as u8, kind, y: at(OBJ_Y)?, x, item: at(OBJ_ITEM)? });
+        }
+    }
+    let s = MAP_OBJECT_SIZE;
+    let cells = MAP_OBJECT_KINDS * MAP_OBJECT_FRAMES;
+    let mut sprites = Rgba { width: s * cells, height: s, pixels: vec![0; (s * cells * s * 4) as usize] };
+    for kind in 1..MAP_OBJECT_KINDS as u8 {
+        for f in 0..MAP_OBJECT_FRAMES {
+            let i = (kind as u32 - 1) * 3 + f;
+            let (t, a) = (rom.u8(OBJ_TILES + i)? as u16, rom.u8(OBJ_ATTRS + i)? as u16);
+            let tile = t & 0xF | (t & 0xF0) << 1 | (a & 1) << 4;
+            for slot in 0..128 {
+                m.w16(OAM_BUF + slot * 8, 0xA0)?;
+            }
+            m.w16(OAM_BUF + OBJ_SLOT * 8, 0)?;
+            m.w16(OAM_BUF + OBJ_SLOT * 8 + 2, 0x4000)?;
+            m.w16(OAM_BUF + OBJ_SLOT * 8 + 4, tile | 0xC00 | (a & 0xE) << 11)?;
+            let mut canvas = Rgba { width: 240, height: 160, pixels: vec![0; 240 * 160 * 4] };
+            draw_oam(m, &mut canvas, OBJ_SLOT..OBJ_SLOT + 1)?;
+            let cell = map_object_cell(kind, f);
+            for y in 0..s {
+                let src = (y * 240 * 4) as usize;
+                let dst = ((y * sprites.width + cell * s) * 4) as usize;
+                sprites.pixels[dst..dst + (s * 4) as usize].copy_from_slice(&canvas.pixels[src..src + (s * 4) as usize]);
+            }
+        }
+    }
+    println!("  world map {} objects: {:?}", world + 1, objects.iter().map(|o| (o.kind, o.y, o.x)).collect::<Vec<_>>());
+    MapObjectsAsset { objects, sprites }.write(out_dir, world).map_err(|e| ExtractError(e.to_string()))
+}

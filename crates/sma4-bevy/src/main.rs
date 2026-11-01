@@ -48,6 +48,7 @@ const USAGE: &str = "usage: sma4 [--assets <dir>] [--level <hex id>] [--viewer]
   --map  start on the world map even with debug options / scripts
   --lives <n>  debug: start with n lives
   --cleared <col>,<row>  debug: mark the world-map spot at that cell cleared (repeatable)
+  --map-bro <col>,<row>  debug: put the world map's Hammer Bro on that cell
   --popup <type>  debug: show a score popup (1-15) over the player at the start
   --title  debug: start on the title screen (where the game-over menu's QUIT goes)
   --spade  debug: start in the spade panel's game (Toad's room)
@@ -82,6 +83,7 @@ struct Args {
     map: bool,
     lives: Option<u16>,
     cleared: Vec<(usize, usize)>,
+    map_bro: Option<(usize, usize)>,
     spade: Option<u8>,
     title: bool,
 }
@@ -104,6 +106,7 @@ fn parse_args() -> Option<Args> {
         map: false,
         lives: None,
         cleared: Vec::new(),
+        map_bro: None,
         spade: None,
         title: false,
     };
@@ -120,6 +123,11 @@ fn parse_args() -> Option<Args> {
             "--no-enemies" => args.no_enemies = true,
             "--map" => args.map = true,
             "--lives" => args.lives = Some(it.next()?.parse().ok()?),
+            "--map-bro" => {
+                let v = it.next()?;
+                let (c, r) = v.split_once(',')?;
+                args.map_bro = Some((c.parse().ok()?, r.parse().ok()?));
+            }
             "--cleared" => {
                 let spec = it.next()?;
                 let (c, r) = spec.split_once(',')?;
@@ -228,6 +236,7 @@ fn main() -> AppExit {
             })
             .insert_resource(level::LevelRes(level))
             .insert_resource(worldmap::ClearedSpots(args.cleared.clone()))
+            .insert_resource(worldmap::MapBro(args.map_bro))
             .insert_resource(spade::DebugSpade(args.spade))
             .insert_resource(title::DebugTitle(args.title))
             .add_plugins((
