@@ -1565,6 +1565,43 @@ pub fn read_end_rooms(dir: &Path) -> Result<[EndRoom; WORLDS]> {
     }))
 }
 
+/// The mini-fortress's object sheets (`objects/fortress_<name>.png`), each a row of cells of
+/// `FortressSheet::cell` px with the object's position at `origin` in every cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FortressSheet {
+    pub name: &'static str,
+    pub cell: (u32, u32),
+    pub origin: (i32, i32),
+    pub cells: u32,
+}
+
+impl FortressSheet {
+    pub fn path(&self, dir: &Path) -> PathBuf {
+        dir.join("objects").join(format!("fortress_{}.png", self.name))
+    }
+}
+
+/// Podoboo: frame +0x17 (0-2), then the same falling (v-flipped, +3).
+pub const PODOBOO_SHEET: FortressSheet = FortressSheet { name: "podoboo", cell: (16, 16), origin: (0, 0), cells: 6 };
+/// Embers (projectile 0x17): three steps.
+pub const EMBER_SHEET: FortressSheet = FortressSheet { name: "ember", cell: (8, 8), origin: (0, 0), cells: 3 };
+/// Lava splash (projectile 0x18): six steps (timer >> 2), the four pieces composed.
+pub const LAVA_SPLASH_SHEET: FortressSheet = FortressSheet { name: "lava_splash", cell: (48, 24), origin: (16, 0), cells: 6 };
+/// Roto-Disc: by frame counter & 15 (its flips and palette follow the counter).
+pub const ROTO_DISC_SHEET: FortressSheet = FortressSheet { name: "roto_disc", cell: (16, 16), origin: (0, 0), cells: 16 };
+/// Dry Bones: frame +0x17 (0-3) facing left, then facing right.
+pub const DRY_BONES_SHEET: FortressSheet = FortressSheet { name: "dry_bones", cell: (32, 48), origin: (8, 24), cells: 8 };
+/// Boom Boom: frame +0x17 (0-11) facing left, then facing right.
+pub const BOOM_BOOM_SHEET: FortressSheet = FortressSheet { name: "boom_boom", cell: (64, 64), origin: (16, 24), cells: 24 };
+/// The ball (type 0x4A).
+pub const BALL_SHEET: FortressSheet = FortressSheet { name: "ball", cell: (32, 32), origin: (8, 8), cells: 1 };
+/// Boom Boom's burst sparks (projectile 0x0D): four palettes.
+pub const SPARK_SHEET: FortressSheet = FortressSheet { name: "spark", cell: (8, 8), origin: (0, 0), cells: 4 };
+/// Puff of smoke (projectile 0x16): big to small.
+pub const SMOKE_SHEET: FortressSheet = FortressSheet { name: "smoke", cell: (16, 16), origin: (0, 0), cells: 3 };
+/// The treasure chest (type 0x52), then its item (the Warp Whistle).
+pub const CHEST_SHEET: FortressSheet = FortressSheet { name: "chest", cell: (32, 32), origin: (8, 8), cells: 2 };
+
 /// The spade panel's bonus game (`spade/`): Toad's room (sub-state 0x24, set up by
 /// 0x08015F10) and the picture-matching slots (sub-states 0x26-0x28). Pictures as PNGs, the
 /// rest in `spade/spade.bin`.
