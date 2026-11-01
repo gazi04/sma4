@@ -58,9 +58,12 @@ were checked frame by frame against the ROM's own routines run in an emulator.
 The camera now scrolls up and down as in the ROM in every level (checked frame by frame
 against the ROM's scroll routines over a run through World 1-5): it follows Mario only
 when his frame's top leaves a band below the top of the view (0x10-0x30 px in World 1-5),
-at a speed set by his vertical speed,
-and once it is down at the ground (y 0xF0 or below) it does not follow him up unless he
-flies; each level's settings are extracted from your ROM. Views taller than the GBA's
+at a speed set by his vertical speed. In most levels, once it is down at the ground (y 0xF0
+or below) it does not follow him up unless he flies; World 1-5's header picks the ROM's
+free scroll instead, so the camera follows him back up onto the hills above the cave
+(it used to stay down there with Mario off the top of the screen). Each level's settings
+are extracted from your ROM (the level files now carry the scroll mode: re-run
+`sma4-extract`). Views taller than the GBA's
 show more above, with the bottom of the level kept at the bottom. World 1-5's camera
 triggers work on it: over the note-block stretch (two 0xC8 boxes) the camera heads for
 the bottom of the level, and near the end (an 0xE0 / 0xE1 band) it stays up while Mario is

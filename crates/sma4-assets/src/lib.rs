@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub const METATILE: u32 = 16;
 pub const DEFAULT_DIR: &str = "assets/extracted";
 
-const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV17";
+const LEVEL_MAGIC: &[u8; 8] = b"SMA4LV18";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssetError {
@@ -572,10 +572,14 @@ pub struct CameraParams {
     pub dead_zone_flying: [u16; 2],
     /// +0x1E (+0xDA): the highest camera y.
     pub top: u16,
+    /// The scroll mode 0x03003CB2 = (header byte 6 & 0x60) >> 5 (0x08014F20), which picks
+    /// the follow in 0x080992A6: 0 kept at 0xF0 and below unless flying (0x08099624), 1
+    /// free up to `top` (World 1-5), 2 the windowed scroll 0x08099A48.
+    pub mode: u8,
 }
 
 impl CameraParams {
-    const BYTES: usize = 14;
+    const BYTES: usize = 15;
 
     fn write(&self, out: &mut Vec<u8>) {
         let [d0, d1] = self.dead_zone;
@@ -583,6 +587,7 @@ impl CameraParams {
         for v in [self.bottom, self.fixed, d0, d1, f0, f1, self.top] {
             out.extend_from_slice(&v.to_le_bytes());
         }
+        out.push(self.mode);
     }
 
     fn read(d: &[u8]) -> Option<Self> {
@@ -593,6 +598,7 @@ impl CameraParams {
             dead_zone: [w(2)?, w(3)?],
             dead_zone_flying: [w(4)?, w(5)?],
             top: w(6)?,
+            mode: *d.get(14)?,
         })
     }
 }
@@ -1355,7 +1361,7 @@ mod tests {
             pipe_flags: 0x80,
             class: 0,
             water: [0xFF, 0xFF, 0xFF, 0xC1],
-            camera: CameraParams { bottom: 0x1AF, fixed: 0, dead_zone: [0x10, 0x30], dead_zone_flying: [0x10, 0x30], top: 7 },
+            camera: CameraParams { bottom: 0x1AF, fixed: 0, dead_zone: [0x10, 0x30], dead_zone_flying: [0x10, 0x30], top: 7, mode: 1 },
             junction: Some(Junction {
                 level: 0x23,
                 enemies: 2,

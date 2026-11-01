@@ -3,9 +3,10 @@
 //!
 //! * The camera y (0x03003754) follows the player's frame y (+4) with a dead zone: it moves
 //!   only while the player is less than `dead_zone[0]` or more than `dead_zone[1]` px below
-//!   it, by at most 0x08172D6F[|speed byte| >> 4] px a frame (0x080996F0). Once at 0xF0 or
-//!   lower it does not go above 0xF0 unless the player flies (0x08099624); never above the
-//!   level's top (+0xDA) nor below its bottom - 0x9F.
+//!   it, by at most 0x08172D6F[|speed byte| >> 4] px a frame (0x080996F0). In scroll mode
+//!   0 (header byte 6 bits 5-6, 0x03003CB2), once at 0xF0 or lower it does not go above
+//!   0xF0 unless the player flies (0x08099624); mode 1 (World 1-5) follows up and down
+//!   freely. Never above the level's top (+0xDA) nor below its bottom - 0x9F.
 //! * 0xC8 (init 0x080589A8, main 0x08058A04): a box `w` x `h` tiles (extra byte 1, high /
 //!   low nibble) from x - 8, rows down to its own; while the player's frame is in it, the
 //!   camera heads for y - extra byte 2 (clamped to the level) at 3 px a frame instead
@@ -171,9 +172,14 @@ impl CameraZones {
             return;
         }
         // 0x0809869C picks the flying dead zone while the player flies (+0xC6), and
-        // 0x08099624 also below 0xF0, where the camera may rise to the level's top.
+        // 0x08099624 also below 0xF0, where the camera may rise to the level's top. Scroll
+        // mode 1 (0x080992A6) skips 0x08099624: the normal dead zone (classic game,
+        // 0x03003A2F clear) and the level's top, wherever the camera is.
         let flying = player.flight != 0;
-        let (zone, top) = if self.y < GROUND_TOP || flying {
+        // TODO(re): mode 2's windowed scroll (0x08099A48) still takes the mode-0 path.
+        let (zone, top) = if p.mode == 1 {
+            (p.dead_zone, p.top as i32)
+        } else if self.y < GROUND_TOP || flying {
             (p.dead_zone_flying, p.top as i32)
         } else {
             (p.dead_zone, GROUND_TOP)
@@ -217,7 +223,7 @@ mod tests {
     use super::*;
 
     const PARAMS: CameraParams =
-        CameraParams { bottom: 0x1AF, fixed: 0, dead_zone: [0x10, 0x30], dead_zone_flying: [0x10, 0x30], top: 7 };
+        CameraParams { bottom: 0x1AF, fixed: 0, dead_zone: [0x10, 0x30], dead_zone_flying: [0x10, 0x30], top: 7, mode: 1 };
 
     /// World 1-5's triggers: two locks on row 22 and a band from column 115 to 142.
     fn world_1_5(y: i32) -> CameraZones {
@@ -244,8 +250,8 @@ mod tests {
     }
 
     #[test]
-    fn the_camera_follows_down_and_stays_at_0xf0_and_below() {
-        let mut z = world_1_5(0);
+    fn mode_0_follows_down_and_stays_at_0xf0_and_below() {
+        let mut z = CameraZones::new(&[], CameraParams { mode: 0, ..PARAMS }, 0);
         let p = big_at(10 * TILE_PX, 0x120);
         for _ in 0..200 {
             z.step(&p);
@@ -257,6 +263,22 @@ mod tests {
             z.step(&p);
         }
         assert_eq!(z.y, GROUND_TOP);
+    }
+
+    #[test]
+    fn mode_1_follows_the_player_back_up_past_0xf0() {
+        // World 1-5: down at the bottom, then up on the hills above the cave.
+        let mut z = world_1_5(0);
+        let p = big_at(10 * TILE_PX, 0x130);
+        for _ in 0..200 {
+            z.step(&p);
+        }
+        assert_eq!(z.y, 0x130 - 0x30, "below 0xF0");
+        let p = big_at(10 * TILE_PX, 0x80);
+        for _ in 0..200 {
+            z.step(&p);
+        }
+        assert_eq!(z.y, 0x80 - 0x10, "stops with the player at the dead zone's top");
     }
 
     #[test]

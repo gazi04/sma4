@@ -78,6 +78,7 @@ impl Level {
                 dead_zone: [0x20, 0x40],
                 dead_zone_flying: [0x20, 0x40],
                 top: 0,
+                mode: 0,
             },
             coin_block: None,
             coin_timer: 0,

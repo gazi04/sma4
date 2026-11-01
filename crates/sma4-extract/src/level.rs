@@ -349,6 +349,7 @@ pub fn extract_at(
                 dead_zone: [w(4)?, w(6)?],
                 dead_zone_flying: [w(0x16)?, w(0x18)?],
                 top: w(0x1E)?,
+                mode: (hdr[6] & 0x60) >> 5,
             }
         },
         water: {
