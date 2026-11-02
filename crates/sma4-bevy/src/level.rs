@@ -59,6 +59,8 @@ pub struct StartOptions {
     pub lives: Option<u16>,
     /// Start behind the scenery, as just through a white block.
     pub behind: bool,
+    /// `--progress`: the game's progress byte (0x03002C85; not 0 once it has been beaten).
+    pub progress: u8,
 }
 
 pub struct LevelPlugin;
@@ -289,8 +291,9 @@ fn spawn_level(
     };
     game.0.enter_level(core_level, spawn, &level.enemies);
     game.0.set_time_limit(level.time_limit);
-    let start = start.map(|s| (s.on_map, s.hit, s.form, s.lives, s.behind)).unwrap_or_default();
-    let (on_map, hit, form, lives, behind) = start;
+    let start = start.map(|s| (s.on_map, s.hit, s.form, s.lives, s.behind, s.progress)).unwrap_or_default();
+    let (on_map, hit, form, lives, behind, progress) = start;
+    game.0.progress = progress;
     if behind {
         game.0.player.behind = sma4_core::player::WHITE_BLOCK_TIME;
     }

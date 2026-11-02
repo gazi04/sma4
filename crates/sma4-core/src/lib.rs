@@ -1,6 +1,7 @@
 //! Deterministic game logic. No Bevy, no floats, no wall-clock time: the same input
 //! sequence must always produce the same state so it can be diffed against an emulator.
 
+pub mod advance_coin;
 pub mod autoscroll;
 pub mod blocks;
 pub mod boom_boom;
@@ -150,6 +151,15 @@ pub struct Game {
     pub autoscroll: Option<autoscroll::Autoscroll>,
     /// Falling lifts (World 1-4).
     pub lifts: Vec<lifts::Lift>,
+    /// How far the game has been played (0x03002C85): the Advance Coin only appears once
+    /// it is not 0 (the game has been beaten).
+    pub progress: u8,
+    /// The level's Advance Coins, its coin counter (0x030037A0) and quota (0x0300379F).
+    pub advance_coins: Vec<advance_coin::AdvanceCoin>,
+    pub level_coins: u8,
+    pub coin_quota: u8,
+    /// An Advance Coin has been hit in this level (0x03007848 + 0xE67).
+    pub advance_taken: bool,
     /// Each world's end room (`sma4_assets::read_end_rooms`), where end-of-level pipes lead.
     pub end_rooms: Option<[sma4_assets::EndRoom; sma4_assets::WORLDS]>,
     /// The pipe the player is in is an end-of-level pipe.
@@ -256,6 +266,12 @@ impl Game {
         self.freeze = 0;
         self.autoscroll = None;
         self.lifts.clear();
+        // The counter, the quota and the hit flag belong to the level, not the area
+        // (0x08017170 clears them on the way back to the map; `enter_area` keeps them).
+        self.advance_coins.clear();
+        self.level_coins = 0;
+        self.coin_quota = 0;
+        self.advance_taken = false;
         self.splashes.clear();
         self.bubbles.clear();
         self.podoboos.clear();
@@ -285,7 +301,9 @@ impl Game {
     /// form and the level to restart after a lost life stay as they were.
     pub fn enter_area(&mut self, level: Level, enemies: &[sma4_assets::EnemySpawn], to: &AreaRequest) {
         let (start, spawn, player) = (self.start.take(), self.spawn, self.player);
+        let coins = (self.level_coins, self.coin_quota, self.advance_taken);
         self.enter_level(level, spawn, enemies);
+        (self.level_coins, self.coin_quota, self.advance_taken) = coins;
         self.start = start;
         self.player = player;
         // The camera the ROM sets on arrival (0x08005290); a room with fixed camera limits
@@ -618,6 +636,7 @@ impl Game {
         };
         if coin {
             self.status.add_coin();
+            self.level_coins = self.level_coins.wrapping_add(1);
             self.coin_pops.push(CoinPop::new(tx, ty));
         }
     }
@@ -808,6 +827,24 @@ impl Game {
         self.status.start_clock(seconds);
     }
 
+    /// One frame of the level's Advance Coins (0x08077720). The objects are frozen (+0xBD1)
+    /// while one of them held the game last frame (+0xDF8) or the player is dying.
+    fn step_advance_coins(&mut self) {
+        let dying = self.dying.as_ref().map(|d| d.vy);
+        let cx = advance_coin::Context {
+            camera: self.camera(),
+            coins: self.level_coins,
+            quota: self.coin_quota,
+            frozen: dying.is_some() || self.advance_coins.iter().any(|c| c.freezes()),
+            dying,
+        };
+        for c in &mut self.advance_coins {
+            c.step(&cx, &mut self.player);
+        }
+        self.advance_taken |= self.advance_coins.iter().any(|c| c.taken());
+    }
+
+    /// The item panel and the Warp Whistle on the map; true while they hold the map.
     /// Advances one frame.
     pub fn step(&mut self, held: Buttons) {
         self.input.pressed = held & !self.input.held;
@@ -899,8 +936,13 @@ impl Game {
         if let Some(d) = &mut self.dying {
             match d.step() {
                 Some(dy) => self.player.y += dy,
-                None => self.lose_life(),
+                None => {
+                    self.lose_life();
+                    return;
+                }
             }
+            // A collected Advance Coin falls out of the corner (0x0807742C).
+            self.step_advance_coins();
             return;
         }
 
@@ -926,6 +968,14 @@ impl Game {
             return;
         }
 
+        // Advance Coins (docs/re-notes.md): while one flies to the corner (+0xDF8) the whole
+        // game waits. The player touches an idle one through its contact (`step_advance_coins`)
+        // only, so its solid cell is left out of his own tile collision.
+        self.level.solid_cells.clear();
+        if self.advance_coins.iter().any(|c| c.freezes()) {
+            self.step_advance_coins();
+            return;
+        }
         // Frozen (+0x40): no input, no movement (0x080A8000 only draws the player).
         let frozen = self.freeze > 0 || self.boss_freeze;
         self.freeze = self.freeze.saturating_sub(1);
@@ -935,6 +985,9 @@ impl Game {
         let (held, pressed) = if frozen { (Buttons::empty(), Buttons::empty()) } else { (held, self.input.pressed) };
         self.player.camera_y = self.camera().1;
         let head_hit = if frozen { None } else { self.player.step(held, pressed, &self.level, self.frame) };
+        // Tile 0x79 on an idle Advance Coin's cell (0x080750F0) for everything else.
+        let camera = self.camera();
+        self.level.solid_cells = self.advance_coins.iter().filter(|c| c.solid(camera)).map(|c| c.cell()).collect();
         self.skid_dust.step(&self.player);
         self.step_water(held);
         self.camera_zones.step(&self.player);
@@ -997,6 +1050,10 @@ impl Game {
             .chain(self.player.tail_block().map(|t| (t, HitFrom::Side, false)))
             .chain(self.player.feet_block(&self.level).map(|t| (t, HitFrom::Above, false)));
         for ((tx, ty), from, head) in hits.collect::<Vec<_>>() {
+            // An Advance Coin's cell is no block (the coin handles the hit itself).
+            if self.level.solid_cells.contains(&(tx, ty)) {
+                continue;
+            }
             if self.bumps.len() < MAX_BUMPS
                 && let Some((bump, outcome)) = blocks::hit_block(&mut self.level, &self.player, tx, ty, from)
             {
@@ -1012,6 +1069,7 @@ impl Game {
         // Level coins: one coin and 50 points each (0x08094780).
         for (tx, ty) in coins::collect(&mut self.level, &self.player, self.frame) {
             self.status.add_coin();
+            self.level_coins = self.level_coins.wrapping_add(1);
             self.status.add_score(5);
             self.sparkles.push(Sparkle::new(tx, ty));
         }
@@ -1102,6 +1160,15 @@ impl Game {
             }
             alive
         });
+        if let Some(q) = self.spawner.take_quota() {
+            self.coin_quota = advance_coin::quota(&q).0;
+        }
+        let coins = self.spawner.take_advance_coins();
+        // 0x08076C94: none once one has been hit in this level (+0xE67).
+        if self.progress != 0 && !self.advance_taken {
+            self.advance_coins.extend(coins.iter().map(advance_coin::AdvanceCoin::spawn));
+        }
+        self.step_advance_coins();
         for (i, e) in self.enemies.iter_mut().enumerate().skip(before) {
             e.init_random(self.rng.byte(i));
         }
@@ -1798,6 +1865,105 @@ mod tests {
         }
         assert!(g.status.score > score, "the clock is counted into the score");
         assert_eq!(g.screen, Screen::Map);
+    }
+
+    #[test]
+    fn advance_coin_needs_progress_and_a_head_hit_then_counts_the_coins_to_go() {
+        let (w, h) = (30, 12);
+        let mut kinds = vec![TileKind::Empty; w * h];
+        kinds[(h - 1) * w..].fill(TileKind::Solid);
+        let list = [
+            sma4_assets::EnemySpawn { kind: advance_coin::QUOTA, col: 1, row: 44, ..Default::default() },
+            sma4_assets::EnemySpawn { kind: advance_coin::COIN, col: 7, row: 6, ..Default::default() },
+        ];
+        let start = (7 * TILE_PX + 2, 11 * TILE_PX - 32);
+        // A new game (progress 0) never shows it.
+        let mut g = Game::new();
+        g.enter_level(Level::from_kinds(w, h, &kinds), start, &list);
+        for _ in 0..10 {
+            g.step(Buttons::empty());
+        }
+        assert!(g.advance_coins.is_empty());
+        assert_eq!(g.coin_quota, 44, "the quota entry is read either way");
+        // Beaten: the coin is there, its cell solid; a jump into it sets it off.
+        let mut g = Game::new();
+        g.progress = 1;
+        g.enter_level(Level::from_kinds(w, h, &kinds), start, &list);
+        g.player.set_form(Form::Big);
+        g.step(Buttons::empty());
+        g.step(Buttons::empty());
+        assert_eq!(g.advance_coins.len(), 1);
+        assert_eq!(g.level.at(7, 6), TileKind::Solid);
+        let mut jumped = false;
+        for f in 0..400 {
+            let held = if (15..35).contains(&f) { Buttons::A } else { Buttons::empty() };
+            g.step(held);
+            jumped |= g.advance_coins[0].freezes();
+        }
+        assert!(jumped, "the head hit freezes the game while the coin flies");
+        assert_eq!(g.advance_coins[0].phase(), advance_coin::Phase::Counting);
+        assert_eq!(g.advance_coins[0].remaining(g.level_coins, g.coin_quota), [0, 4, 4]);
+    }
+
+    /// World 1-4 in mGBA: the coin counter, the quota and the hit flag (+0xE67) survive an
+    /// area switch; a hit coin does not come back in the same level.
+    #[test]
+    fn advance_coin_state_belongs_to_the_level_not_the_area() {
+        let (w, h) = (30, 12);
+        let mut kinds = vec![TileKind::Empty; w * h];
+        kinds[(h - 1) * w..].fill(TileKind::Solid);
+        let level = || Level::from_kinds(w, h, &kinds);
+        let list = [
+            sma4_assets::EnemySpawn { kind: advance_coin::QUOTA, col: 1, row: 44, ..Default::default() },
+            sma4_assets::EnemySpawn { kind: advance_coin::COIN, col: 7, row: 6, ..Default::default() },
+        ];
+        let mut g = Game::new();
+        g.progress = 1;
+        g.enter_level(level(), (7 * TILE_PX + 2, 11 * TILE_PX - 32), &list);
+        g.player.set_form(Form::Big);
+        for f in 0..300 {
+            g.step(if (15..35).contains(&f) { Buttons::A } else { Buttons::empty() });
+        }
+        assert!(g.advance_taken);
+        g.level_coins = 7;
+        let to = pipes::AreaRequest {
+            level: 0,
+            enemies: 0,
+            tileset: 0,
+            exit: sma4_assets::PipeExit { page: 0, x: 0x40, y: 0x40, dir: pipes::SKY_EXIT, camera_y: 0 },
+        };
+        g.enter_area(level(), &list, &to);
+        for _ in 0..5 {
+            g.step(Buttons::empty());
+        }
+        assert_eq!((g.level_coins, g.coin_quota, g.advance_taken), (7, 44, true));
+        assert!(g.advance_coins.is_empty(), "0x08076C94 removes a coin once one was hit");
+        // Starting the level again (from the map, or after a lost life) clears it all.
+        g.enter_level(level(), (7 * TILE_PX + 2, 11 * TILE_PX - 32), &list);
+        g.step(Buttons::empty());
+        assert_eq!((g.level_coins, g.advance_taken, g.advance_coins.len()), (0, false, 1));
+    }
+
+    /// The head hit counts anywhere the ROM's touch boxes overlap (mGBA: frame x 100-124
+    /// for big Mario under World 1-4's coin at x 112), not only under the head's centre.
+    #[test]
+    fn advance_coin_is_hit_off_centre() {
+        let (w, h) = (30, 12);
+        let mut kinds = vec![TileKind::Empty; w * h];
+        kinds[(h - 1) * w..].fill(TileKind::Solid);
+        let list = [sma4_assets::EnemySpawn { kind: advance_coin::COIN, col: 7, row: 6, ..Default::default() }];
+        for fx in [100, 104, 120, 124] {
+            let mut g = Game::new();
+            g.progress = 1;
+            g.enter_level(Level::from_kinds(w, h, &kinds), (fx + 2, 11 * TILE_PX - 32), &list);
+            g.player.set_form(Form::Big);
+            let mut hit = false;
+            for f in 0..60 {
+                g.step(if (15..35).contains(&f) { Buttons::A } else { Buttons::empty() });
+                hit |= g.advance_taken;
+            }
+            assert!(hit, "frame x {fx}");
+        }
     }
 
     #[test]

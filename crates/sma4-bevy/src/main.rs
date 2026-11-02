@@ -47,6 +47,7 @@ const USAGE: &str = "usage: sma4 [--assets <dir>] [--level <hex id>] [--viewer]
   --no-enemies  debug: leave the level's enemy list out
   --map  start on the world map even with debug options / scripts
   --lives <n>  debug: start with n lives
+  --progress <n>  debug: the game's progress byte (not 0 once beaten; the Advance Coin appears)
   --cleared <col>,<row>  debug: mark the world-map spot at that cell cleared (repeatable)
   --map-bro <col>,<row>  debug: put the world map's Hammer Bro on that cell
   --popup <type>  debug: show a score popup (1-15) over the player at the start
@@ -82,6 +83,7 @@ struct Args {
     popup: Option<u8>,
     map: bool,
     lives: Option<u16>,
+    progress: u8,
     cleared: Vec<(usize, usize)>,
     map_bro: Option<(usize, usize)>,
     spade: Option<u8>,
@@ -105,6 +107,7 @@ fn parse_args() -> Option<Args> {
         popup: None,
         map: false,
         lives: None,
+        progress: 0,
         cleared: Vec::new(),
         map_bro: None,
         spade: None,
@@ -123,6 +126,7 @@ fn parse_args() -> Option<Args> {
             "--no-enemies" => args.no_enemies = true,
             "--map" => args.map = true,
             "--lives" => args.lives = Some(it.next()?.parse().ok()?),
+            "--progress" => args.progress = it.next()?.parse().ok()?,
             "--map-bro" => {
                 let v = it.next()?;
                 let (c, r) = v.split_once(',')?;
@@ -233,6 +237,7 @@ fn main() -> AppExit {
                 form: args.form,
                 lives: args.lives,
                 behind: args.behind,
+                progress: args.progress,
             })
             .insert_resource(level::LevelRes(level))
             .insert_resource(worldmap::ClearedSpots(args.cleared.clone()))

@@ -17,6 +17,9 @@ pub struct Level {
     pub rules: BlockRules,
     /// Cells changed since the renderer last drained this list.
     pub changed: Vec<(usize, usize)>,
+    /// Cells that collide as solid without being drawn (an Advance Coin's tile 0x79,
+    /// 0x080750F0), set by the game each frame.
+    pub solid_cells: Vec<(i32, i32)>,
     /// Level id (0x03003B0A) of this area, so views know which assets to draw.
     pub id: u16,
     /// Where its pipes lead.
@@ -61,6 +64,7 @@ impl Level {
             solidity,
             rules,
             changed: Vec::new(),
+            solid_cells: Vec::new(),
             id: 0,
             junction: None,
             camera_x: None,
@@ -186,6 +190,9 @@ impl Level {
     /// Outside the map: walls on the left/right edges, open above and below.
     pub fn at(&self, tx: i32, ty: i32) -> TileKind {
         if tx < 0 || tx >= self.width as i32 {
+            return TileKind::Solid;
+        }
+        if self.solid_cells.contains(&(tx, ty)) {
             return TileKind::Solid;
         }
         match self.metatile(tx, ty) {

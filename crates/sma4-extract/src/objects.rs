@@ -1811,3 +1811,62 @@ pub fn extract_fortress_chest(rom: &Rom, m: &mut Machine, out_dir: &std::path::P
     println!("  mini-fortress chest");
     Ok(())
 }
+
+/// The Advance Coin (type 0xCD, init 0x08076C94, main 0x08077720). Idle it is drawn by
+/// 0x08076CD8 (a 16x16 OBJ); once hit, 0x08076F28 draws its spinning banner and
+/// 0x080775CC / 0x08077518 the number of coins still to collect; collected (phase 5) the
+/// same idle routine draws it in the corner in palette 2. See docs/re-notes.md.
+const ADVANCE_COIN: u16 = 0xCD;
+const FN_DRAW_ADVANCE_IDLE: u32 = 0x0807_6CD8;
+const FN_DRAW_ADVANCE_SPIN: u32 = 0x0807_6F28;
+const FN_DRAW_ADVANCE_COUNT: u32 = 0x0807_75CC;
+const FN_DRAW_ADVANCE_ICON: u32 = 0x0807_7518;
+
+pub fn extract_advance_coin(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{ADVANCE_COIN_CELL, advance_coin_path};
+    // Screen position (0, 0x90), the HUD corner; the idle coin's position at the cell's top-left.
+    let (hud, idle_at) = ((64, 64 - 0x90), (0, 0));
+    let mut cells: Vec<Rgba> = Vec::new();
+    let globals: [(u32, u8); 0] = [];
+    // Cell 0: the idle coin (0x08076CD8, phase 0).
+    let idle = Pose { kind: ADVANCE_COIN, state: 2, draw: FN_DRAW_ADVANCE_IDLE, bytes: &[], globals: &globals };
+    cells.push(oam::render_one(m, rom.bytes(), &idle, ADVANCE_COIN_CELL, idle_at)?);
+    // Cells 1-10: the digit 0-9 at the units place (0x080775CC with 0x0300379F - 0x030037A0 = n).
+    for n in 0..10u8 {
+        let g = [(0x0300_379F, n), (0x0300_37A0, 0)];
+        let pose = Pose { kind: ADVANCE_COIN, state: 2, draw: FN_DRAW_ADVANCE_COUNT, bytes: &[], globals: &g };
+        cells.push(oam::render_one(m, rom.bytes(), &pose, ADVANCE_COIN_CELL, hud)?);
+    }
+    // Cell 11: the frame around the number (0x08077518).
+    let icon = Pose { kind: ADVANCE_COIN, state: 2, draw: FN_DRAW_ADVANCE_ICON, bytes: &[], globals: &globals };
+    cells.push(oam::render_one(m, rom.bytes(), &icon, ADVANCE_COIN_CELL, hud)?);
+    // Cells 12-19: the banner (0x08076F28) for +0x23 >> 3 = 0-3, each with 0x03003CF6 bit 1
+    // clear and set (it flips every other frame).
+    for t in 0..4u8 {
+        for flip in [0u8, 2] {
+            let b = [(0x23, t * 8), (0x08, 0), (0x09, 0x90)];
+            let g = [(0x0300_3CF6, flip)];
+            let pose = Pose { kind: ADVANCE_COIN, state: 2, draw: FN_DRAW_ADVANCE_SPIN, bytes: &b, globals: &g };
+            cells.push(oam::render_one(m, rom.bytes(), &pose, ADVANCE_COIN_CELL, hud)?);
+        }
+    }
+    // Cell 20: the collected coin (0x08076CD8 in phase 5: tile 0x25E, palette 2) at screen
+    // (0x10, 0x90).
+    let b = [(0x3A, 5), (0x00, 0), (0x01, 0x10), (0x08, 0), (0x09, 0x90)];
+    let pose = Pose { kind: ADVANCE_COIN, state: 2, draw: FN_DRAW_ADVANCE_IDLE, bytes: &b, globals: &globals };
+    cells.push(oam::render_one(m, rom.bytes(), &pose, ADVANCE_COIN_CELL, hud)?);
+    let (w, h) = ADVANCE_COIN_CELL;
+    let mut sheet = vec![0u8; (w * cells.len() as u32 * h * 4) as usize];
+    for (i, c) in cells.iter().enumerate() {
+        for y in 0..h {
+            let src = (y * w * 4) as usize;
+            let dst = ((y * w * cells.len() as u32 + i as u32 * w) * 4) as usize;
+            sheet[dst..dst + (w * 4) as usize].copy_from_slice(&c.pixels[src..src + (w * 4) as usize]);
+        }
+    }
+    Rgba { width: w * cells.len() as u32, height: h, pixels: sheet }
+        .write_png(&advance_coin_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))?;
+    println!("  advance coin: {} cells", cells.len());
+    Ok(())
+}

@@ -1738,6 +1738,9 @@ pub struct Spawner {
     autoscroll: Option<u8>,
     /// Lifts whose column was reached.
     lifts: Vec<EnemySpawn>,
+    /// Advance Coins whose column was reached, and the level's coin quota entry (row byte).
+    advance: Vec<EnemySpawn>,
+    quota: Option<EnemySpawn>,
     /// Mini-fortress objects and level settings whose column was reached
     /// (`crate::fortress::OBJECTS`).
     fortress: Vec<EnemySpawn>,
@@ -1748,7 +1751,7 @@ impl Spawner {
         // TODO(re): other enemy types.
         let wanted = |k: &u16| {
             SUPPORTED.contains(k)
-                || [GOOMBA_PIPE, crate::goal::GOAL, crate::autoscroll::AUTOSCROLL, crate::lifts::LIFT].contains(k)
+                || [GOOMBA_PIPE, crate::goal::GOAL, crate::autoscroll::AUTOSCROLL, crate::lifts::LIFT, crate::advance_coin::COIN, crate::advance_coin::QUOTA].contains(k)
                 || crate::fortress::OBJECTS.contains(k)
         };
         Self { pending: list.iter().copied().filter(|e| wanted(&e.kind)).collect(), ..Self::default() }
@@ -1776,6 +1779,8 @@ impl Spawner {
         let mut goal = false;
         let mut autoscroll = None;
         let lifts = &mut self.lifts;
+        let advance = &mut self.advance;
+        let quota = &mut self.quota;
         let fortress = &mut self.fortress;
         self.pending.retain(|s| {
             let x = s.col as i32 * TILE_PX;
@@ -1790,6 +1795,8 @@ impl Spawner {
                 crate::goal::GOAL => goal = true,
                 crate::autoscroll::AUTOSCROLL => autoscroll = Some(s.row),
                 crate::lifts::LIFT => lifts.push(*s),
+                crate::advance_coin::COIN => advance.push(*s),
+                crate::advance_coin::QUOTA => *quota = Some(*s),
                 k if crate::fortress::OBJECTS.contains(&k) => fortress.push(*s),
                 _ => active.push(Enemy::spawn(s, player)),
             }
@@ -1802,6 +1809,16 @@ impl Spawner {
     /// Lifts whose column came up.
     pub fn take_lifts(&mut self) -> Vec<EnemySpawn> {
         std::mem::take(&mut self.lifts)
+    }
+
+    /// Advance Coins whose column came up.
+    pub fn take_advance_coins(&mut self) -> Vec<EnemySpawn> {
+        std::mem::take(&mut self.advance)
+    }
+
+    /// The coin quota entry's column came up (once).
+    pub fn take_quota(&mut self) -> Option<EnemySpawn> {
+        self.quota.take()
     }
 
     /// Mini-fortress objects whose column came up.

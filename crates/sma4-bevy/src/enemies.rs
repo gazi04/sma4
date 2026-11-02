@@ -84,12 +84,76 @@ fn load_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMu
         warn!("no objects/hammer.png; re-run sma4-extract");
     }
     commands.insert_resource(Art(art, puff, fireball, micro, boomerang, hammer));
+    // The Advance Coin's sheet: idle coin, digits, frame, banner (`sma4_assets::ADVANCE_COIN_*`).
+    let (aw, ah) = sma4_assets::ADVANCE_COIN_CELL;
+    commands.insert_resource(AdvanceArt(load_cells(&sma4_assets::advance_coin_path(&dir.0), aw, ah, &mut images)));
 }
 
-fn sync_enemies(mut commands: Commands, game: Res<GameRes>, art: Res<Art>, old: Query<Entity, With<EnemySprite>>) {
+/// The Advance Coin's cells.
+#[derive(Resource)]
+struct AdvanceArt(Vec<Handle<Image>>);
+
+/// Above the player and the enemies, like the ROM's priority-1 OBJs.
+const Z_ADVANCE: f32 = 12.0;
+
+/// The Advance Coin (`sma4_core::advance_coin`): in the level while its screen x is in the
+/// ROM's draw window, then on the screen: flying to the corner, the sparkle, the frame with
+/// the coins still to collect, and the collected coin.
+fn spawn_advance_coins(commands: &mut Commands, game: &sma4_core::Game, art: &AdvanceArt) {
+    use sma4_core::advance_coin::Phase;
+    let (w, h) = sma4_assets::ADVANCE_COIN_CELL;
+    let (w, h) = (w as i32, h as i32);
+    let camera = game.camera();
+    // A cell with its top-left at screen (sx, sy).
+    let mut put = |cell: u32, sx: i32, sy: i32, z: f32| {
+        if let Some(image) = art.0.get(cell as usize) {
+            let (cx, cy) = (camera.0 + sx + w / 2, camera.1 + sy + h / 2);
+            commands.spawn((EnemySprite, Sprite::from_image(image.clone()), Transform::from_xyz(cx as f32, -(cy as f32), z)));
+        }
+    };
+    for c in &game.advance_coins {
+        let (x, y) = c.px();
+        match c.phase() {
+            Phase::Idle if c.drawn(camera) => put(0, x - camera.0, y - camera.1, Z_ADVANCE),
+            Phase::Flying => put(0, x, y, Z_ADVANCE),
+            // Phase 5 (0x0807742C) draws at x 0x10, y its own (0x90 until it falls away);
+            // the cell holds it at (0x10, 0x90).
+            Phase::Collected => put(sma4_assets::ADVANCE_COIN_COLLECTED, 0, y, Z_ADVANCE),
+            _ => {}
+        }
+        // The corner (0x08077720 while +0x3B != 0): the frame, and the coins still to
+        // collect while counting (0x080775CC: no leading zeros).
+        if c.sub() != 0 {
+            put(sma4_assets::ADVANCE_COIN_FRAME, 0, 0x90, Z_ADVANCE);
+            if c.sub() == 1 {
+                let digits = c.remaining(game.level_coins, game.coin_quota);
+                let first = digits.iter().position(|&d| d != 0).unwrap_or(2);
+                for (i, &d) in digits.iter().enumerate().skip(first) {
+                    put(sma4_assets::ADVANCE_COIN_DIGITS + d as u32, -8 * (2 - i as i32), 0x90, Z_ADVANCE);
+                }
+            }
+        }
+        // The sparkle (0x08076F28, phase 3 while its timer runs) over it all; it flips with
+        // the frame counter's bit 1.
+        if c.phase() == Phase::Banner && c.timer() != 0 {
+            let flip = (game.frame >> 1) & 1;
+            let cell = sma4_assets::ADVANCE_COIN_BANNER + (c.timer() >> 3) as u32 * 2 + flip;
+            put(cell, 0, 0x90, Z_ADVANCE + 0.5);
+        }
+    }
+}
+
+fn sync_enemies(
+    mut commands: Commands,
+    game: Res<GameRes>,
+    art: Res<Art>,
+    advance: Res<AdvanceArt>,
+    old: Query<Entity, With<EnemySprite>>,
+) {
     for e in &old {
         commands.entity(e).despawn();
     }
+    spawn_advance_coins(&mut commands, &game.0, &advance);
     // Fireballs: cells 0-3 fly right, 4-7 left; the slot position sits at KOOPA_ORIGIN.
     for f in &game.0.fireballs {
         let cell = f.frame() + if f.vx < 0 { FIREBALL_FRAMES as usize } else { 0 };

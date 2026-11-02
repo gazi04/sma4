@@ -383,7 +383,7 @@ impl Player {
     }
 
     /// The small form's probes and box: small, or crouching (+0x48).
-    fn small_box(&self) -> bool {
+    pub fn small_box(&self) -> bool {
         self.form == Form::Small || self.crouch
     }
 

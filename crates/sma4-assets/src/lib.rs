@@ -1537,6 +1537,21 @@ pub fn lift_path(dir: &Path) -> PathBuf {
     dir.join("objects").join("lift.png")
 }
 pub const LIFT_CELL: (u32, u32) = (64, 32);
+
+/// The Advance Coin's sheet (type 0xCD): `ADVANCE_COIN_CELLS` cells of `ADVANCE_COIN_CELL`,
+/// all of the HUD corner at screen (0, 0x90) except the idle coin, whose position is the
+/// cell's top-left: cell 0 the idle coin, 1-10 the digits 0-9 at the units place, 11 the
+/// frame around the number, 12-19 the banner for timer >> 3 = 0-3, each with the flip off
+/// and on, 20 the collected coin (phase 5) at its corner position (0x10, 0x90).
+pub fn advance_coin_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("advance_coin.png")
+}
+pub const ADVANCE_COIN_CELL: (u32, u32) = (48, 16);
+pub const ADVANCE_COIN_CELLS: u32 = 21;
+pub const ADVANCE_COIN_DIGITS: u32 = 1;
+pub const ADVANCE_COIN_FRAME: u32 = 11;
+pub const ADVANCE_COIN_BANNER: u32 = 12;
+pub const ADVANCE_COIN_COLLECTED: u32 = 20;
 pub const LIFT_ORIGIN: (i32, i32) = (8, 8);
 
 /// Where each world's end-of-level pipes lead (transition 4, 0x080056A0): level

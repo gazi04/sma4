@@ -180,6 +180,7 @@ fn run(args: &Args) -> Result<(), String> {
         // World 1-4 loads the lift's graphics.
         if id == LIFT_LEVEL {
             objects::extract_lift(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+            objects::extract_advance_coin(&rom, &mut m, &args.out).map_err(|e| e.0)?;
         }
         if id == HAMMER_BRO_LEVEL {
             objects::extract_hammer_bro(&rom, &mut m, &args.out).map_err(|e| e.0)?;
