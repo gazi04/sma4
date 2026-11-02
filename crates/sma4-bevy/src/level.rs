@@ -61,6 +61,8 @@ pub struct StartOptions {
     pub behind: bool,
     /// `--progress`: the game's progress byte (0x03002C85; not 0 once it has been beaten).
     pub progress: u8,
+    /// `--items`: the inventory at the start.
+    pub items: Vec<u8>,
 }
 
 pub struct LevelPlugin;
@@ -291,6 +293,9 @@ fn spawn_level(
     };
     game.0.enter_level(core_level, spawn, &level.enemies);
     game.0.set_time_limit(level.time_limit);
+    if let Some(s) = &start {
+        game.0.inventory = s.items.clone();
+    }
     let start = start.map(|s| (s.on_map, s.hit, s.form, s.lives, s.behind, s.progress)).unwrap_or_default();
     let (on_map, hit, form, lives, behind, progress) = start;
     game.0.progress = progress;

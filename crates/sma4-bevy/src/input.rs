@@ -74,6 +74,9 @@ impl Script {
                     'D' => Buttons::DOWN,
                     'A' => Buttons::A,
                     'B' => Buttons::B,
+                    // The shoulder buttons (L and R are taken by the pad).
+                    'Q' => Buttons::L,
+                    'W' => Buttons::R,
                     '-' => Buttons::empty(),
                     _ => return None,
                 };

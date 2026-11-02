@@ -176,8 +176,17 @@ fn sync_map(
     let window = walkable.and_then(|m| m.panel_window());
     let panel_shown = on_map && walkable.is_none_or(|_| window.is_some());
     for (mut vis, cell, is_view, mut sprite, mut transform) in &mut parts {
+        // The item panel moves BG0 (0x0300374C): the bar slides down while it opens and
+        // closes, and BG0 shows the panel's map in between.
+        let items = game.0.item_panel.as_ref().filter(|_| on_map);
+        if let Some(&MapCell(0, i)) = cell
+            && let Some((x, y)) = cell_on_screen(i, m.bar_scroll)
+        {
+            let down = items.map_or(0, |p| (sma4_core::inventory::BAR - p.vofs) as i32);
+            *transform = at(x, y + down, 8, 8, Z_BAR);
+        }
         let shown = match cell {
-            Some(&MapCell(0, _)) => bar_shown,
+            Some(&MapCell(0, _)) => bar_shown && !items.is_some_and(|p| p.panel_map),
             _ if is_view => on_map && walkable.is_none(),
             _ => panel_shown,
         };

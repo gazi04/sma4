@@ -24,6 +24,7 @@ const OAM_BUF: u32 = 0x0300_2DC8;
 const BG_PAL_BUFFER: u32 = 0x0200_0000;
 const VRAM: u32 = 0x0600_0000;
 const BG1_CNT: u32 = 0x0300_2DA6;
+const BG0_CNT: u32 = 0x0300_2DA4;
 /// Map init (mode 1 sub-state 0x10).
 const FN_MAP_INIT: u32 = 0x0800_BE48;
 /// Saved map position the init copies into the map state (+0 y, +2 screen, +4 x).
@@ -529,4 +530,83 @@ pub fn extract_map_objects(rom: &Rom, m: &mut Machine, world: u8, out_dir: &std:
     }
     println!("  world map {} objects: {:?}", world + 1, objects.iter().map(|o| (o.kind, o.y, o.x)).collect::<Vec<_>>());
     MapObjectsAsset { objects, sprites }.write(out_dir, world).map_err(|e| ExtractError(e.to_string()))
+}
+
+/// The map's item panel (see `sma4_core::inventory`): BG0's panel map (LZ77 0x0821F674,
+/// 0x0800731C), the item icons in it (0x0800602C: BG entries 0x0813AC28[item * 4..],
+/// top-left, top-right, bottom-left, bottom-right), the cursor (0x08006A80: the item as a
+/// 16x16 OBJ, tile ((item & 7) << 1 | ((item & 8) << 2 | 0xC0) << 1 | 0x10), palette
+/// 0x081324DC[item]) and the Warp Whistle's whirlwind (0x080117B4: a 16x16 OBJ, tile
+/// 0x0813A9FC[1] / 0x0813A9FE[1] by frame (low nibble | high nibble << 1), palette
+/// (0x0813A9FA[1] & 0xE) >> 1), all drawn from World 1's map VRAM.
+const PANEL_MAP: u32 = 0x0821_F674;
+const ITEM_ICONS: u32 = 0x0813_AC28;
+const CURSOR_PALETTES: u32 = 0x0813_24DC;
+const WHIRL_ATTR: u32 = 0x0813_A9FA;
+const WHIRL_TILES: [u32; 2] = [0x0813_A9FC, 0x0813_A9FE];
+const OBJ_VRAM: u32 = 0x0601_0000;
+const OBJ_PAL_BUFFER: u32 = 0x0200_0200;
+
+pub fn extract_item_panel(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{ITEM_KINDS, item_panel_path};
+    setup(m, 0)?;
+    let pal = parse_palette(&m.read(BG_PAL_BUFFER, 0x200)?);
+    let obj_pal = parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?);
+    let cnt = u16::from_le_bytes(m.read(BG0_CNT, 2)?.try_into().unwrap_or([0, 0]));
+    let chars = m.read(VRAM + ((cnt as u32 >> 2) & 3) * 0x4000, 0x8000)?;
+    let obj = m.read(OBJ_VRAM, 0x8000)?;
+    let blit = |px: &mut Vec<u8>, w: usize, x0: usize, y0: usize, t: &[u8; 256]| {
+        for y in 0..8 {
+            for x in 0..8 {
+                let s = (y * 8 + x) * 4;
+                if t[s + 3] != 0 {
+                    px[((y0 + y) * w + x0 + x) * 4..][..4].copy_from_slice(&t[s..s + 4]);
+                }
+            }
+        }
+    };
+    // The panel: its map's rows, 32 entries each.
+    let map: Vec<u16> = rom.decompress(PANEL_MAP)?.as_chunks::<2>().0.iter().map(|b| u16::from_le_bytes(*b)).collect();
+    let rows = (map.len() / 32).min(32);
+    let mut panel = vec![0u8; 256 * rows * 8 * 4];
+    for (i, &e) in map.iter().take(rows * 32).enumerate() {
+        blit(&mut panel, 256, (i % 32) * 8, (i / 32) * 8, &bg_tile(&chars, &pal, e));
+    }
+    // Icons and cursors, a 16x16 cell per item; the whirlwind's two frames after them.
+    let n = ITEM_KINDS as usize;
+    let w = 16 * (n + 2);
+    let mut sheet = vec![0u8; w * 32 * 4];
+    for item in 1..n {
+        let a = ITEM_ICONS + item as u32 * 8;
+        let e = [rom.u16(a)?, rom.u16(a + 2)?, rom.u16(a + 4)?, rom.u16(a + 6)?];
+        for (k, &entry) in e.iter().enumerate() {
+            blit(&mut sheet, w, item * 16 + (k % 2) * 8, (k / 2) * 8, &bg_tile(&chars, &pal, entry));
+        }
+        if item < 0x0E {
+            let i = item as u16;
+            let tile = (i & 7) << 1 | ((i & 8) << 2 | 0xC0) << 1 | 0x10;
+            let p = (rom.u8(CURSOR_PALETTES + item as u32)? as u16) << 12;
+            for (k, off) in [0u16, 1, 32, 33].into_iter().enumerate() {
+                blit(&mut sheet, w, item * 16 + (k % 2) * 8, 16 + (k / 2) * 8, &bg_tile(&obj, &obj_pal, (tile + off) | p));
+            }
+        }
+    }
+    let attr = rom.u8(WHIRL_ATTR + 1)? as u16;
+    for (f, table) in WHIRL_TILES.iter().enumerate() {
+        let b = rom.u8(table + 1)? as u16;
+        let tile = (b & 0xF) | (b & 0xF0) << 1;
+        let p = ((attr & 0xE) >> 1) << 12;
+        for (k, off) in [0u16, 1, 32, 33].into_iter().enumerate() {
+            blit(&mut sheet, w, (n + f) * 16 + (k % 2) * 8, (k / 2) * 8, &bg_tile(&obj, &obj_pal, (tile + off) | p));
+        }
+    }
+    let write = |name: &str, width: usize, height: usize, pixels: Vec<u8>| {
+        Rgba { width: width as u32, height: height as u32, pixels }
+            .write_png(&item_panel_path(out_dir, name))
+            .map_err(|e| ExtractError(e.to_string()))
+    };
+    write("panel", 256, rows * 8, panel)?;
+    write("items", w, 32, sheet)?;
+    println!("  item panel: {rows} rows, {} items", n - 1);
+    Ok(())
 }

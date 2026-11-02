@@ -797,6 +797,15 @@ pub struct WorldMapAsset {
     pub stars: Rgba,
 }
 
+/// The map's item panel (L on the map): `panel` (BG0's panel map, 256 px wide, line 0 at
+/// the top) and `items` (cells of 16x16: row 0 the icons in the panel by item id, row 1
+/// the cursor's coloured items; after the `ITEM_KINDS` items, the whirlwind's two frames
+/// in row 0).
+pub fn item_panel_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join("map").join(format!("item_{name}.png"))
+}
+pub const ITEM_KINDS: u32 = 0x10;
+
 /// Version 1 lacks `game_over_keep` (read as "keep everything").
 const MAP_MAGIC_V1: &[u8; 8] = b"SMA4WM01";
 const MAP_MAGIC: &[u8; 8] = b"SMA4WM02";

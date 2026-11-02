@@ -96,6 +96,8 @@ const FORTRESS_ROOMS: u16 = 0x1CC;
 const TOAD_HOUSE_1_3: u16 = 0x106;
 const TOAD_HOUSE_TILESET: u8 = 7;
 const TOAD_HOUSE_1_3_LIST: u32 = 0x0816_BA52;
+/// World index of the Warp Zone (World 9).
+const WARP_ZONE: u8 = 8;
 
 fn run(args: &Args) -> Result<(), String> {
     let rom = Rom::open(&args.rom).map_err(|e| format!("{}: {e}", args.rom))?;
@@ -223,6 +225,10 @@ fn run(args: &Args) -> Result<(), String> {
             // These reset the machine.
             screens::extract_map(&mut m, 0, &args.out).map_err(|e| e.0)?;
             worldmap::extract_world_map(&rom, &mut m, 0, &args.out).map_err(|e| e.0)?;
+            worldmap::extract_item_panel(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+            // World 9, the Warp Zone the Warp Whistle leads to (0x03002A69 = 8).
+            worldmap::extract_world_map(&rom, &mut m, WARP_ZONE, &args.out).map_err(|e| e.0)?;
+            // World 9 has no walking map objects (its object table reads off the ROM).
             worldmap::extract_map_objects(&rom, &mut m, 0, &args.out).map_err(|e| e.0)?;
             screens::extract_game_over(rom.bytes(), &mut m, &args.out).map_err(|e| e.0)?;
             screens::extract_game_over_menu(&mut m, &args.out).map_err(|e| e.0)?;

@@ -15,6 +15,7 @@ pub mod fire;
 pub mod fortress;
 pub mod goal;
 pub mod input;
+pub mod inventory;
 pub mod level;
 pub mod lifts;
 pub mod map_objects;
@@ -28,6 +29,7 @@ pub mod title;
 pub mod world_map;
 pub mod status;
 pub mod toad_house;
+pub mod warp;
 pub mod water;
 
 /// Fireball knockouts score 100 (0x08093560 with popup 5); star chains stop growing at
@@ -142,8 +144,17 @@ pub struct Game {
     pub title: Option<title::Title>,
     /// The player is frozen (+0x40, 0x080A8000): only drawn; counts down.
     freeze: u8,
-    /// Items got (0x03002C2E, inventory item ids; not usable yet).
+    /// Items got (0x03002C2E, inventory item ids), used from the map's item panel.
     pub inventory: Vec<u8>,
+    /// The map's item panel, open (L on the map, `inventory`).
+    pub item_panel: Option<inventory::Inventory>,
+    /// The Warp Whistle's whirlwind and wave (`warp`).
+    pub warp: Option<warp::Warp>,
+    /// The whistle reached World 9: the host loads that world's map (0x03002A69) and calls
+    /// `enter_world`.
+    pub pending_world: Option<u8>,
+    /// A Starman used on the map: the next level starts with it (player +0x5C).
+    pub pending_star: bool,
     /// Autoscroll scripts from the ROM (`sma4_assets::AutoscrollScripts`); without them a
     /// level's autoscroll never starts.
     pub autoscroll_scripts: Option<sma4_assets::AutoscrollScripts>,
@@ -784,6 +795,10 @@ impl Game {
             self.enter_level(level, self.spawn, &enemies);
             self.player.set_form(form);
             self.player.start(self.level.start_kind, &self.level);
+        // A Starman used on the map (0x08006454: player +0x5C).
+        if std::mem::take(&mut self.pending_star) {
+            self.player.starman();
+        }
         }
         self.status.popups.clear();
         self.status.start_clock(self.time_limit);
@@ -845,6 +860,56 @@ impl Game {
     }
 
     /// The item panel and the Warp Whistle on the map; true while they hold the map.
+    fn step_map_items(&mut self) -> bool {
+        let pressed = self.input.pressed;
+        if let Some(w) = &mut self.warp {
+            let ev = w.step(self.frame);
+            if ev.switch_world {
+                self.pending_world = Some(warp::WARP_ZONE);
+                self.status.world = warp::WARP_ZONE + 1;
+            }
+            if ev.done {
+                self.warp = None;
+            }
+            return true;
+        }
+        if let Some(panel) = &mut self.item_panel {
+            let step = panel.step(pressed, &mut self.inventory);
+            if step.done {
+                self.item_panel = None;
+                match step.used {
+                    Some(inventory::Used::Form(item)) => self.player.set_form(match item {
+                        inventory::MUSHROOM => Form::Big,
+                        inventory::FIRE_FLOWER => Form::Fire,
+                        _ => Form::Raccoon,
+                    }),
+                    Some(inventory::Used::Starman) => self.pending_star = true,
+                    Some(inventory::Used::WarpWhistle) => {
+                        if let Some(map) = &self.world_map {
+                            self.warp = Some(warp::Warp::start(map.sprite_pos().0, map.y));
+                        }
+                    }
+                    None => {}
+                }
+            }
+            return true;
+        }
+        // 0x0800D5B4: L on the idle map opens the panel.
+        let idle = self.world_map.as_ref().is_some_and(|m| m.phase == world_map::MapPhase::Idle && !m.walking());
+        if idle && pressed.contains(Buttons::L) {
+            self.item_panel = Some(inventory::Inventory::open());
+            return true;
+        }
+        false
+    }
+
+    /// World 9 has been loaded after the Warp Whistle: Mario's spot there (0x08007950).
+    pub fn enter_world(&mut self, mut map: world_map::WorldMap) {
+        map.show(world_map::Arrival::Walk);
+        (map.y, map.x) = warp::LANDING;
+        self.world_map = Some(map);
+    }
+
     /// Advances one frame.
     pub fn step(&mut self, held: Buttons) {
         self.input.pressed = held & !self.input.held;
@@ -854,6 +919,9 @@ impl Game {
         self.rng.step();
         match &mut self.screen {
             Screen::Map => {
+                if self.step_map_items() {
+                    return;
+                }
                 if let Some(map) = &mut self.world_map {
                     map.rand = self.rng.bytes();
                     map.frame = self.frame;
@@ -1644,6 +1712,49 @@ mod tests {
             g.step(Buttons::empty());
         }
         assert!(matches!(g.world_map.as_ref().unwrap().phase, MapPhase::Intro(_)));
+    }
+
+
+    /// L opens the item panel; a mushroom makes Mario big; the Warp Whistle's whirlwind
+    /// takes him to World 9 (`warp`), where he lands on its first spot.
+    #[test]
+    fn the_item_panel_uses_power_ups_and_the_warp_whistle() {
+        let mut g = Game::new();
+        let mut map = world_map::tests::world1();
+        map.show(world_map::Arrival::Walk);
+        g.world_map = Some(map);
+        g.screen = Screen::Map;
+        g.inventory = vec![inventory::MUSHROOM, inventory::WARP_WHISTLE];
+        let press = |g: &mut Game, b: Buttons, wait: u32| {
+            g.step(Buttons::empty());
+            g.step(b);
+            for _ in 0..wait {
+                g.step(Buttons::empty());
+            }
+        };
+        press(&mut g, Buttons::L, 30);
+        assert_eq!(g.item_panel.as_ref().map(|p| p.state), Some(inventory::State::Menu));
+        press(&mut g, Buttons::A, 30);
+        assert!(g.item_panel.is_none());
+        assert_eq!((g.player.form, g.inventory.as_slice()), (Form::Big, &[inventory::WARP_WHISTLE][..]));
+        press(&mut g, Buttons::L, 30);
+        press(&mut g, Buttons::A, 30);
+        assert!(g.warp.is_some() && g.inventory.is_empty());
+        let mut frames = 0;
+        while g.pending_world.is_none() {
+            g.step(Buttons::empty());
+            frames += 1;
+            assert!(frames < 600);
+        }
+        assert_eq!((g.pending_world.take(), g.status.world), (Some(warp::WARP_ZONE), 9));
+        g.enter_world(world_map::tests::world1());
+        while g.warp.is_some() {
+            g.step(Buttons::empty());
+            frames += 1;
+            assert!(frames < 2000);
+        }
+        let map = g.world_map.as_ref().unwrap();
+        assert_eq!((map.y, map.x), warp::LANDING);
     }
 
     #[test]

@@ -48,6 +48,8 @@ const USAGE: &str = "usage: sma4 [--assets <dir>] [--level <hex id>] [--viewer]
   --map  start on the world map even with debug options / scripts
   --lives <n>  debug: start with n lives
   --progress <n>  debug: the game's progress byte (not 0 once beaten; the Advance Coin appears)
+  --items <hex,...>  debug: start with these items (1 mushroom, 2 flower, 3 leaf, 9 star,
+                c Warp Whistle; L on the map opens the panel)
   --cleared <col>,<row>  debug: mark the world-map spot at that cell cleared (repeatable)
   --map-bro <col>,<row>  debug: put the world map's Hammer Bro on that cell
   --popup <type>  debug: show a score popup (1-15) over the player at the start
@@ -84,6 +86,7 @@ struct Args {
     map: bool,
     lives: Option<u16>,
     progress: u8,
+    items: Vec<u8>,
     cleared: Vec<(usize, usize)>,
     map_bro: Option<(usize, usize)>,
     spade: Option<u8>,
@@ -108,6 +111,7 @@ fn parse_args() -> Option<Args> {
         map: false,
         lives: None,
         progress: 0,
+        items: Vec::new(),
         cleared: Vec::new(),
         map_bro: None,
         spade: None,
@@ -127,6 +131,9 @@ fn parse_args() -> Option<Args> {
             "--map" => args.map = true,
             "--lives" => args.lives = Some(it.next()?.parse().ok()?),
             "--progress" => args.progress = it.next()?.parse().ok()?,
+            "--items" => {
+                args.items = it.next()?.split(',').map(|h| u8::from_str_radix(h, 16).ok()).collect::<Option<_>>()?;
+            }
             "--map-bro" => {
                 let v = it.next()?;
                 let (c, r) = v.split_once(',')?;
@@ -238,6 +245,7 @@ fn main() -> AppExit {
                 lives: args.lives,
                 behind: args.behind,
                 progress: args.progress,
+                items: args.items.clone(),
             })
             .insert_resource(level::LevelRes(level))
             .insert_resource(worldmap::ClearedSpots(args.cleared.clone()))
