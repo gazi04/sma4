@@ -31,6 +31,8 @@ pub const HIDDEN_HOUSE: u16 = 0x106;
 pub const TILESET: u8 = 7;
 /// The player's frame on arrival (0x0800578C, 0x08014F20).
 pub const ARRIVAL: (i32, i32) = (0x20, 0x130);
+/// The player's frame in a house entered from the map (mGBA, World 1: (0x18, 0x130)).
+pub const MAP_ARRIVAL: (i32, i32) = (0x18, 0x130);
 /// Toad's init freezes the player (+0x40 = 0x76).
 pub const ARRIVAL_FREEZE: u8 = 0x76;
 /// The item freezes the player while it lives (+0x40 = 2 every frame).
@@ -38,6 +40,26 @@ pub const ITEM_FREEZE: u8 = 2;
 
 /// Warp Whistle: chest choice 0x03003CAF = 1 -> 0x08173785[0] (inventory item id).
 pub const WARP_WHISTLE: u8 = 0x0C;
+/// The hidden house's chest choice (0x0804E718: 0x03003CAF = 1).
+pub const HIDDEN_CHOICE: u8 = 1;
+/// The map's Toad Houses (tileset 7; level 0x102, enemy word 0x8700): 0x08009A3C sets the
+/// chest choice 0x03003CAF to the word's high byte & 0x7F (World 1: 7) and the house's list is
+/// 0x0816BA4C (Toad at col 0x0D, row 0x13: kind 1, "Pick a box...").
+pub const MAP_HOUSE: u16 = 0x102;
+/// Chest items (0x080A7B9C): choice c, index c - 1; from index 5 on, the index is
+/// 0x08173794[index] + 0x08173775[0x03003879 & 0xF]; item = 0x08173785[index].
+const ITEM_RANDOM: [u8; 16] = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0];
+const ITEMS: [u8; 15] = [0x0C, 0x08, 0x04, 0x05, 0x06, 0x04, 0x05, 0x06, 0x01, 0x02, 0x03, 0x04, 0x02, 0x03, 0x05];
+const ITEM_BASE: [u8; 10] = [0x02, 0x03, 0x0A, 0x0A, 0x0A, 0x05, 0x08, 0x0B, 0x0E, 0x11];
+
+/// 0x080A7B9C: the chest's item for chest choice `choice` and the random byte 0x03003879.
+pub fn chest_item(choice: u8, rand: u8) -> u8 {
+    let mut i = choice.wrapping_sub(1) as usize;
+    if i >= 5 {
+        i = ITEM_BASE[i % ITEM_BASE.len()] as usize + ITEM_RANDOM[(rand & 0xF) as usize] as usize;
+    }
+    ITEMS[i.min(ITEMS.len() - 1)]
+}
 /// Chest x by position (0x08173772): left, middle, right.
 const CHEST_X: [i32; 3] = [0x40, 0x68, 0x90];
 /// The chest's top row (0x03003CBD:CBC = 0x160). When the item comes out, tile change 0x14
@@ -52,10 +74,12 @@ const ITEM_VY: i32 = -0x30;
 const ITEM_WAIT: u8 = 5;
 /// It blinks this long once it stops (+0x24 = 0x70).
 const ITEM_SHOW: u8 = 0x70;
-/// Frames from the end of the item to the map.
-// TODO(re): the exit runs 0x08132534[0x03003CAA] (0x08005ECC, 0x0800731C: 0x0300374C - 4
-// a frame to -0x90, 0x08005F44, ...); only its length is approximated here.
-const EXIT_FRAMES: u16 = 0x40;
+/// Frames from the end of the item (its blinking) to the map: mGBA (map house, B at frame
+/// 0): the item is in the inventory at 49, mode 0x1B at 293, the map (0x11) at 326; with
+/// the port's item timing (in at 51, done blinking 0x70 frames later) that leaves this.
+// TODO(re): what the house does between the item and mode 0x1B, and the exit's own steps,
+// are not drawn, only their length.
+const EXIT_FRAMES: u16 = 163;
 
 /// Message box rows (0x0806E384).
 pub const BOX_ROWS: u8 = 8;
@@ -147,11 +171,21 @@ pub struct ToadHouse {
     /// The open lid's top-left, px, once drawn.
     pub chest_lid: Option<(i32, i32)>,
     exit: Option<u16>,
+    /// 0x03003CAF.
+    choice: u8,
+    /// Toad's kind (his message).
+    pub kind: u8,
+}
+
+/// Toad's kind (+0x3A = row >> 4): picks his message (0x0816F3C4[kind]).
+pub fn toad_kind(list: &[EnemySpawn]) -> Option<u8> {
+    list.iter().find(|e| e.kind == TOAD).map(|t| t.row >> 4)
 }
 
 impl ToadHouse {
-    /// The house's list (Toad) and Toad's message (BG3 tile ids, see `ToadHouse::text_cells`).
-    pub fn new(list: &[EnemySpawn], message: Vec<u8>) -> Option<Self> {
+    /// The house's list (Toad), Toad's message (BG3 tile ids, see `ToadHouse::text_cells`)
+    /// and the chest choice (0x03003CAF).
+    pub fn new(list: &[EnemySpawn], message: Vec<u8>, choice: u8) -> Option<Self> {
         let toad = list.iter().find(|e| e.kind == TOAD)?;
         // Init: y high half = 1; the kind (+0x3A = row >> 4) picks the message (0x0816F3C4).
         let y = 0x100 | (toad.row as i32 * TILE_PX) & 0xFF;
@@ -167,6 +201,8 @@ impl ToadHouse {
             opened: false,
             chest_lid: None,
             exit: None,
+            choice,
+            kind: toad.row >> 4,
         })
     }
 
@@ -206,6 +242,7 @@ impl ToadHouse {
     }
 
     /// One frame. `pressed` / `held` are the player's buttons (cleared while frozen).
+    #[allow(clippy::too_many_arguments)]
     pub fn step(
         &mut self,
         player: &mut Player,
@@ -214,6 +251,7 @@ impl ToadHouse {
         frozen: bool,
         camera_y: i32,
         frame: u32,
+        rand: u8,
     ) -> Event {
         let mut ev = Event::default();
         if let Some(t) = &mut self.exit {
@@ -227,7 +265,7 @@ impl ToadHouse {
             self.step_toad();
         }
         if self.item.is_none() && !self.opened && !frozen && pressed.contains(Buttons::B) {
-            self.open_chest(player, level, camera_y);
+            self.open_chest(player, level, camera_y, rand);
         }
         if let Some(item) = &mut self.item {
             item.timer = item.timer.saturating_sub(1);
@@ -293,7 +331,7 @@ impl ToadHouse {
     }
 
     /// 0x0809E39C / 0x080A7B9C.
-    fn open_chest(&mut self, player: &mut Player, level: &Level, camera_y: i32) {
+    fn open_chest(&mut self, player: &mut Player, level: &Level, camera_y: i32, rand: u8) {
         let fx = player.frame().0;
         let lo = fx & 0xFF;
         let py = player.px().1;
@@ -317,7 +355,7 @@ impl ToadHouse {
         player.vx = 0;
         self.opened = true;
         self.item = Some(ChestItem {
-            kind: WARP_WHISTLE,
+            kind: chest_item(self.choice, rand),
             x: CHEST_X[i],
             y: (camera_y + ITEM_SCREEN_Y) << 8,
             vy: ITEM_VY,
@@ -334,7 +372,17 @@ mod tests {
     fn house() -> ToadHouse {
         let list = [EnemySpawn { kind: TOAD, col: 0x0C, row: 0x03, ..Default::default() }];
         // "Hi" / "!"
-        ToadHouse::new(&list, vec![0x10, 0x11, NEWLINE, SKIP, 0x12, END]).unwrap()
+        ToadHouse::new(&list, vec![0x10, 0x11, NEWLINE, SKIP, 0x12, END], HIDDEN_CHOICE).unwrap()
+    }
+
+    #[test]
+    fn chest_items_come_from_the_rom_tables() {
+        assert_eq!(chest_item(HIDDEN_CHOICE, 0x37), WARP_WHISTLE);
+        // World 1's map houses: mushroom, flower or leaf by the random byte's low nibble
+        // (mGBA: 0x5A -> the fire flower).
+        assert_eq!(chest_item(7, 0x5A), 2);
+        let got: Vec<u8> = (0..16).map(|r| chest_item(7, r)).collect();
+        assert_eq!(got, [1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1]);
     }
 
     #[test]

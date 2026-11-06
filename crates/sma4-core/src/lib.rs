@@ -128,8 +128,13 @@ pub struct Game {
     pub pending_area: Option<AreaRequest>,
     /// World 1-3's warp trigger (type 0x07), in a level that has one.
     warp_trigger: Option<toad_house::WarpTrigger>,
-    /// The trigger fired: the host loads this Toad House and calls `enter_house`.
+    /// The trigger fired, or a map Toad House was entered: the host loads this Toad House
+    /// and calls `enter_house` (`enter_map_house` when `house_choice` is set).
     pub pending_house: Option<u16>,
+    /// A map Toad House's chest choice (0x03003CAF: the enemy word's high byte & 0x7F).
+    pub house_choice: Option<u8>,
+    /// The house was entered from the map.
+    map_house: bool,
     /// In a Toad House.
     pub house: Option<toad_house::ToadHouse>,
     /// The spade panel's game (`sma4_assets::SpadeAsset`); without it the spade is just
@@ -342,15 +347,36 @@ impl Game {
     /// `toad_house::ARRIVAL` in the same form, no clock. `message` is Toad's message
     /// (`sma4_assets::toad_message_path`). The level to restart after a lost life stays.
     pub fn enter_house(&mut self, level: Level, enemies: &[sma4_assets::EnemySpawn], message: Vec<u8>) {
+        let arrival = toad_house::ARRIVAL;
+        self.enter_house_at(level, enemies, message, arrival, toad_house::HIDDEN_CHOICE);
+    }
+
+    /// A Toad House on the map (tileset 7, `pending_house` with `house_choice` set): Mario
+    /// at `toad_house::MAP_ARRIVAL`; the spot is cleared when he leaves.
+    pub fn enter_map_house(&mut self, level: Level, enemies: &[sma4_assets::EnemySpawn], message: Vec<u8>) {
+        let choice = self.house_choice.take().unwrap_or(toad_house::HIDDEN_CHOICE);
+        self.enter_house_at(level, enemies, message, toad_house::MAP_ARRIVAL, choice);
+        self.map_house = true;
+        self.screen = Screen::Level;
+    }
+
+    fn enter_house_at(
+        &mut self,
+        level: Level,
+        enemies: &[sma4_assets::EnemySpawn],
+        message: Vec<u8>,
+        (fx, fy): (i32, i32),
+        choice: u8,
+    ) {
         let (start, spawn, player) = (self.start.take(), self.spawn, self.player);
         self.enter_level(level, spawn, enemies);
         self.start = start;
-        let (fx, fy) = toad_house::ARRIVAL;
         self.player = Player::spawn(fx + 2, fy + 32 - Form::Small.height());
         self.player.set_form(player.form);
         self.player.facing_left = player.facing_left;
         self.status.start_clock(0);
-        self.house = toad_house::ToadHouse::new(enemies, message);
+        self.house = toad_house::ToadHouse::new(enemies, message, choice);
+        self.map_house = false;
         if self.house.is_some() {
             self.freeze = toad_house::ARRIVAL_FREEZE;
         }
@@ -713,7 +739,7 @@ impl Game {
     fn step_house(&mut self, pressed: Buttons, frozen: bool) -> bool {
         let camera_y = self.camera().1;
         let Some(h) = &mut self.house else { return false };
-        let ev = h.step(&mut self.player, &self.level, pressed, frozen, camera_y, self.frame);
+        let ev = h.step(&mut self.player, &self.level, pressed, frozen, camera_y, self.frame, self.rng.byte(0));
         if let Some(item) = ev.got {
             self.inventory.push(item);
         }
@@ -722,8 +748,14 @@ impl Game {
             self.freeze = self.freeze.max(toad_house::ITEM_FREEZE);
         }
         if ev.leave {
-            // The level is not cleared: Mario is back on its spot.
+            // A map house's spot is done (mGBA: tile 0x40 after the visit); the hidden one
+            // leaves 1-3 not cleared, Mario back on its spot.
             self.house = None;
+            if std::mem::take(&mut self.map_house)
+                && let Some(map) = &mut self.world_map
+            {
+                map.clear_here();
+            }
             self.to_map(world_map::Arrival::Walk);
             return true;
         }
@@ -927,7 +959,11 @@ impl Game {
                     map.frame = self.frame;
                     if let Some(node) = map.step(held, self.input.pressed) {
                         self.battle = map.meeting.map(|(_, item)| item);
-                        if !self.enter_spade(&node) {
+                        if node.tileset == toad_house::TILESET && node.enemies & 0x8000 != 0 {
+                            // 0x08009A3C: a bit-15 enemy word is the chest choice.
+                            self.house_choice = Some((node.enemies >> 8) as u8 & 0x7F);
+                            self.pending_house = Some(node.level);
+                        } else if !self.enter_spade(&node) {
                             self.pending_level = Some(node);
                         }
                     }
@@ -1714,6 +1750,60 @@ mod tests {
         assert!(matches!(g.world_map.as_ref().unwrap().phase, MapPhase::Intro(_)));
     }
 
+    /// mGBA, World 1: A on the Toad House at (12, 3) loads level 0x102 with chest choice 7;
+    /// a chest gives a mushroom, flower or leaf, and the house is done afterwards (tile 0x40).
+    #[test]
+    fn a_map_toad_house_gives_an_item_and_is_done_after() {
+        use toad_house::{MAP_ARRIVAL, MAP_HOUSE, TOAD};
+        let mut g = Game::new();
+        let mut map = world_map::tests::world1();
+        map.show(world_map::Arrival::Walk);
+        (map.y, map.x) = (0x40, 0xC0);
+        // World 1's houses: tileset 7, enemy word 0x8700 (0x08133AD0).
+        for n in map.nodes.iter_mut().filter(|n| n.level == MAP_HOUSE) {
+            (n.tileset, n.enemies) = (toad_house::TILESET, 0x8700);
+        }
+        g.world_map = Some(map);
+        g.screen = Screen::Map;
+        g.step(Buttons::empty());
+        g.step(Buttons::A);
+        for _ in 0..80 {
+            g.step(Buttons::empty());
+        }
+        assert_eq!((g.pending_house.take(), g.house_choice), (Some(MAP_HOUSE), Some(7)));
+        assert_eq!(g.pending_level, None);
+        let (w, h) = (16, 27);
+        let mut m = vec![SKY; w * h];
+        m[24 * w..25 * w].fill(0x53);
+        for y in 22..24 {
+            m[y * w + 4..y * w + 11].fill(0x81);
+        }
+        let list = [sma4_assets::EnemySpawn { kind: TOAD, col: 0x0D, row: 0x13, ..Default::default() }];
+        g.enter_map_house(Level::new(w, h, m, TEST_SOLIDITY, BlockRules::default()), &list, vec![0x10, 0xFF]);
+        assert_eq!((g.screen, g.player.frame()), (Screen::Level, MAP_ARRIVAL));
+        assert_eq!(g.house.as_ref().unwrap().kind, 1, "Toad's \"Pick a box\" message");
+        for _ in 0..toad_house::ARRIVAL_FREEZE {
+            g.step(Buttons::empty());
+        }
+        g.player = Player::spawn(0x40 + 2, 24 * TILE_PX - 16);
+        for _ in 0..10 {
+            g.step(Buttons::empty());
+        }
+        g.step(Buttons::B);
+        // mGBA: the item in the inventory 49 frames after B, the map at 326.
+        let (mut frames, mut got) = (0, None);
+        while g.screen == Screen::Level {
+            g.step(Buttons::empty());
+            frames += 1;
+            if got.is_none() && !g.inventory.is_empty() {
+                got = Some(frames);
+            }
+            assert!(frames < 500);
+        }
+        assert_eq!((got, frames), (Some(51), 326));
+        assert!(matches!(g.inventory.as_slice(), [1..=3]), "{:?}", g.inventory);
+        assert_eq!(g.world_map.as_ref().unwrap().tile(12, 3), 0x40, "the house is done");
+    }
 
     /// L opens the item panel; a mushroom makes Mario big; the Warp Whistle's whirlwind
     /// takes him to World 9 (`warp`), where he lands on its first spot.

@@ -52,6 +52,7 @@ const USAGE: &str = "usage: sma4 [--assets <dir>] [--level <hex id>] [--viewer]
                 c Warp Whistle; L on the map opens the panel)
   --cleared <col>,<row>  debug: mark the world-map spot at that cell cleared (repeatable)
   --map-bro <col>,<row>  debug: put the world map's Hammer Bro on that cell
+  --map-at <col>,<row>  debug: put Mario on that world-map cell (e.g. 12,3: a Toad House)
   --popup <type>  debug: show a score popup (1-15) over the player at the start
   --title  debug: start on the title screen (where the game-over menu's QUIT goes)
   --spade  debug: start in the spade panel's game (Toad's room)
@@ -89,6 +90,7 @@ struct Args {
     items: Vec<u8>,
     cleared: Vec<(usize, usize)>,
     map_bro: Option<(usize, usize)>,
+    map_at: Option<(usize, usize)>,
     spade: Option<u8>,
     title: bool,
 }
@@ -114,6 +116,7 @@ fn parse_args() -> Option<Args> {
         items: Vec::new(),
         cleared: Vec::new(),
         map_bro: None,
+        map_at: None,
         spade: None,
         title: false,
     };
@@ -133,6 +136,11 @@ fn parse_args() -> Option<Args> {
             "--progress" => args.progress = it.next()?.parse().ok()?,
             "--items" => {
                 args.items = it.next()?.split(',').map(|h| u8::from_str_radix(h, 16).ok()).collect::<Option<_>>()?;
+            }
+            "--map-at" => {
+                let v = it.next()?;
+                let (c, r) = v.split_once(',')?;
+                args.map_at = Some((c.parse().ok()?, r.parse().ok()?));
             }
             "--map-bro" => {
                 let v = it.next()?;
@@ -250,6 +258,7 @@ fn main() -> AppExit {
             .insert_resource(level::LevelRes(level))
             .insert_resource(worldmap::ClearedSpots(args.cleared.clone()))
             .insert_resource(worldmap::MapBro(args.map_bro))
+            .insert_resource(worldmap::MapAt(args.map_at))
             .insert_resource(spade::DebugSpade(args.spade))
             .insert_resource(title::DebugTitle(args.title))
             .add_plugins((

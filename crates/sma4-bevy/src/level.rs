@@ -393,7 +393,8 @@ fn load_pending_area(
     level_res.0 = level;
 }
 
-/// World 1-3's warp trigger fired: load its hidden Toad House and Toad's message.
+/// World 1-3's warp trigger fired, or a map Toad House was entered: load the house and
+/// Toad's message (by his kind).
 fn load_pending_house(
     mut commands: Commands,
     mut game: ResMut<GameRes>,
@@ -403,14 +404,23 @@ fn load_pending_house(
     old: Query<Entity, With<LevelTiles>>,
 ) {
     let Some(id) = game.0.pending_house.take() else { return };
-    let message = std::fs::read(sma4_assets::toad_message_path(&dir.0));
-    let level = match (LevelAsset::read(&dir.0, id), message) {
-        (Ok(l), Ok(m)) => (l, m),
-        (Err(e), _) => {
-            warn!("{e} (re-run sma4-extract to get World 1-3's Toad House)");
+    let level = LevelAsset::read(&dir.0, id).map(|l| {
+        let kind = sma4_core::toad_house::toad_kind(&l.enemies).unwrap_or(0);
+        let message = std::fs::read(sma4_assets::toad_message_path(&dir.0, kind));
+        (l, message)
+    });
+    let level = match level {
+        Ok((l, Ok(m))) => (l, m),
+        Err(e) => {
+            warn!("{e} (re-run sma4-extract to get the Toad Houses)");
+            if game.0.house_choice.take().is_some()
+                && let Some(map) = &mut game.0.world_map
+            {
+                map.show(sma4_core::world_map::Arrival::Walk);
+            }
             return;
         }
-        (_, Err(e)) => {
+        Ok((_, Err(e))) => {
             warn!("Toad's message: {e} (re-run sma4-extract)");
             return;
         }
@@ -421,7 +431,11 @@ fn load_pending_house(
     }
     spawn_tilemaps(&mut commands, &mut images, &level);
     let core = core_level(&level);
-    game.0.enter_house(core, &level.enemies, message);
+    if game.0.house_choice.is_some() {
+        game.0.enter_map_house(core, &level.enemies, message);
+    } else {
+        game.0.enter_house(core, &level.enemies, message);
+    }
     level_res.0 = level;
 }
 

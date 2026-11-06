@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 use sma4_assets::{
     KOOPA_CELL_H, KOOPA_CELL_W, KOOPA_ORIGIN, Rgba, TOAD_BOX_AT, TOAD_RAISE, TOAD_BOX_H, TOAD_BOX_W, TOAD_TEXT_AT,
-    chest_lid_path, house_item_path, toad_box_path, toad_path, toad_text_path,
+    TOAD_KINDS, chest_lid_path, house_item_path, house_items_path, toad_box_path, toad_path, toad_text_path,
 };
 use sma4_core::{SCREEN_H, SCREEN_W};
 
@@ -34,8 +34,11 @@ const Z_BOX: f32 = 30.0;
 struct Art {
     toad: Vec<Handle<Image>>,
     message_box: Option<Handle<Image>>,
-    text: Option<Handle<Image>>,
+    /// The box with the message by Toad's kind.
+    text: Vec<Option<Handle<Image>>>,
+    /// The Warp Whistle, and the other items by id.
     item: Option<Handle<Image>>,
+    items: Vec<Handle<Image>>,
     lid: Option<Handle<Image>>,
 }
 
@@ -56,8 +59,9 @@ fn load_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMu
     let art = Art {
         toad: load_cells(&toad_path(&dir.0), KOOPA_CELL_W, KOOPA_CELL_H, &mut images),
         message_box: load_one(&toad_box_path(&dir.0), &mut images),
-        text: load_one(&toad_text_path(&dir.0), &mut images),
+        text: (0..TOAD_KINDS).map(|k| load_one(&toad_text_path(&dir.0, k), &mut images)).collect(),
         item: load_one(&house_item_path(&dir.0), &mut images),
+        items: load_cells(&house_items_path(&dir.0), 16, 16, &mut images),
         lid: load_one(&chest_lid_path(&dir.0), &mut images),
     };
     commands.insert_resource(art);
@@ -107,7 +111,11 @@ fn sync_house(
     }
     if let Some(item) = &house.item
         && item.visible
-        && let Some(image) = &art.item
+        && let Some(image) = if item.kind == sma4_assets::HOUSE_ITEM {
+            art.item.as_ref()
+        } else {
+            art.items.get(item.kind as usize)
+        }
     {
         // OAM y = y - 1 (0x0804FFFC).
         let (x, y) = item.px();
@@ -121,7 +129,7 @@ fn sync_house(
     {
         pieces.push(box_piece(image, (0, 0, TOAD_BOX_W * 8, rows.min(TOAD_BOX_H) * 8)));
     }
-    if let Some(image) = &art.text {
+    if let Some(Some(image)) = art.text.get(house.kind as usize) {
         for (col, row) in house.text_cells() {
             let (tx, ty) = (TOAD_TEXT_AT.0 + col, TOAD_TEXT_AT.1 + row);
             let mut piece = box_piece(image, (tx * 8, ty * 8, 8, 8));

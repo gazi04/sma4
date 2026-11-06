@@ -1421,14 +1421,17 @@ mod tests {
 pub fn toad_box_path(dir: &Path) -> PathBuf {
     dir.join("objects").join("toad_box.png")
 }
-/// The box with the whole message of the 1-3 house drawn in.
-pub fn toad_text_path(dir: &Path) -> PathBuf {
-    dir.join("objects").join("toad_text.png")
+/// The box with the whole message of Toad's `kind` (0: World 1-3's hidden house, 1: the
+/// map's houses) drawn in.
+pub fn toad_text_path(dir: &Path, kind: u8) -> PathBuf {
+    dir.join("objects").join(if kind == 0 { "toad_text.png".into() } else { format!("toad_text_{kind}.png") })
 }
 /// That message's bytes: BG tile ids, 0xF0 next line, 0xFE skip a cell, 0xFF end.
-pub fn toad_message_path(dir: &Path) -> PathBuf {
-    dir.join("objects").join("toad_message.bin")
+pub fn toad_message_path(dir: &Path, kind: u8) -> PathBuf {
+    dir.join("objects").join(if kind == 0 { "toad_message.bin".into() } else { format!("toad_message_{kind}.bin") })
 }
+/// Toad kinds with a message extracted.
+pub const TOAD_KINDS: u8 = 2;
 pub const TOAD_BOX_W: u32 = 0x12;
 pub const TOAD_BOX_H: u32 = 8;
 pub const TOAD_BOX_AT: (u32, u32) = (6, 1);
@@ -1446,6 +1449,13 @@ pub fn house_item_path(dir: &Path) -> PathBuf {
     dir.join("objects").join("warp_whistle.png")
 }
 pub const HOUSE_ITEM: u8 = 0x0C;
+/// The chest items as the map's Toad Houses draw them (object 0x35), 16x16 cells by
+/// inventory item id (0 empty, 1 mushroom, 2 fire flower, 3 leaf, ... up to
+/// `HOUSE_ITEMS - 1`); the Warp Whistle is `house_item_path`'s.
+pub fn house_items_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("house_items.png")
+}
+pub const HOUSE_ITEMS: u32 = 0x0C;
 pub const TOAD_RAISE: i32 = 16;
 /// The open chest's lid, 16x16 BG tiles drawn over the level at the chest.
 pub fn chest_lid_path(dir: &Path) -> PathBuf {

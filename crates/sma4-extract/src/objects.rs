@@ -1473,7 +1473,7 @@ const TOAD_MESSAGES: u32 = 0x0816_F3C4;
 const TEXT_TABLES: u32 = 0x0824_4318;
 
 pub fn extract_toad_house(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
-    use sma4_assets::{TOAD_BOX_H, TOAD_BOX_W, TOAD_TEXT_AT, toad_box_path, toad_message_path, toad_text_path};
+    use sma4_assets::{TOAD_BOX_H, TOAD_BOX_W, toad_box_path};
     let chars = m.read(BG3_CHARS, 0x8000)?;
     let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(BG_PAL_BUFFER, 0x200)?) };
     let (w, h) = (TOAD_BOX_W * 8, TOAD_BOX_H * 8);
@@ -1491,8 +1491,34 @@ pub fn extract_toad_house(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path)
         Rgba { width: w, height: h, pixels: px }.write_png(&path).map_err(|e| ExtractError(e.to_string()))
     };
     write(px.clone(), toad_box_path(out_dir))?;
-    // The 1-3 house's message (kind 0), drawn whole over the box; the game reveals it.
-    let id = rom.u16(TOAD_MESSAGES)? as u32;
+    let n = write_toad_message(rom, m, out_dir, 0)?;
+    extract_toad(rom, m, out_dir)?;
+    extract_house_item(rom, m, out_dir)?;
+    extract_chest_lid(rom, m, out_dir)?;
+    println!("  toad house message ({n} bytes), toad, warp whistle");
+    Ok(())
+}
+
+/// The map's Toad Houses (level 0x102 loaded): Toad's kind-1 message and the chest items.
+pub fn extract_map_house(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    let n = write_toad_message(rom, m, out_dir, 1)?;
+    extract_house_items(rom, m, out_dir)?;
+    println!("  map toad house message ({n} bytes), chest items");
+    Ok(())
+}
+
+/// Toad's message of `kind` (0x0816F3C4[kind]), drawn whole over the box (the game reveals
+/// it), and its bytes. Returns their count.
+fn write_toad_message(rom: &Rom, m: &Machine, out_dir: &std::path::Path, kind: u8) -> Result<usize, ExtractError> {
+    use sma4_assets::{TOAD_BOX_H, TOAD_BOX_W, TOAD_TEXT_AT, toad_box_path, toad_message_path, toad_text_path};
+    let chars = m.read(BG3_CHARS, 0x8000)?;
+    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(BG_PAL_BUFFER, 0x200)?) };
+    let (w, h) = (TOAD_BOX_W * 8, TOAD_BOX_H * 8);
+    let entry = |px: &mut Vec<u8>, e: u16, tx: u32, ty: u32| {
+        sheet.tile_flip(px, w, (e & 0x3FF) as u32, tx * 8, ty * 8, e & 0x400 != 0, e & 0x800 != 0, (e >> 12) as u32);
+    };
+    let mut px = Rgba::read_png(&toad_box_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?.pixels;
+    let id = rom.u16(TOAD_MESSAGES + kind as u32 * 2)? as u32;
     let mut p = rom.ptr(rom.ptr(TEXT_TABLES + LANG * 4)? + id * 4)?;
     let mut bytes = Vec::new();
     let (mut line, mut col) = (0, 0);
@@ -1516,13 +1542,11 @@ pub fn extract_toad_house(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path)
             }
         }
     }
-    write(px, toad_text_path(out_dir))?;
-    std::fs::write(toad_message_path(out_dir), &bytes).map_err(|e| ExtractError(e.to_string()))?;
-    extract_toad(rom, m, out_dir)?;
-    extract_house_item(rom, m, out_dir)?;
-    extract_chest_lid(rom, m, out_dir)?;
-    println!("  toad house message ({} bytes), toad, warp whistle", bytes.len());
-    Ok(())
+    Rgba { width: w, height: h, pixels: px }
+        .write_png(&toad_text_path(out_dir, kind))
+        .map_err(|e| ExtractError(e.to_string()))?;
+    std::fs::write(toad_message_path(out_dir, kind), &bytes).map_err(|e| ExtractError(e.to_string()))?;
+    Ok(bytes.len())
 }
 
 /// The open chest: tile change 0x14 (0x08027E3C) writes the 2x2 BG entries
@@ -1565,7 +1589,29 @@ const ITEM_TILES_RIGHT: u32 = 0x0816_E44B;
 const ITEM_ATTRS: u32 = 0x0816_E458;
 
 fn extract_house_item(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
-    let item = sma4_assets::HOUSE_ITEM as u32;
+    house_item(rom, m, sma4_assets::HOUSE_ITEM as u32)?
+        .write_png(&sma4_assets::house_item_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))
+}
+
+/// Items 0 to `HOUSE_ITEMS - 1` side by side, as a map Toad House's VRAM draws them.
+fn extract_house_items(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    let n = sma4_assets::HOUSE_ITEMS;
+    let mut px = vec![0u8; (16 * n * 16 * 4) as usize];
+    for item in 1..n {
+        let cell = house_item(rom, m, item)?;
+        for y in 0..16 {
+            let dst = ((y * 16 * n + item * 16) * 4) as usize;
+            px[dst..dst + 64].copy_from_slice(&cell.pixels[(y * 16 * 4) as usize..][..64]);
+        }
+    }
+    Rgba { width: 16 * n, height: 16, pixels: px }
+        .write_png(&sma4_assets::house_items_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))
+}
+
+/// One chest item (`item`), 16x16.
+fn house_item(rom: &Rom, m: &Machine, item: u32) -> Result<Rgba, ExtractError> {
     let chars = m.read(OBJ_VRAM, 0x8000)?;
     let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(OBJ_PAL_BUFFER, 0x200)?) };
     let a = rom.u8(ITEM_ATTRS + item)?;
@@ -1581,9 +1627,7 @@ fn extract_house_item(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Resu
         sheet.tile_flip(&mut px, 16, top, half, 0, hflip, vflip, pal);
         sheet.tile_flip(&mut px, 16, bottom, half, 8, hflip, vflip, pal);
     }
-    Rgba { width: 16, height: 16, pixels: px }
-        .write_png(&sma4_assets::house_item_path(out_dir))
-        .map_err(|e| ExtractError(e.to_string()))
+    Ok(Rgba { width: 16, height: 16, pixels: px })
 }
 
 /// Autoscroll scripts: 23 scripts (pointers 0x08170F4C, each ending where the next starts,

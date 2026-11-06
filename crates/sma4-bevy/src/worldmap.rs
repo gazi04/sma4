@@ -44,6 +44,10 @@ pub struct ClearedSpots(pub Vec<(usize, usize)>);
 #[derive(Resource, Default)]
 pub struct MapBro(pub Option<(usize, usize)>);
 
+/// `--map-at`: Mario's map cell at the start.
+#[derive(Resource)]
+pub struct MapAt(pub Option<(usize, usize)>);
+
 #[derive(Resource)]
 struct MapArt {
     /// [frame][tile id]
@@ -117,6 +121,7 @@ fn spawn_map(
     camera: Single<Entity, With<Camera2d>>,
     cleared: Option<Res<ClearedSpots>>,
     bro: Option<Res<MapBro>>,
+    start_at: Option<Res<MapAt>>,
 ) {
     let Some(mut map) = build_world(&mut commands, &dir.0, 0, &mut images, *camera) else { return };
     for &(c, r) in cleared.iter().flat_map(|c| c.0.iter()) {
@@ -124,6 +129,10 @@ fn spawn_map(
     }
     if let Some((c, r)) = bro.and_then(|b| b.0) {
         map.objects.place(sma4_core::map_objects::HAMMER_BRO, (r * 16 + 0x10) as u8, (c * 16) as u16);
+    }
+    if let Some((c, r)) = start_at.and_then(|a| a.0) {
+        map.y = (r * 16 + 0x10) as u8;
+        map.x = (c * 16) as u16;
     }
     game.0.world_map = Some(map);
 }

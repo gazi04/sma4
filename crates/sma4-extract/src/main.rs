@@ -96,8 +96,10 @@ const FORTRESS_ROOMS: u16 = 0x1CC;
 const TOAD_HOUSE_1_3: u16 = 0x106;
 const TOAD_HOUSE_TILESET: u8 = 7;
 const TOAD_HOUSE_1_3_LIST: u32 = 0x0816_BA52;
+const MAP_HOUSE: u16 = 0x102;
 /// World index of the Warp Zone (World 9).
 const WARP_ZONE: u8 = 8;
+const MAP_HOUSE_LIST: u32 = 0x0816_BA4C;
 
 fn run(args: &Args) -> Result<(), String> {
     let rom = Rom::open(&args.rom).map_err(|e| format!("{}: {e}", args.rom))?;
@@ -195,6 +197,11 @@ fn run(args: &Args) -> Result<(), String> {
                 .and_then(|a| a.write(&args.out).map_err(|e| level::ExtractError(e.to_string())))
                 .map_err(|e| e.0)?;
             objects::extract_toad_house(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+            // The map's Toad Houses (level 0x102, list 0x0816BA4C: Toad of kind 1).
+            level::extract_at(&rom, &mut m, MAP_HOUSE, TOAD_HOUSE_TILESET, MAP_HOUSE_LIST)
+                .and_then(|a| a.write(&args.out).map_err(|e| level::ExtractError(e.to_string())))
+                .map_err(|e| e.0)?;
+            objects::extract_map_house(&rom, &mut m, &args.out).map_err(|e| e.0)?;
         }
         // Object graphics are loaded by the same routines; take them after the first level.
         if n == 0 {
