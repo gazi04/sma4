@@ -108,8 +108,10 @@ impl Machine {
         for (r, &a) in regs.iter().zip(args) {
             uc.reg_write(*r, a as u64).map_err(err)?;
         }
-        uc.emu_start((func | 1) as u64, STOP, 0, MAX_INSNS)
-            .map_err(|e| EmuError(format!("{e:?} in {func:#010x}")))?;
+        if let Err(e) = uc.emu_start((func | 1) as u64, STOP, 0, MAX_INSNS) {
+            let pc = uc.reg_read(RegisterARM::PC).unwrap_or(0);
+            return Err(EmuError(format!("{e:?} in {func:#010x} (pc {pc:#x})")));
+        }
         let pc = uc.reg_read(RegisterARM::PC).map_err(err)?;
         if pc & !1 != STOP {
             return Err(EmuError(format!(
