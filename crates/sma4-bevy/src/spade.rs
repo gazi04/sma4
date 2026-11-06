@@ -38,6 +38,10 @@ impl Plugin for SpadePlugin {
 #[derive(Resource, Default)]
 pub struct DebugSpade(pub Option<u8>);
 
+/// Debug: the spade streak's count at the start (`--streak`).
+#[derive(Resource, Default)]
+pub struct DebugStreak(pub Option<u8>);
+
 /// Over the off-level cover (z 40), under the map's status bar (43); the fades cover the
 /// bar too (BLDCNT 0xFF, and 0x0800373C fades every palette).
 const Z_BACK: f32 = 40.5;
@@ -70,6 +74,9 @@ struct Art {
     prizes: Vec<(u8, Handle<Image>, (i32, i32))>,
     /// Mario standing, by form.
     mario: Vec<Handle<Image>>,
+    /// The iris overlay (GBA screen sized) and the radius it was drawn for.
+    iris: Handle<Image>,
+    iris_drawn: Option<i32>,
 }
 
 #[derive(Component)]
@@ -87,6 +94,10 @@ enum Part {
     Prize,
     Frame,
     Shade,
+    /// The way in: the screen black outside the iris (`Spade::iris`), and black beyond the
+    /// GBA screen's four edges (taller or wider windows).
+    Iris,
+    IrisBorder(usize),
 }
 
 /// Camera-local transform of something `w` x `h` whose top-left is at GBA screen (x, y).
@@ -145,6 +156,13 @@ fn load_art(
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     ));
+    let iris = images.add(Image::new(
+        Extent3d { width: SCREEN_W, height: SCREEN_H, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        vec![0; (SCREEN_W * SCREEN_H * 4) as usize],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    ));
     let stand = sma4_assets::PLAYER_WALK + sma4_core::player::STAND_STEP as usize;
     let mario = (0..4u8)
         .filter_map(|form| load_cells(&sma4_assets::player_path(dir, form), PLAYER_W, PLAYER_H, &mut images).get(stand).cloned())
@@ -168,6 +186,15 @@ fn load_art(
         part(Part::Prize, Sprite::default(), Transform::default());
         part(Part::Frame, Sprite::from_image(frame), full(Z_BOX));
         part(Part::Shade, Sprite { color: Color::NONE, custom_size: Some(Vec2::splat(4096.0)), ..default() }, full(Z_SHADE));
+        part(Part::Iris, Sprite::from_image(iris.clone()), full(Z_SHADE));
+        // Left, right, above, below the GBA screen.
+        let (w, h, big) = (SCREEN_W as f32, SCREEN_H as f32, 4096.0);
+        for (i, (x, y, bw, bh)) in
+            [(-big, -big, big, 3.0 * big), (w, -big, big, 3.0 * big), (0.0, -big, w, big), (0.0, h, w, big)].into_iter().enumerate()
+        {
+            let sprite = Sprite { color: Color::BLACK, custom_size: Some(Vec2::new(bw, bh)), ..default() };
+            part(Part::IrisBorder(i), sprite, at(x, y, bw, bh, Z_SHADE));
+        }
     });
     game.0.spade_data = Some(asset.clone());
     commands.insert_resource(Art {
@@ -181,11 +208,16 @@ fn load_art(
         drawn: None,
         prizes,
         mario,
+        iris,
+        iris_drawn: None,
     });
 }
 
 /// `--spade`: Mario on the map's spade spot, its game started.
-fn debug_start(mut debug: ResMut<DebugSpade>, mut game: ResMut<GameRes>) {
+fn debug_start(mut debug: ResMut<DebugSpade>, mut streak: ResMut<DebugStreak>, mut game: ResMut<GameRes>) {
+    if let Some(count) = streak.0.take() {
+        game.0.spade_streak.count = count;
+    }
     let Some(count) = debug.0.take() else { return };
     let g = &mut game.0;
     g.spade_streak.count = count;
@@ -194,6 +226,19 @@ fn debug_start(mut debug: ResMut<DebugSpade>, mut game: ResMut<GameRes>) {
     (map.y, map.x) = (node.y, node.x);
     if g.enter_spade(&node) {
         info!("debug: spade game, streak count {count}");
+    }
+}
+
+/// The iris (0x03003B64): black outside a circle of radius `r` round `(cx, cy)`; the
+/// left / right edges at cx - r and cx + r - 1 as measured in mGBA. Negative: all black.
+fn draw_iris(image: &mut Image, (cx, cy): (i32, i32), r: i32) {
+    let Some(data) = image.data.as_mut() else { return };
+    for y in 0..SCREEN_H as i32 {
+        for x in 0..SCREEN_W as i32 {
+            let (dx, dy) = (2 * (x - cx) + 1, 2 * (y - cy) + 1);
+            let inside = r > 0 && dx * dx + dy * dy <= 4 * r * r;
+            data[((y * SCREEN_W as i32 + x) * 4 + 3) as usize] = if inside { 0 } else { 255 };
+        }
     }
 }
 
@@ -247,6 +292,16 @@ fn sync_spade(
         let handle = art.icons.clone();
         if let Some(mut image) = images.get_mut(&handle) {
             draw_icons(&art, &s.bg2, &mut image);
+        }
+    }
+    let iris = spade.and_then(Spade::iris);
+    if let Some(r) = iris
+        && art.iris_drawn != Some(r)
+    {
+        art.iris_drawn = Some(r);
+        let handle = art.iris.clone();
+        if let Some(mut image) = images.get_mut(&handle) {
+            draw_iris(&mut image, sma4_core::spade::IRIS_CENTRE, r);
         }
     }
     let form = game.0.player.form.id() as usize;
@@ -321,6 +376,7 @@ fn sync_spade(
                 }
                 None => false,
             },
+            Part::Iris | Part::IrisBorder(_) => iris.is_some(),
         };
         *vis = if shown { Visibility::Inherited } else { Visibility::Hidden };
     }

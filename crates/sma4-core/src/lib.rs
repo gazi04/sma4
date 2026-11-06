@@ -1805,6 +1805,36 @@ mod tests {
         assert_eq!(g.world_map.as_ref().unwrap().tile(12, 3), 0x40, "the house is done");
     }
 
+    /// mGBA, World 1's spade: A at frame 0, the iris on Toad's room starts growing at frame
+    /// 75 (sub-state 0x23) and the room's own handler (sub-state 0x24) runs from frame 107.
+    #[test]
+    fn the_spade_room_opens_75_frames_after_a() {
+        let mut g = Game::new();
+        let mut map = world_map::tests::world1();
+        map.show(world_map::Arrival::Walk);
+        map.nodes.push(sma4_assets::MapNode { y: 0x60, x: 0x80, tileset: spade::TILESET, level: 0x8000, enemies: 0x8001 });
+        (map.y, map.x) = (0x60, 0x80);
+        g.world_map = Some(map);
+        g.spade_data = Some(sma4_assets::SpadeAsset::default());
+        g.screen = Screen::Map;
+        g.step(Buttons::empty());
+        g.step(Buttons::A);
+        let (mut f, mut iris_from, mut room_from) = (0, None, None);
+        while room_from.is_none() {
+            g.step(Buttons::empty());
+            f += 1;
+            let s = g.spade.as_ref();
+            if iris_from.is_none() && matches!(s.map(|s| s.phase), Some(spade::Phase::Opening(k)) if k >= spade::OPEN_BLACK) {
+                iris_from = Some(f);
+            }
+            if s.is_some_and(|s| s.phase == spade::Phase::Room) {
+                room_from = Some(f);
+            }
+            assert!(f < 300);
+        }
+        assert_eq!((iris_from, room_from), (Some(75), Some(107)));
+    }
+
     /// L opens the item panel; a mushroom makes Mario big; the Warp Whistle's whirlwind
     /// takes him to World 9 (`warp`), where he lands on its first spot.
     #[test]

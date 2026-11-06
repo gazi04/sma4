@@ -55,6 +55,18 @@ pub const FADE_STEPS: u8 = 8;
 pub const FADE_STEP: u8 = 4;
 /// BLDY at full black.
 pub const BLACK: u8 = 0x10;
+/// The way in (mGBA, World 1's spade, A pressed at frame 0): the map's iris closes, then
+/// sub-states 0x14 (15 frames), 0x15 (1) and 0x16 (15, BLDY 0x10) keep the screen black,
+/// and 0x23 starts at frame 75. It grows the iris radius 0x03003B64 by 8 a frame from 0
+/// for 32 frames (0x03003918 = 0x38 ends it), centred on the screen. The window is drawn
+/// with a lag: at the 0x23 frame k it is a circle of radius 8k - 17 round (120, 80)
+/// (nothing at first, the whole screen from k = 18). The port's map hands over at frame
+/// 43, so `OPEN_BLACK` frames of black make the iris start at 75.
+pub const OPEN_BLACK: u8 = 32;
+pub const OPEN_IRIS: u8 = 32;
+const IRIS_STEP: i32 = 8;
+const IRIS_LAG: i32 = 17;
+pub const IRIS_CENTRE: (i32, i32) = (120, 80);
 
 /// Row speeds at the start (0x08033A2C).
 const SPEEDS: [u8; 3] = [0x70, 0x90, 0x7F];
@@ -107,9 +119,12 @@ enum Room {
     Leaving,
 }
 
-/// Mode-1 sub-states 0x24-0x28.
+/// Mode-1 sub-states 0x16 and 0x23-0x28.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
+    /// The way in (frames so far): sub-state 0x16 (the screen black, `OPEN_BLACK` frames),
+    /// then 0x23, the level loop, opening an iris on Toad's room (`OPEN_IRIS` frames).
+    Opening(u8),
     Room,
     /// 0x25: palette steps done, and the step counter 0x03003784; after the 8th, 0x26 loads
     /// the slots.
@@ -459,7 +474,16 @@ impl Spade {
     pub fn new(data: SpadeAsset, streak: Streak) -> Self {
         let k = (streak.count as usize).min(sma4_assets::SPADE_MESSAGES - 1);
         let message = data.messages[k].clone();
-        Self { phase: Phase::Room, room: Room::Box(0), text_timer: TEXT_STEP, message, printed: 0, slots: None, data }
+        Self { phase: Phase::Opening(0), room: Room::Box(0), text_timer: TEXT_STEP, message, printed: 0, slots: None, data }
+    }
+
+    /// While coming in: the radius of the window on the room (negative: all black).
+    pub fn iris(&self) -> Option<i32> {
+        match self.phase {
+            Phase::Opening(k) if k < OPEN_BLACK => Some(-1),
+            Phase::Opening(k) => Some(IRIS_STEP * (k - OPEN_BLACK) as i32 - IRIS_LAG),
+            _ => None,
+        }
     }
 
     /// The message for this visit (`spade_host_text(k)`).
@@ -500,7 +524,7 @@ impl Spade {
 
     pub fn shade(&self) -> Option<Shade> {
         match self.phase {
-            Phase::Room => None,
+            Phase::Opening(_) | Phase::Room => None,
             Phase::RoomFade(steps, _) => Some(Shade::Subtract(steps * FADE_STEP)),
             Phase::FadeIn(y) => Some(Shade::Darken(y)),
             Phase::Slots => self.slots.as_ref().and_then(|s| (s.state == 2 || s.state == 3).then_some(Shade::Darken(s.bldy))),
@@ -510,6 +534,9 @@ impl Spade {
     /// One frame. Returns true when the game is over (back to the map, the spot cleared).
     pub fn step(&mut self, pressed: Buttons, rng: &Rng, frame: u32, streak: &mut Streak, lives: &mut u16) -> bool {
         match self.phase {
+            Phase::Opening(k) => {
+                self.phase = if k + 1 >= OPEN_BLACK + OPEN_IRIS { Phase::Room } else { Phase::Opening(k + 1) };
+            }
             Phase::Room => self.room_step(pressed),
             // 0x26 (0x0803377C): the slots, the screen black.
             Phase::RoomFade(steps, _) if steps >= FADE_STEPS => {
@@ -595,10 +622,37 @@ pub(crate) mod tests {
         false
     }
 
+    /// Toad's room once the way in is over.
+    fn in_room(st: Streak) -> Spade {
+        let mut s = Spade::new(data(), st);
+        let (mut f, mut st, mut l) = (0, st, 4);
+        run(&mut s, Buttons::A, (OPEN_BLACK + OPEN_IRIS) as u32, &mut f, &mut st, &mut l);
+        assert_eq!((s.phase, s.room), (Phase::Room, Room::Box(0)));
+        s
+    }
+
+    /// mGBA (World 1's spade): black frames, then the iris: nothing for 3 frames, a
+    /// radius of 7 at the fourth (columns 113-126 of line 80), 8 more a frame.
+    #[test]
+    fn the_way_in_opens_an_iris_on_the_room() {
+        let (mut f, mut st, mut l) = (0, Streak::default(), 4);
+        let mut s = Spade::new(data(), st);
+        let mut radii = Vec::new();
+        while let Some(r) = s.iris() {
+            radii.push(r);
+            run(&mut s, Buttons::empty(), 1, &mut f, &mut st, &mut l);
+        }
+        assert_eq!(radii.len(), (OPEN_BLACK + OPEN_IRIS) as usize);
+        let k = OPEN_BLACK as usize;
+        assert!(radii[..k + 3].iter().all(|&r| r < 0));
+        assert_eq!((radii[k + 3], radii[k + 4], radii[k + 17]), (7, 15, 119));
+        assert_eq!((s.phase, s.box_rows()), (Phase::Room, 0), "the box starts after it");
+    }
+
     #[test]
     fn the_box_takes_eight_frames_then_a_byte_every_four() {
         let (mut f, mut st, mut l) = (0, Streak::default(), 4);
-        let mut s = Spade::new(data(), st);
+        let mut s = in_room(st);
         run(&mut s, Buttons::empty(), 8, &mut f, &mut st, &mut l);
         assert_eq!((s.box_rows(), s.room), (8, Room::Text));
         // 0x0300384D starts at 4: the first byte on the fourth frame.
@@ -614,7 +668,7 @@ pub(crate) mod tests {
     #[test]
     fn a_leaves_the_room_through_the_fades() {
         let (mut f, mut st, mut l) = (0, Streak::default(), 4);
-        let mut s = Spade::new(data(), st);
+        let mut s = in_room(st);
         run(&mut s, Buttons::A, 1, &mut f, &mut st, &mut l);
         assert_eq!(s.room, Room::Box(1), "A does nothing while the box is drawn");
         run(&mut s, Buttons::empty(), 8, &mut f, &mut st, &mut l);

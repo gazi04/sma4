@@ -56,7 +56,8 @@ const USAGE: &str = "usage: sma4 [--assets <dir>] [--level <hex id>] [--viewer]
   --popup <type>  debug: show a score popup (1-15) over the player at the start
   --title  debug: start on the title screen (where the game-over menu's QUIT goes)
   --spade  debug: start in the spade panel's game (Toad's room)
-  --streak <n>  debug: with --spade, the wins in a row so far (0-7: the bonus rounds from 3)
+  --streak <n>  debug: the spade streak count so far (0-7: the bonus rounds from 3; the map's
+                spade panel shows a heart, club or diamond from 1)
   --script <spec> --screenshot <png>
             play scripted input (e.g. \"-30 R120 RA20 R60\"), save a screenshot, exit
 
@@ -91,7 +92,8 @@ struct Args {
     cleared: Vec<(usize, usize)>,
     map_bro: Option<(usize, usize)>,
     map_at: Option<(usize, usize)>,
-    spade: Option<u8>,
+    spade: bool,
+    streak: Option<u8>,
     title: bool,
 }
 
@@ -117,7 +119,8 @@ fn parse_args() -> Option<Args> {
         cleared: Vec::new(),
         map_bro: None,
         map_at: None,
-        spade: None,
+        spade: false,
+        streak: None,
         title: false,
     };
     let mut it = std::env::args().skip(1);
@@ -153,9 +156,9 @@ fn parse_args() -> Option<Args> {
                 args.cleared.push((c.parse().ok()?, r.parse().ok()?));
             }
             "--popup" => args.popup = Some(it.next()?.parse().ok()?),
-            "--spade" => args.spade = Some(args.spade.unwrap_or(0)),
+            "--spade" => args.spade = true,
             "--title" => args.title = true,
-            "--streak" => args.spade = Some(it.next()?.parse().ok()?),
+            "--streak" => args.streak = Some(it.next()?.parse().ok()?),
             "--form" => args.form = it.next()?.parse().ok()?,
             "--behind" => args.behind = true,
             "--hit" => {
@@ -259,7 +262,8 @@ fn main() -> AppExit {
             .insert_resource(worldmap::ClearedSpots(args.cleared.clone()))
             .insert_resource(worldmap::MapBro(args.map_bro))
             .insert_resource(worldmap::MapAt(args.map_at))
-            .insert_resource(spade::DebugSpade(args.spade))
+            .insert_resource(spade::DebugSpade(args.spade.then_some(args.streak.unwrap_or(0))))
+            .insert_resource(spade::DebugStreak(args.streak))
             .insert_resource(title::DebugTitle(args.title))
             .add_plugins((
                 input::InputPlugin,

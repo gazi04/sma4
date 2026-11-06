@@ -62,6 +62,8 @@ struct MapArt {
     stars: Vec<Handle<Image>>,
     /// Map objects (Hammer Bros), [`sma4_assets::map_object_cell`].
     objects: Vec<Handle<Image>>,
+    /// The spade panel by streak count, [count][frame] (`sma4_assets::map_spade_path`).
+    spade: Vec<Vec<Handle<Image>>>,
     /// The metatile atlas on the CPU side, for the Warp Whistle's wave, and its picture.
     atlas: sma4_assets::Rgba,
     wave: Handle<Image>,
@@ -219,6 +221,23 @@ fn build_world(
             a.sprites.cells(s, s).into_iter().map(|c| images.add(sprite_image(c))).collect()
         })
         .unwrap_or_default();
+    let spade = match sma4_assets::Rgba::read_png(&sma4_assets::map_spade_path(dir, world)) {
+        Ok(sheet) => (0..sheet.height / 16)
+            .map(|look| {
+                let o = (look * 16 * sheet.width * 4) as usize;
+                let row = sma4_assets::Rgba {
+                    width: sheet.width,
+                    height: 16,
+                    pixels: sheet.pixels[o..o + (16 * sheet.width * 4) as usize].to_vec(),
+                };
+                row.cells(16, 16).into_iter().map(|c| images.add(sprite_image(c))).collect()
+            })
+            .collect(),
+        Err(e) => {
+            warn!("{e}; re-run sma4-extract for the spade panel's looks");
+            Vec::new()
+        }
+    };
     let origin = asset.origin;
     let wave = images.add(Image::new(
         Extent3d { width: SCREEN_W, height: SCREEN_H, depth_or_array_layers: 1 },
@@ -286,7 +305,7 @@ fn build_world(
             .with_origin(origin)
             .with_objects(objects_asset.as_ref().map(|a| a.objects.as_slice()).unwrap_or(&[]));
     let atlas = asset.atlas;
-    commands.insert_resource(MapArt { tiles, mario, spin, origin, iris, stars, objects, atlas, wave, panel, items });
+    commands.insert_resource(MapArt { tiles, mario, spin, origin, iris, stars, objects, spade, atlas, wave, panel, items });
     Some(map)
 }
 
@@ -335,7 +354,13 @@ fn sync_map(
         if shown {
             sprite.color = tint;
             let (c, r) = ((tile.0 % map.cols) as i32, (tile.0 / map.cols) as i32);
-            let image = &art.tiles[frame][map.tile(c, r) as usize];
+            let id = map.tile(c, r);
+            // The spade panel shows the streak's suit (0x0800AFC4).
+            let look = (game.0.spade_streak.count as usize).min(sma4_assets::MAP_SPADE_LOOKS as usize - 1);
+            let image = match art.spade.get(look).and_then(|l| l.get(frame)) {
+                Some(image) if id == sma4_assets::MAP_SPADE_TILE && look > 0 => image,
+                _ => &art.tiles[frame][id as usize],
+            };
             if sprite.image != *image {
                 sprite.image = image.clone();
             }

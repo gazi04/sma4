@@ -72,11 +72,25 @@ const MARIO_SLOTS: std::ops::Range<u32> = 68..70;
 const GAME_OVER_LOOK: u32 = MAP_STATE + 0x17;
 const SPIN_TIMER: u32 = MAP_STATE + 0x21;
 const LOWER_SLOT: std::ops::Range<u32> = 69..70;
+/// The spade streak (0x03002CD8): bits 2-5 the count. The map init (0x0800AFC4) then puts
+/// one tile of LZ77 0x081F9CA8 (offset 0x08135CB4[min(count, 3)] + frame * 0x80) over BG
+/// tile 0x68 in every animation frame (0x0201ED00 + frame * 0x1000), and 0x0800B648 gives
+/// BG palette 12 the colours 0x0821E980 when the count is odd or 3 and up (palette 4's
+/// otherwise): a heart, club or diamond on the spade panel instead of the spade.
+const SPADE_STREAK: u32 = 0x0300_2CD8;
+/// Animation frames as the map init leaves them in RAM.
+const ANIM_RAM: u32 = 0x0201_E000;
 /// Completion bits a game over keeps (0x08012458): 0x0813C12E[world * 0x40 + column].
 const GAME_OVER_KEEP: u32 = 0x0813_C12E;
 
 fn setup(m: &mut Machine, world: u8) -> Result<(), ExtractError> {
+    setup_streak(m, world, 0)
+}
+
+/// The map init with the spade streak 0x03002CD8 = `streak` (bits 2-5: the count).
+fn setup_streak(m: &mut Machine, world: u8, streak: u8) -> Result<(), ExtractError> {
     m.clear_ram()?;
+    m.w8(SPADE_STREAK, streak)?;
     for (ptr, val) in [
         (PLAYER_PTR, 0x0203_A000),
         (PLAYER_GFX_PTR, 0x0203_B000),
@@ -361,6 +375,13 @@ pub fn extract_world_map(
         }
     }
 
+    let spade_looks = spade_looks(m, world, &entries, char_base)?;
+    spade_looks
+        .write_png(&sma4_assets::map_spade_path(out_dir, world))
+        .map_err(|e| ExtractError(e.to_string()))?;
+    // Back to the plain map for what follows.
+    setup(m, world)?;
+
     let game_over_keep = (0..cols as u32)
         .map(|c| rom.u8(GAME_OVER_KEEP + world as u32 * 0x40 + c))
         .collect::<Result<Vec<u8>, _>>()?;
@@ -389,6 +410,28 @@ pub fn extract_world_map(
     }
     .write(out_dir, world)
     .map_err(|e| ExtractError(e.to_string()))
+}
+
+/// The spade panel (metatile `MAP_SPADE_TILE`) by streak count 0-3 (rows) and animation
+/// frame (columns), from the map init run with each count.
+fn spade_looks(m: &mut Machine, world: u8, entries: &[[u16; 4]], char_base: u32) -> Result<Rgba, ExtractError> {
+    use sma4_assets::{MAP_SPADE_LOOKS, MAP_SPADE_TILE};
+    let w = 16 * MAP_ANIM_FRAMES;
+    let mut px = vec![0u8; (w * 16 * MAP_SPADE_LOOKS * 4) as usize];
+    for count in 0..MAP_SPADE_LOOKS {
+        setup_streak(m, world, (count as u8) << 2)?;
+        let pal = parse_palette(&m.read(BG_PAL_BUFFER, 0x200)?);
+        for f in 0..MAP_ANIM_FRAMES {
+            let mut chars = m.read(char_base, 0x8000)?;
+            chars[..ANIM_BYTES].copy_from_slice(&m.read(ANIM_RAM + f * ANIM_BYTES as u32, ANIM_BYTES)?);
+            let cell = metatile(&chars, &pal, entries[MAP_SPADE_TILE as usize]);
+            for y in 0..16 {
+                let dst = (((count * 16 + y) * w + f * 16) * 4) as usize;
+                px[dst..dst + 64].copy_from_slice(&cell[(y * 64) as usize..(y * 64 + 64) as usize]);
+            }
+        }
+    }
+    Ok(Rgba { width: w, height: 16 * MAP_SPADE_LOOKS, pixels: px })
 }
 
 /// World-start stars (0x08030488): OAM slots 38-45 (0x03002EF8), 16x16 (attr1 0x4000),

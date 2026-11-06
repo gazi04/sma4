@@ -797,6 +797,13 @@ pub struct WorldMapAsset {
     pub stars: Rgba,
 }
 
+/// The map's spade panel by the spade streak's count (0x03002CD8 bits 2-5, at most 3):
+/// `MAP_SPADE_LOOKS` rows of 16x16 cells (count 0 the spade, 1 a heart, 2 a club, 3 a
+/// diamond), one column per animation frame.
+pub fn map_spade_path(dir: &Path, world: u8) -> PathBuf {
+    dir.join("map").join(format!("world{}_spade.png", world + 1))
+}
+pub const MAP_SPADE_LOOKS: u32 = 4;
 /// The map's item panel (L on the map): `panel` (BG0's panel map, 256 px wide, line 0 at
 /// the top) and `items` (cells of 16x16: row 0 the icons in the panel by item id, row 1
 /// the cursor's coloured items; after the `ITEM_KINDS` items, the whirlwind's two frames
@@ -805,6 +812,9 @@ pub fn item_panel_path(dir: &Path, name: &str) -> PathBuf {
     dir.join("map").join(format!("item_{name}.png"))
 }
 pub const ITEM_KINDS: u32 = 0x10;
+
+/// The spade panel's map tile.
+pub const MAP_SPADE_TILE: u8 = 0xE8;
 
 /// Version 1 lacks `game_over_keep` (read as "keep everything").
 const MAP_MAGIC_V1: &[u8; 8] = b"SMA4WM01";
