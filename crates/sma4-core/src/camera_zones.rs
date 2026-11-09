@@ -7,6 +7,14 @@
 //!   0 (header byte 6 bits 5-6, 0x03003CB2), once at 0xF0 or lower it does not go above
 //!   0xF0 unless the player flies (0x08099624); mode 1 (World 1-5) follows up and down
 //!   freely. Never above the level's top (+0xDA) nor below its bottom - 0x9F.
+//! * Scroll mode 2 (the fortress, 1-1's bonus room, the Hammer Bro arenas, the Toad
+//!   Houses; 0x08099A48) keeps the camera in a window 0x20 px tall from +0x9C, which is
+//!   0xF0 if the camera is at 0xF0 or lower when it is set, else the level's top
+//!   (0x080A86B0: at load, after a pipe's way out down, at Boom Boom's lock). It moves at
+//!   most 3 px a frame up and 4 down, whatever the player's speed. At load (0x08014F20)
+//!   the camera starts at 0x20 if the level's start camera is above 0xB0, else 0xF0 (0x110
+//!   with the player 256 px or more down). The Toad Houses (0x102, 0x106) hold it at
+//!   0x100.
 //! * 0xC8 (init 0x080589A8, main 0x08058A04): a box `w` x `h` tiles (extra byte 1, high /
 //!   low nibble) from x - 8, rows down to its own; while the player's frame is in it, the
 //!   camera heads for y - extra byte 2 (clamped to the level) at 3 px a frame instead
@@ -36,6 +44,19 @@ const VIEW_LAST_ROW: i32 = 0x9F;
 const GROUND_TOP: i32 = 0xF0;
 /// 0x08172D6F: follow speed by |speed byte| >> 4.
 const FOLLOW_SPEED: [i32; 9] = [2, 2, 3, 4, 5, 6, 7, 7, 32];
+/// Scroll mode 2 (0x08099A48): the window's height below +0x9C and its steps up / down.
+const WINDOW: i32 = 0x20;
+const WINDOW_UP: i32 = 3;
+const WINDOW_DOWN: i32 = 4;
+/// 0x08014F20, mode 2: a start camera below this starts at 0x20, else at 0xF0 (or 0x110
+/// with the player's y at 0x100 or lower).
+const WINDOW_START_HIGH: i32 = 0xB0;
+const WINDOW_START_TOP: i32 = 0x20;
+const WINDOW_START_LOW: i32 = 0x110;
+/// 0x08099A48 holds the camera of the levels whose data is at 0x0815B574 (0x102, the
+/// map's Toad Houses) and 0x0815BA83 (0x106, World 1-3's hidden one) at 0x100.
+const HOUSES: [u16; 2] = [0x102, 0x106];
+const HOUSE_CAMERA_Y: i32 = 0x100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Lock {
@@ -80,13 +101,18 @@ pub struct CameraZones {
     /// The camera y (0x03003754) and its value after last frame (0x03003CE0).
     pub y: i32,
     last: i32,
+    /// Scroll mode 2's window top (player +0x9C, 0x080A86B0).
+    base: i32,
+    /// The level id (0x03003B0A): 0x08099A48 special-cases the Toad Houses.
+    level: u16,
 }
 
 impl CameraZones {
-    /// The triggers of an enemy list in a level with these settings, the camera starting
-    /// at `y`. A band's left end pairs with the nearest right end after it with the same
-    /// slot (0x0805780C).
-    pub fn new(list: &[EnemySpawn], params: CameraParams, y: i32) -> Self {
+    /// The triggers of an enemy list in level `level` with these settings, the camera
+    /// starting at `y` (the header's, 0x0813600E) with the player at `player_y` (frame y).
+    /// A band's left end pairs with the nearest right end after it with the same slot
+    /// (0x0805780C).
+    pub fn new(list: &[EnemySpawn], params: CameraParams, y: i32, level: u16, player_y: i32) -> Self {
         let lowest = params.bottom as i32 - VIEW_LAST_ROW;
         let at = |s: &EnemySpawn| (s.col as i32 * TILE_PX, s.row as i32 * TILE_PX);
         let locks = list
@@ -123,7 +149,30 @@ impl CameraZones {
                 })
             })
             .collect();
-        Self { params, locks, bands, lock: None, y, last: y }
+        let mut z = Self { params, locks, bands, lock: None, y, last: y, base: 0, level };
+        // 0x08014F20: +0x9C from the header's camera, then mode 2's own start (unless the
+        // camera y is fixed, +0xC8 bit 15).
+        z.rebase();
+        if params.mode == 2 && params.fixed & 0x8000 == 0 {
+            let y = if y < WINDOW_START_HIGH {
+                WINDOW_START_TOP
+            } else if player_y >= 0x100 {
+                WINDOW_START_LOW
+            } else {
+                GROUND_TOP
+            };
+            z.set(y);
+        }
+        z
+    }
+
+    /// 0x080A86B0: in scroll mode 2, the window starts at 0xF0 if the camera is there or
+    /// lower, else at the level's top (after a pipe's way out down or sideways, 0x080A8764
+    /// / 0x080A8CC0, and when Boom Boom locks the camera, 0x0806CFEC).
+    pub fn rebase(&mut self) {
+        if self.params.mode == 2 {
+            self.base = if self.y >= GROUND_TOP { GROUND_TOP } else { self.params.top as i32 };
+        }
     }
 
     /// Puts the camera at `y` (a pipe's arrival).
@@ -133,11 +182,17 @@ impl CameraZones {
     }
 
     /// Puts the camera where following the player would leave it (debug starts): the
-    /// player at the dead zone's bottom, within the level and below 0xF0 if it gets there.
+    /// player at the dead zone's bottom, within the level. In scroll mode 2 the window is
+    /// the one (from the top or from 0xF0) that comes closest, as if he had come in by a
+    /// pipe there.
     pub fn settle(&mut self, player: &Player) {
         let p = self.params;
         let lowest = p.bottom as i32 - VIEW_LAST_ROW;
-        let y = (player.frame().1 - p.dead_zone[1] as i32).clamp(p.top as i32, lowest);
+        let mut y = (player.frame().1 - p.dead_zone[1] as i32).clamp(p.top as i32, lowest);
+        if p.mode == 2 && !HOUSES.contains(&self.level) {
+            self.base = if y > p.top as i32 + WINDOW { GROUND_TOP } else { p.top as i32 };
+            y = y.clamp(self.base, (self.base + WINDOW).min(lowest).max(self.base));
+        }
         self.set(y);
     }
 
@@ -171,12 +226,15 @@ impl CameraZones {
             self.last = self.y;
             return;
         }
+        if p.mode == 2 {
+            self.window(player);
+            return;
+        }
         // 0x0809869C picks the flying dead zone while the player flies (+0xC6), and
         // 0x08099624 also below 0xF0, where the camera may rise to the level's top. Scroll
         // mode 1 (0x080992A6) skips 0x08099624: the normal dead zone (classic game,
         // 0x03003A2F clear) and the level's top, wherever the camera is.
         let flying = player.flight != 0;
-        // TODO(re): mode 2's windowed scroll (0x08099A48) still takes the mode-0 path.
         let (zone, top) = if p.mode == 1 {
             (p.dead_zone, p.top as i32)
         } else if self.y < GROUND_TOP || flying {
@@ -203,16 +261,56 @@ impl CameraZones {
         } else if y < top {
             y = top;
         }
-        // 0x08099C60: the first armed band (by slot) keeps the camera above its limit.
+        let y = self.band_limit(y);
+        // TODO(re): 0x080A1A4C's scroll stops on tiles (none in World 1-5 checked).
+        self.y = y;
+        self.last = y;
+    }
+
+    /// 0x08099C60: the first armed band (by slot) keeps the camera above its limit.
+    fn band_limit(&self, mut y: i32) -> i32 {
         if let Some(b) = (0..4).find_map(|slot| self.bands.iter().find(|b| b.slot == slot && b.armed)) {
-            let limit = b.limit.max(p.top as i32);
+            let limit = b.limit.max(self.params.top as i32);
             if limit < self.y {
                 y = self.y + (limit - self.y).max(-TRIGGER_STEP);
             } else if y >= self.y && limit <= y {
                 y = limit;
             }
         }
-        // TODO(re): 0x080A1A4C's scroll stops on tiles (none in World 1-5 checked).
+        y
+    }
+
+    /// Scroll mode 2 (0x080992A6 -> 0x08099A48): the classic dead zone (+0xD0 / +0xD4,
+    /// 0x03003A2F clear) at a fixed 3 px a frame up and 4 down (3 up at once while the
+    /// player flies upward, +0xC6), kept within the level and the window from +0x9C.
+    fn window(&mut self, player: &Player) {
+        let p = self.params;
+        let zone = p.dead_zone.map(i32::from);
+        let d = player.frame().1 - self.last;
+        let delta = if player.flight != 0 && d < 0 {
+            -WINDOW_UP
+        } else if d < zone[0] {
+            (d - zone[0]).max(-WINDOW_UP)
+        } else if d < zone[1] {
+            0
+        } else {
+            (d - zone[1]).min(WINDOW_DOWN)
+        };
+        let lowest = p.bottom as i32 - VIEW_LAST_ROW;
+        let mut y = self.y + delta;
+        if y >= lowest {
+            y = lowest;
+        } else if y < self.base {
+            y = self.base;
+        } else if y >= self.base + WINDOW {
+            y = self.base + WINDOW;
+        }
+        let mut y = self.band_limit(y);
+        // TODO(re): player +0x104 bit 0 leaves 0x03003754 alone and sets 0x03003CE0 to
+        // 0x108; level 0x240 (Toad's spade room, 0x081628A0) holds 0x110.
+        if HOUSES.contains(&self.level) {
+            y = HOUSE_CAMERA_Y;
+        }
         self.y = y;
         self.last = y;
     }
@@ -237,6 +335,8 @@ mod tests {
             ],
             PARAMS,
             y,
+            0x82,
+            0,
         )
     }
 
@@ -251,7 +351,7 @@ mod tests {
 
     #[test]
     fn mode_0_follows_down_and_stays_at_0xf0_and_below() {
-        let mut z = CameraZones::new(&[], CameraParams { mode: 0, ..PARAMS }, 0);
+        let mut z = CameraZones::new(&[], CameraParams { mode: 0, ..PARAMS }, 0, 0, 0);
         let p = big_at(10 * TILE_PX, 0x120);
         for _ in 0..200 {
             z.step(&p);
@@ -279,6 +379,61 @@ mod tests {
             z.step(&p);
         }
         assert_eq!(z.y, 0x80 - 0x10, "stops with the player at the dead zone's top");
+    }
+
+    /// 1-1's bonus room (0x23) and the fortress (0x1CB): scroll mode 2.
+    const BONUS_ROOM: CameraParams =
+        CameraParams { bottom: 0x19F, fixed: 0, dead_zone: [0x20, 0x40], dead_zone_flying: [0x20, 0x40], top: 0, mode: 2 };
+    const FORTRESS: CameraParams = CameraParams { dead_zone: [0x10, 0x30], dead_zone_flying: [0x10, 0x30], ..BONUS_ROOM };
+
+    #[test]
+    fn mode_2_starts_high_and_stays_in_a_window_0x20_tall_from_the_top() {
+        // The header's camera 0x30 is above 0xB0: the camera starts at 0x20, the window at
+        // the level's top.
+        let mut z = CameraZones::new(&[], BONUS_ROOM, 0x30, 0x23, 0x150);
+        assert_eq!(z.y, 0x20);
+        // Far below: the camera does not leave the window.
+        let p = big_at(10 * TILE_PX, 0x180);
+        for _ in 0..50 {
+            z.step(&p);
+        }
+        assert_eq!(z.y, 0x20);
+        // Up high: 3 px a frame, down to the window's top.
+        let p = big_at(10 * TILE_PX, 0x08);
+        z.step(&p);
+        assert_eq!(z.y, 0x1D);
+        for _ in 0..50 {
+            z.step(&p);
+        }
+        assert_eq!(z.y, 0);
+    }
+
+    #[test]
+    fn mode_2_follows_down_4_px_a_frame_and_holds_the_toad_houses() {
+        // The fortress: a low start camera puts the window at 0xF0; the level's bottom
+        // (0x19F - 0x9F = 0x100) comes before the window's.
+        let mut z = CameraZones::new(&[], FORTRESS, 0xF0, 0x1CB, 0xC0);
+        assert_eq!(z.y, 0xF0);
+        let p = big_at(10 * TILE_PX, 0x150);
+        z.step(&p);
+        assert_eq!(z.y, 0xF4, "0x150 - 0xF0 - 0x30 = 0x30, at most 4 down");
+        for _ in 0..10 {
+            z.step(&p);
+        }
+        assert_eq!(z.y, 0x100);
+        let p = big_at(10 * TILE_PX, 0x20);
+        for _ in 0..50 {
+            z.step(&p);
+        }
+        assert_eq!(z.y, 0xF0, "not above the window");
+        // The player 256 px or more down starts the camera at 0x110 (the level's bottom
+        // pulls it back on the first frame).
+        let z = CameraZones::new(&[], FORTRESS, 0xF0, 0x1CB, 0x100);
+        assert_eq!(z.y, 0x110);
+        // World 1-3's hidden Toad House.
+        let mut z = CameraZones::new(&[], CameraParams { bottom: 0x1AF, ..FORTRESS }, 0xF0, 0x106, 0x110);
+        z.step(&big_at(10 * TILE_PX, 0x130));
+        assert_eq!(z.y, 0x100);
     }
 
     #[test]

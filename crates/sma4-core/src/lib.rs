@@ -309,7 +309,8 @@ impl Game {
         self.fortress_clear = None;
         self.clock_stopped = false;
         let start_y = self.level.start_camera_y.unwrap_or(0);
-        self.camera_zones = camera_zones::CameraZones::new(enemies, self.level.camera, start_y);
+        self.camera_zones =
+            camera_zones::CameraZones::new(enemies, self.level.camera, start_y, self.level.id, self.player.frame().1);
     }
 
     /// Arrives through a pipe in the other area of the level (0x08005690): its objects
@@ -322,11 +323,8 @@ impl Game {
         (self.level_coins, self.coin_quota, self.advance_taken) = coins;
         self.start = start;
         self.player = player;
-        // The camera the ROM sets on arrival (0x08005290); a room with fixed camera limits
-        // keeps it, and an autoscroll starting there starts from it.
-        if self.level.camera_x.is_some() {
-            self.level.camera_y = Some(to.exit.camera_y as i32);
-        }
+        // The camera the ROM sets on arrival (0x08005290); an autoscroll starting there
+        // starts from it.
         self.level.start_camera_y = Some(to.exit.camera_y as i32);
         self.camera_zones.set(to.exit.camera_y as i32);
         pipes::place(&mut self.player, &to.exit);
@@ -545,6 +543,8 @@ impl Game {
             let ev = b.step(&self.level, &self.player, camera_x, self.player.on_ground, stomp, frame);
             if let Some(c) = ev.lock_camera {
                 self.camera_limits = (Some(c), Some(c));
+                // 0x0806CFEC: scroll mode 2's window from where the camera is.
+                self.camera_zones.rebase();
                 self.player.vx = 0;
                 if b.phase == 1 {
                     self.boss_freeze = true;
@@ -1058,6 +1058,11 @@ impl Game {
         // holds too); at the end of the way in, the host switches the area.
         if let Some(pipe) = self.pipe {
             self.pipe = pipe.step(&mut self.player);
+            // 0x080A8764 / 0x080A8CC0: the end of a way out down or sideways sets scroll
+            // mode 2's window from the camera (the way out up, 0x080A86F4, does not).
+            if matches!(pipe, Pipe::Exit { dir, .. } if dir != pipes::UP) && self.pipe.is_none() {
+                self.camera_zones.rebase();
+            }
             if pipe != Pipe::Switching && self.pipe == Some(Pipe::Switching) {
                 let world = (self.status.world as usize).saturating_sub(1);
                 self.pending_area = if self.pipe_to_end {
