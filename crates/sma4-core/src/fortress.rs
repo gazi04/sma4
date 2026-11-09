@@ -372,25 +372,50 @@ impl Spark {
     }
 }
 
-/// A puff of smoke (projectile 0x16, 0x0808F568): two 8x16 OBJs, tile 0x08170B64[life >> 3]
-/// (0x83, 0x82, 0x81), 0x17 frames.
+/// A puff of smoke (projectile 0x16, 0x0808F568): two 8x16 OBJs, the right one mirrored,
+/// tile 0x08170B64[life >> 3] (0x83, 0x82, 0x81), palette 1. Each frame the handler clamps
+/// +0x14 to 0x17, counts it down and draws it, down to 0; at 0 it frees the slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Puff {
     pub x: i32,
     pub y: i32,
     pub life: u8,
+    /// The projectile slot it holds, when it was a projectile hitting a player with the
+    /// star (0x0808CA84 turns the slot itself into the puff).
+    pub slot: PuffSlot,
+}
+
+/// Which projectile slot a puff keeps busy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PuffSlot {
+    /// None the port tracks.
+    None,
+    /// A fire plant's fireball's (one of the four it may use, 0x0808C950).
+    Fireball,
+    /// A hammer's or boomerang's.
+    Slot(u8),
 }
 
 pub const PUFF_LIFE: u8 = 0x17;
 
 impl Puff {
     pub fn new((x, y): (i32, i32)) -> Self {
-        Self { x, y, life: PUFF_LIFE }
+        Self { x, y, life: PUFF_LIFE, slot: PuffSlot::None }
     }
 
+    /// 0x0808CAEC with the star (+0x3D): the projectile at `(x, y)` px becomes a puff
+    /// (0x0808CA84: type 0x16, +0x14 = 0x1F, clamped to 0x17 by the next frame's handler).
+    pub fn from_projectile((x, y): (i32, i32), slot: PuffSlot) -> Self {
+        Self { x, y, life: PUFF_LIFE, slot }
+    }
+
+    /// One frame of 0x0808F568: false once the slot is freed (+0x14 already 0).
     pub fn step(&mut self) -> bool {
+        if self.life == 0 {
+            return false;
+        }
         self.life -= 1;
-        self.life != 0
+        true
     }
 
     /// 0 (big) .. 2 (small).

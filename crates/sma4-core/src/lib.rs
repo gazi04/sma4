@@ -397,6 +397,44 @@ impl Game {
         (x, y)
     }
 
+    /// 0x0808CAEC with the star: every projectile touching the player becomes a puff.
+    fn puff_projectiles(&mut self) {
+        use fortress::{Puff, PuffSlot};
+        let player = &self.player;
+        let puffs = &mut self.puffs;
+        self.fireballs.retain(|f| {
+            let hit = f.touches(player);
+            if hit {
+                puffs.push(Puff::from_projectile(f.px(), PuffSlot::Fireball));
+            }
+            !hit
+        });
+        self.boomerangs.retain(|b| {
+            let hit = b.touches(player);
+            if hit {
+                puffs.push(Puff::from_projectile(b.px(), PuffSlot::Slot(b.slot)));
+            }
+            !hit
+        });
+        self.hammers.retain(|h| {
+            let hit = h.touches(player);
+            if hit {
+                puffs.push(Puff::from_projectile(h.px(), PuffSlot::Slot(h.slot)));
+            }
+            !hit
+        });
+    }
+
+    /// Projectile slots held by puffs: all of them, those of fire plants' fireballs, and
+    /// the numbered ones.
+    fn puff_slots(&self) -> (usize, usize, Vec<u8>) {
+        use fortress::PuffSlot;
+        let held = self.puffs.iter().filter(|p| p.slot != PuffSlot::None).count();
+        let fire = self.puffs.iter().filter(|p| p.slot == PuffSlot::Fireball).count();
+        let numbered = self.puffs.iter().filter_map(|p| if let PuffSlot::Slot(s) = p.slot { Some(s) } else { None }).collect();
+        (held, fire, numbered)
+    }
+
     /// The player takes a hit: big shrinks to small, small dies.
     pub fn hurt(&mut self) {
         // 0x0804A5F4 ignores hits while the star (+0x3D) runs.
@@ -599,6 +637,7 @@ impl Game {
             && self.micro_goombas.is_empty()
             && self.boomerangs.is_empty()
             && self.hammers.is_empty()
+            && self.puffs.iter().all(|p| p.slot == fortress::PuffSlot::None)
             && !self.enemies.iter().any(|e| enemies::is_bro(e.kind))
         {
             let x = self.camera().0 + if self.player.x < fortress::CHEST_SIDE * player::SUB { 0xC0 } else { 0x30 };
@@ -1315,9 +1354,18 @@ impl Game {
         }
         // 0x08055938 takes a free slot among the first four, or does not spit; 0x0808C8FC
         // gives a Micro-Goomba any free slot.
+        // Puffs left by projectiles that hit a player with the star keep their slots.
+        let (puff_held, puff_fire, puff_numbered) = self.puff_slots();
         for e in &mut self.enemies {
-            let used = self.fireballs.len() + self.micro_goombas.len() + self.boomerangs.len() + self.hammers.len();
-            let taken: Vec<u8> = self.boomerangs.iter().map(|b| b.slot).chain(self.hammers.iter().map(|h| h.slot)).collect();
+            let used =
+                self.fireballs.len() + self.micro_goombas.len() + self.boomerangs.len() + self.hammers.len() + puff_held;
+            let taken: Vec<u8> = self
+                .boomerangs
+                .iter()
+                .map(|b| b.slot)
+                .chain(self.hammers.iter().map(|h| h.slot))
+                .chain(puff_numbered.iter().copied())
+                .collect();
             // 0x08068B04 -> 0x0808C8FC: any free slot.
             if let Some(mut b) = e.thrown.take()
                 && used < enemies::PROJECTILE_SLOTS
@@ -1327,7 +1375,13 @@ impl Game {
                 self.boomerangs.push(b);
             }
             // 0x08068A84 -> 0x0808C8FC: the same.
-            let taken: Vec<u8> = self.boomerangs.iter().map(|b| b.slot).chain(self.hammers.iter().map(|h| h.slot)).collect();
+            let taken: Vec<u8> = self
+                .boomerangs
+                .iter()
+                .map(|b| b.slot)
+                .chain(self.hammers.iter().map(|h| h.slot))
+                .chain(puff_numbered.iter().copied())
+                .collect();
             if let Some(mut h) = e.hammer.take()
                 && used < enemies::PROJECTILE_SLOTS
                 && let Some(slot) = enemies::free_slot(taken.iter().copied())
@@ -1335,9 +1389,10 @@ impl Game {
                 h.slot = slot;
                 self.hammers.push(h);
             }
-            let used = self.fireballs.len() + self.micro_goombas.len() + self.boomerangs.len() + self.hammers.len();
+            let used =
+                self.fireballs.len() + self.micro_goombas.len() + self.boomerangs.len() + self.hammers.len() + puff_held;
             if let Some(f) = e.spit.take()
-                && self.fireballs.len() < enemies::FIREBALL_SLOTS
+                && self.fireballs.len() + puff_fire < enemies::FIREBALL_SLOTS
                 && used < enemies::PROJECTILE_SLOTS
             {
                 self.fireballs.push(f);
@@ -1449,13 +1504,18 @@ impl Game {
         if !hidden && self.step_fortress() {
             hurt = true;
         }
-        // 0x0808CC9C -> 0x0808CAEC: a fireball hurts like an enemy (0x0804A5F4) and flies on.
-        if !hidden
-            && (self.fireballs.iter().any(|f| f.touches(&self.player))
+        // 0x0808CC9C -> 0x0808CAEC: a fireball, boomerang or hammer hurts like an enemy
+        // (0x0804A5F4) and flies on; with the star (+0x3D) it turns into a puff of smoke in
+        // its own slot instead (0x0808CA84, sound 0x7F).
+        if !hidden {
+            if self.player.star != 0 {
+                self.puff_projectiles();
+            } else if self.fireballs.iter().any(|f| f.touches(&self.player))
                 || self.boomerangs.iter().any(|b| b.touches(&self.player))
-                || self.hammers.iter().any(|h| h.touches(&self.player)))
-        {
-            hurt = true;
+                || self.hammers.iter().any(|h| h.touches(&self.player))
+            {
+                hurt = true;
+            }
         }
         if hurt {
             self.hurt();
@@ -1979,6 +2039,38 @@ mod tests {
         g.set_time_limit(200);
         g.battle = Some(9);
         g
+    }
+
+    #[test]
+    fn a_projectile_hitting_the_star_turns_into_a_puff_that_holds_its_slot() {
+        let mut g = battle();
+        g.enemies.clear();
+        g.player.star = 0xFF;
+        g.camera_zones.settle(&g.player);
+        let form = g.player.form;
+        let (fx, fy) = g.player.frame();
+        // A fireball on the player's frame (0x0808CC9C: x - frame x + 6 < 0x10, y 0x12 down).
+        g.fireballs.push(enemies::Fireball { x: fx * player::SUB, y: (fy + 0x12) * player::SUB, vx: 0, vy: 0, age: 0 });
+        g.step(Buttons::empty());
+        assert!(g.fireballs.is_empty(), "the slot became the puff");
+        assert_eq!(g.puffs.len(), 1);
+        let p = g.puffs[0];
+        assert_eq!((p.x, p.y, p.life, p.slot), (fx, fy + 0x12, fortress::PUFF_LIFE, fortress::PuffSlot::Fireball));
+        assert_eq!(g.player.form, form, "no hit");
+        // 0x0808F568: drawn with +0x14 = 0x16 down to 0, then the slot is free.
+        let mut shown = 0;
+        while !g.puffs.is_empty() {
+            g.step(Buttons::empty());
+            shown += g.puffs.len();
+        }
+        assert_eq!(shown, 0x17);
+        // Without the star it hurts and flies on.
+        g.player.star = 0;
+        g.fireballs.push(enemies::Fireball { x: fx * player::SUB, y: (fy + 0x12) * player::SUB, vx: 0, vy: 0, age: 0 });
+        g.step(Buttons::empty());
+        assert!(g.puffs.is_empty());
+        assert_eq!(g.fireballs.len(), 1);
+        assert!(g.invulnerable > 0 || g.dying.is_some(), "hurt");
     }
 
     #[test]
