@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 pub mod castle;
 pub use castle::*;
+pub mod ending;
+pub use ending::*;
 
 pub const METATILE: u32 = 16;
 pub const DEFAULT_DIR: &str = "assets/extracted";

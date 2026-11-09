@@ -3,6 +3,7 @@
 
 pub mod advance_coin;
 pub mod airship;
+pub mod ending;
 pub mod autoscroll;
 pub mod blocks;
 pub mod boom_boom;

@@ -5,6 +5,7 @@
 
 mod castle;
 mod emu;
+mod ending;
 mod level;
 mod oam;
 mod objects;
@@ -145,6 +146,7 @@ fn run(args: &Args) -> Result<(), String> {
         levels.push((r.level, r.tileset, r.enemies));
     }
     let mut n = 0;
+    let mut letter = None;
     while n < levels.len() {
         let (id, tileset, enemies) = levels[n];
         let asset = match level::extract(&rom, &mut m, id, tileset, enemies) {
@@ -196,6 +198,7 @@ fn run(args: &Args) -> Result<(), String> {
         // The King's castle: the throne room (its junction chain leads on to the airship).
         if id == THRONE_ROOM {
             castle::extract_throne(&rom, &mut m, &args.out, id).map_err(|e| e.0)?;
+            letter = Some(ending::extract_letter(&rom, &mut m, &args.out).map_err(|e| e.0)?);
         }
         if id == AIRSHIP_INTRO {
             castle::extract_intro(&mut m, &args.out, id).map_err(|e| e.0)?;
@@ -266,6 +269,15 @@ fn run(args: &Args) -> Result<(), String> {
             title::extract(&rom, &mut m, &args.out).map_err(|e| e.0)?;
         }
         n += 1;
+    }
+
+    // After the castle: the letter (taken with the throne room) and the save screen.
+    if let Some(letter) = letter {
+        ending::extract(&rom, &mut m, &args.out, letter).map_err(|e| e.0)?;
+    }
+    // World 2's map, where the game goes after World 1's castle.
+    if args.levels.is_empty() {
+        worldmap::extract_world_map(&rom, &mut m, 1, &args.out).map_err(|e| e.0)?;
     }
 
     let sheets = extract_gfx(&rom, args)?;
