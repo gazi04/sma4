@@ -5,6 +5,7 @@
 //! The game reads only extracted assets (default `assets/extracted/`, created once by
 //! `sma4-extract` from the user's own ROM); it never opens the ROM itself.
 
+mod castle;
 mod enemies;
 mod fortress;
 mod goal;
@@ -54,6 +55,8 @@ const USAGE: &str = "usage: sma4 [--assets <dir>] [--level <hex id>] [--viewer]
   --map-bro <col>,<row>  debug: put the world map's Hammer Bro on that cell
   --map-at <col>,<row>  debug: put Mario on that world-map cell (e.g. 12,3: a Toad House)
   --popup <type>  debug: show a score popup (1-15) over the player at the start
+  --wand  debug: drop Larry's wand at the start (his cabin is level 213; catching it runs
+          LEVEL CLEARED! and the clock x 200 tally)
   --title  debug: start on the title screen (where the game-over menu's QUIT goes)
   --spade  debug: start in the spade panel's game (Toad's room)
   --streak <n>  debug: the spade streak count so far (0-7: the bonus rounds from 3; the map's
@@ -95,6 +98,7 @@ struct Args {
     spade: bool,
     streak: Option<u8>,
     title: bool,
+    wand: bool,
 }
 
 fn parse_args() -> Option<Args> {
@@ -122,6 +126,7 @@ fn parse_args() -> Option<Args> {
         spade: false,
         streak: None,
         title: false,
+        wand: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -158,6 +163,7 @@ fn parse_args() -> Option<Args> {
             "--popup" => args.popup = Some(it.next()?.parse().ok()?),
             "--spade" => args.spade = true,
             "--title" => args.title = true,
+            "--wand" => args.wand = true,
             "--streak" => args.streak = Some(it.next()?.parse().ok()?),
             "--form" => args.form = it.next()?.parse().ok()?,
             "--behind" => args.behind = true,
@@ -250,13 +256,14 @@ fn main() -> AppExit {
             // A game starts on the world map; scripted and debug runs go straight in.
             .insert_resource(level::StartOptions {
                 on_map: args.map
-                    || (args.script.is_none() && args.spawn_col.is_none() && args.hit.is_none() && args.form == 0),
+                    || (args.script.is_none() && args.spawn_col.is_none() && args.hit.is_none() && args.form == 0 && !args.wand),
                 hit: args.hit,
                 form: args.form,
                 lives: args.lives,
                 behind: args.behind,
                 progress: args.progress,
                 items: args.items.clone(),
+                wand: args.wand,
             })
             .insert_resource(level::LevelRes(level))
             .insert_resource(worldmap::ClearedSpots(args.cleared.clone()))
@@ -278,6 +285,7 @@ fn main() -> AppExit {
                 worldmap::WorldMapPlugin,
                 spade::SpadePlugin,
                 title::TitlePlugin,
+                castle::CastlePlugin,
             ));
     }
     app.run()

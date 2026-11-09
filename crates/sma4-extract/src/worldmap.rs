@@ -444,12 +444,9 @@ const STAR_ATTR2: u16 = 0x2C00;
 /// Tiles A always enters on (0x0801112C checks 0x0813A616 before the thresholds).
 const ENTER_ALWAYS: u32 = 0x0813_A616;
 const ENTER_ALWAYS_LEN: u32 = 11;
-/// The King's castle: its "level" starts the airship sequence, not ported yet.
-const KINGS_CASTLE: u8 = 0xC9;
-
 /// The levels behind the world's enterable spots (course levels only: Toad houses and the
-/// spade game, whose ids have bit 15 set or tileset 15, are not levels, and the King's
-/// castle leads to the airship), first-seen order.
+/// spade game, whose ids have bit 15 set or tileset 15, are not levels; the King's castle
+/// is the throne room, whose junction chain leads to the airship), first-seen order.
 pub fn course_levels(
     rom: &Rom,
     m: &mut Machine,
@@ -479,8 +476,7 @@ pub fn course_levels(
         let enterable = always.contains(&tile) || tile >= t[(tile >> 6) as usize];
         let course = n.level & 0x8000 == 0
             && n.enemies & 0x8000 == 0
-            && n.tileset != 15
-            && tile != KINGS_CASTLE;
+            && n.tileset != 15;
         if enterable && course && !out.iter().any(|l| l.0 == n.level) {
             out.push((n.level, n.tileset, n.enemies));
         }

@@ -13,6 +13,9 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod castle;
+pub use castle::*;
+
 pub const METATILE: u32 = 16;
 pub const DEFAULT_DIR: &str = "assets/extracted";
 
@@ -1269,6 +1272,19 @@ pub const CARD_GOT_AT: (u32, u32) = (6, 6);
 pub const CARD_GOT_TILES: (u32, u32) = (20, 4);
 pub const CLEAR_CARD_AT: (u32, u32) = (23, 7);
 
+/// The glyphs of the clock tally line (0x08066C3C writes it into the same BG map): 8x8
+/// cells, the yellow digits (tiles 0x290-0x299, palette 0), the white digits (palette 15),
+/// then "x" (0x29A), the clock icon (0x29B) and "=" (0x282), palette 0.
+pub fn tally_glyphs_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("tally_glyphs.png")
+}
+pub const TALLY_DIGITS: usize = 0;
+pub const TALLY_WHITE_DIGITS: usize = 10;
+pub const TALLY_TIMES: usize = 20;
+pub const TALLY_CLOCK: usize = 21;
+pub const TALLY_EQUALS: usize = 22;
+pub const TALLY_GLYPHS: u32 = 23;
+
 /// Player frames of one power-up form (0 small, 1 big, 2 fire, 3 raccoon): 32x32 cells, one per
 /// pose slot below. The body fills the left 16 columns with the feet on the bottom row;
 /// the raccoon's tail reaches into the right half. The art faces left.
@@ -1312,14 +1328,16 @@ pub const PLAYER_CROUCH: usize = 48;
 /// Crouched in the air: the raccoon's 0x0813DE9B[tail wag +0x65 >> 2] (3 steps; the other
 /// forms keep the crouch pose).
 pub const PLAYER_CROUCH_AIR: usize = 49;
+/// Hanging on the airship's anchor (0x081737CC[form]).
+pub const PLAYER_HANG: usize = 52;
 /// Carrying a shell (0x0809EEB4): 4 walk steps 0x0813DEC0[0x0813DD6F[form] + step], the
 /// raccoon's 3 tail-wag steps in the air 0x0813DF00 (the others repeat step 0), the turn
 /// (0x32 small, 0x05 others) and the kick (0x42 small, 0x2D others), 0x08097ACC.
-pub const PLAYER_HOLD: usize = 52;
-pub const PLAYER_HOLD_WAG: usize = 56;
-pub const PLAYER_HOLD_TURN: usize = 59;
-pub const PLAYER_KICK: usize = 60;
-pub const PLAYER_FRAMES: u32 = 61;
+pub const PLAYER_HOLD: usize = 53;
+pub const PLAYER_HOLD_WAG: usize = 57;
+pub const PLAYER_HOLD_TURN: usize = 60;
+pub const PLAYER_KICK: usize = 61;
+pub const PLAYER_FRAMES: u32 = 62;
 /// Star flashing: the player is drawn in palette 7 = 0x08133210[k], k = 0 being the
 /// form's own palette (`player_path`), 1-3 in `player_star_path`.
 pub const PLAYER_STAR_PALETTES: u32 = 4;

@@ -2,9 +2,11 @@
 //! sequence must always produce the same state so it can be diffed against an emulator.
 
 pub mod advance_coin;
+pub mod airship;
 pub mod autoscroll;
 pub mod blocks;
 pub mod boom_boom;
+pub mod castle;
 pub mod camera_zones;
 pub mod crusher;
 pub mod doors;
@@ -16,7 +18,9 @@ pub mod fortress;
 pub mod goal;
 pub mod input;
 pub mod inventory;
+pub mod larry;
 pub mod level;
+pub mod obj;
 pub mod lifts;
 pub mod map_objects;
 pub mod map_stars;
@@ -24,12 +28,14 @@ pub mod pipes;
 pub mod player;
 pub mod rng;
 pub mod screens;
+pub mod ship;
 pub mod spade;
 pub mod title;
 pub mod world_map;
 pub mod status;
 pub mod toad_house;
 pub mod warp;
+pub mod wand;
 pub mod water;
 
 /// Fireball knockouts score 100 (0x08093560 with popup 5); star chains stop growing at
@@ -216,6 +222,41 @@ pub struct Game {
     pub fortress_clear: Option<goal::ClockTally>,
     /// 0x03003D0F set by Boom Boom's burst or the opened chest: the clock (0x080044B8) holds.
     clock_stopped: bool,
+    /// The castle's tables and messages (`sma4_assets::CastleAsset`); without them the
+    /// throne room is an empty room.
+    pub castle_data: Option<std::sync::Arc<sma4_assets::CastleAsset>>,
+    /// The King's throne room (list type 0x1A9).
+    pub throne: Option<castle::Throne>,
+    /// Hardware sprites of the objects whose draw routines are ported as they are, in GBA
+    /// screen pixels and OAM order (`obj`); the host draws them from the room's OBJ VRAM.
+    pub obj_sprites: Vec<obj::ObjSprite>,
+    /// The airship's cannons, cannonballs, smoke and propellers (`ship`).
+    pub ship: ship::Ship,
+    /// The autoscroll's step this frame (0x03003877 / 0x03003876), px.
+    scroll_step: (i32, i32),
+    /// The screen between the castle's rooms (`castle::Curtain`), and the room it leads to.
+    pub curtain: Option<castle::Curtain>,
+    curtain_to: Option<AreaRequest>,
+    /// The airship's intro (level 0x202, start kind 6).
+    pub intro: Option<airship::Intro>,
+    /// The background's scroll when a room sets it itself (GBA screen origin), instead of
+    /// following the camera.
+    pub bg_scroll: Option<(i32, i32)>,
+    /// Thrown up onto the airship's deck (start kind 7, player +0x45 = 4): the speed byte.
+    landing: Option<i8>,
+    /// Larry Koopa in his cabin (object 0x0E) and his rings (`larry`).
+    pub larry: Option<larry::Larry>,
+    /// Larry's wand falling in his cabin (projectile 0x10, `wand`).
+    pub wand: Option<wand::Wand>,
+    /// The wand caught: Larry's states 3-4, "LEVEL CLEARED!" and the clock tally.
+    pub wand_clear: Option<wand::Cleared>,
+    /// How many of `obj_sprites` go in front of the player (their OAM entries come before
+    /// his); the rest go behind.
+    pub obj_front: usize,
+    /// The level's layers show nothing (their camera is on empty rows: Larry's state 5).
+    pub level_hidden: bool,
+    /// BG colour 0 (BGR555) when a sequence sets it, instead of the level's backdrop.
+    pub backdrop: Option<u16>,
 }
 
 /// Autoscroll kind of the crushing ceiling (row >> 4).
@@ -260,6 +301,8 @@ impl Game {
         self.hammers.clear();
         self.debris.clear();
         self.goomba_pipes.clear();
+        self.ship = ship::Ship::default();
+        self.scroll_step = (0, 0);
         self.player.stuck = 0;
         self.invulnerable = 0;
         self.spawn = spawn;
@@ -311,6 +354,28 @@ impl Game {
         let start_y = self.level.start_camera_y.unwrap_or(0);
         self.camera_zones =
             camera_zones::CameraZones::new(enemies, self.level.camera, start_y, self.level.id, self.player.frame().1);
+        self.obj_sprites.clear();
+        self.obj_front = 0;
+        self.level_hidden = false;
+        self.backdrop = None;
+        self.larry = None;
+        self.wand = None;
+        self.wand_clear = None;
+        self.intro = None;
+        self.landing = None;
+        self.bg_scroll = None;
+        self.player.forced_pose = None;
+        // The throne room (0x0804B768 counts type 0x1A9 into 0x03003D12): the map's
+        // airship still at the castle is world slot 0 (0x03002BBE[world * 14]).
+        let world = self.status.world.saturating_sub(1);
+        let airship = self.world_map.as_ref().is_none_or(|m| m.objects.slots[0].kind != 0);
+        self.throne = match &self.castle_data {
+            Some(d) if enemies.iter().any(|e| e.kind == castle::THRONE) => Some(castle::Throne::new(d, world, airship)),
+            _ => None,
+        };
+        if let Some(t) = &self.throne {
+            self.obj_sprites = t.sprites();
+        }
     }
 
     /// Arrives through a pipe in the other area of the level (0x08005690): its objects
@@ -328,6 +393,27 @@ impl Game {
         self.level.start_camera_y = Some(to.exit.camera_y as i32);
         self.camera_zones.set(to.exit.camera_y as i32);
         pipes::place(&mut self.player, &to.exit);
+        // The airship's intro (start kind 6, 0x0809F400) and its deck (kind 7, 0x0809F43C).
+        if self.level.start_kind == airship::INTRO_KIND {
+            self.pipe = None;
+            let anchor = enemies.iter().find(|e| e.kind == airship::ANCHOR).map(|e| (e.col, e.row));
+            self.intro = Some(airship::Intro::new(self.player.frame(), anchor));
+            self.level_generation = self.level_generation.wrapping_add(1);
+            return;
+        }
+        if self.level.start_kind == airship::LANDING_KIND {
+            self.pipe = None;
+            // 0x0809F43C: the frame x's low byte 0x90, y = BG camera y + 0x80, speed -0x70.
+            let fx = (self.player.frame().0 & !0xFF) | airship::LANDING_X;
+            let fy = to.exit.camera_y as i32 + airship::LANDING_DY;
+            self.player.set_frame_sub(fx * player::SUB, fy * player::SUB);
+            self.player.on_ground = false;
+            self.player.vx = 0;
+            self.landing = Some(airship::LANDING_SPEED);
+            self.player.forced_pose = Some(player::Pose::Jump);
+            self.level_generation = self.level_generation.wrapping_add(1);
+            return;
+        }
         // Through a door (exit direction 8): standing there.
         if to.exit.dir == doors::DOOR_EXIT {
             self.pipe = None;
@@ -386,6 +472,9 @@ impl Game {
     pub fn camera(&self) -> (i32, i32) {
         let cx = self.player.centre().0;
         let (w, h) = (SCREEN_W as i32, SCREEN_H as i32);
+        if let Some(i) = &self.intro {
+            return (i.camera_x, airship::OBJECT_CAMERA_Y);
+        }
         if let Some(a) = &self.autoscroll {
             let (x, y) = a.camera();
             return (x, y.clamp(0, (self.level.pixel_height() - h).max(0)));
@@ -433,28 +522,6 @@ impl Game {
         let fire = self.puffs.iter().filter(|p| p.slot == PuffSlot::Fireball).count();
         let numbered = self.puffs.iter().filter_map(|p| if let PuffSlot::Slot(s) = p.slot { Some(s) } else { None }).collect();
         (held, fire, numbered)
-    }
-
-    /// The shell in the player's hands (state 4, 0x08043F0C), after the objects' update:
-    /// B let go kicks it (0x080436A0, with the kick pose); a shell that woke up in a wall
-    /// scores 100 (0x08093560 kind 5); touching another object knocks both out
-    /// (0x08043434 -> 0x08048868, 100 points, chain 0). The player's flag 0x03007820 + 0
-    /// follows.
-    fn step_carried(&mut self, b_held: bool) {
-        for e in &mut self.enemies {
-            if e.woke_stuck {
-                let (x, y) = e.px();
-                self.status.popup(x, y, 5);
-            }
-            if matches!(e.state, EnemyState::Carried(_)) && !b_held {
-                e.release(&self.player);
-                self.player.kick = player::KICK_POSE_FRAMES;
-            }
-        }
-        if let Some((x, y)) = enemies::carried_hits(&mut self.enemies, &self.player) {
-            self.status.chain_popup(x, y, 0);
-        }
-        self.player.carrying = self.enemies.iter().any(|e| matches!(e.state, EnemyState::Carried(_)));
     }
 
     /// The player takes a hit: big shrinks to small, small dies.
@@ -541,6 +608,7 @@ impl Game {
             boom_boom::BOOM_BOOM => {
                 self.boom_boom = Some(boom_boom::BoomBoom::spawn(s.col as i32 * level::TILE_PX, s.row as i32 * level::TILE_PX))
             }
+            larry::LARRY => self.larry = Some(larry::Larry::spawn(s.col as i32 * level::TILE_PX, s.row as i32 * level::TILE_PX)),
             fortress::CAMERA_MAX | fortress::CAMERA_MIN => {
                 self.camera_limits = fortress::camera_limit(s, self.camera().0, self.camera_limits);
             }
@@ -823,6 +891,243 @@ impl Game {
         false
     }
 
+    /// The throne room's frame (0x08093CBC from the object loop); true once Mario leaves.
+    fn step_throne(&mut self) -> bool {
+        let (Some(t), Some(d)) = (&mut self.throne, &self.castle_data) else { return false };
+        let leave = t.step(d, self.input.pressed);
+        self.obj_sprites = t.sprites();
+        match leave {
+            // 0x08094140: the map's slot 1 becomes the airship (kind 2), slot 0 empty, and
+            // the area switch 3 to the room's junction (the airship's intro, level 0x202).
+            Some(castle::Leave::Airship) => {
+                if let Some(map) = &mut self.world_map {
+                    map.objects.slots[1].kind = castle::MAP_AIRSHIP;
+                    map.objects.slots[0].kind = 0;
+                }
+                self.throne = None;
+                self.obj_sprites.clear();
+                self.curtain_to = pipes::destination(&self.level, &self.player);
+                self.curtain = Some(castle::Curtain::new(castle::CurtainKind::MarioStart));
+                true
+            }
+            // 0x03003851 = 0, sub-state 0x1B: back to the map.
+            Some(castle::Leave::Map) => {
+                self.throne = None;
+                self.obj_sprites.clear();
+                self.to_map(world_map::Arrival::Walk);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Between the castle's rooms: the level is held while the curtain runs; the next room
+    /// is asked for on its load frame. True while it holds the game.
+    fn step_curtain(&mut self) -> bool {
+        let Some(c) = &mut self.curtain else { return false };
+        let ev = c.step();
+        self.obj_sprites = c.sprites();
+        if ev.load {
+            self.pending_area = self.curtain_to.take();
+            self.pipe = self.pending_area.as_ref().map(|_| Pipe::Switching);
+        }
+        if !ev.done {
+            return true;
+        }
+        self.curtain = None;
+        self.obj_sprites.clear();
+        false
+    }
+
+    /// The shell in the player's hands (state 4, 0x08043F0C), after the objects' update:
+    /// B let go kicks it (0x080436A0, with the kick pose); a shell that woke up in a wall
+    /// scores 100 (0x08093560 kind 5); touching another object knocks both out
+    /// (0x08043434 -> 0x08048868, 100 points, chain 0). The player's flag 0x03007820 + 0
+    /// follows.
+    fn step_carried(&mut self, b_held: bool) {
+        for e in &mut self.enemies {
+            if e.woke_stuck {
+                let (x, y) = e.px();
+                self.status.popup(x, y, 5);
+            }
+            if matches!(e.state, EnemyState::Carried(_)) && !b_held {
+                e.release(&self.player);
+                self.player.kick = player::KICK_POSE_FRAMES;
+            }
+        }
+        if let Some((x, y)) = enemies::carried_hits(&mut self.enemies, &self.player) {
+            self.status.chain_popup(x, y, 0);
+        }
+        self.player.carrying = self.enemies.iter().any(|e| matches!(e.state, EnemyState::Carried(_)));
+    }
+
+    /// The airship's deck (`ship`), after the objects as in 0x0808C4EC: smoke, then the
+    /// cannonballs (a stomp bounces the player and scores the chain, 0x0808E05C), then the
+    /// generators. Returns whether a ball hurt the player.
+    fn step_ship(&mut self, hidden: bool) -> bool {
+        if self.ship == ship::Ship::default() {
+            return false;
+        }
+        let view = ship::View { camera: self.camera(), scroll_dy: self.scroll_step.1, counter: self.frame as u8 };
+        let autoscroll = self.autoscroll.is_some();
+        self.ship.step_smoke(&view, self.scroll_step.0, autoscroll);
+        let camera_y = self.camera().1;
+        let hits = self.ship.step_balls(&view, autoscroll, &self.player, camera_y);
+        for (x, y) in &hits.stomped {
+            self.player.vy = ship::BALL_BOUNCE;
+            self.player.on_ground = false;
+            // TODO(re): 0x0808C8E0 -> 0x0808C850(5, 0x0809347C) taken as the stomp chain.
+            self.status.chain_popup(*x, *y, self.player.stomp_chain);
+            self.player.stomp_chain += 1;
+        }
+        self.ship.step_propellers(view.camera.0);
+        self.obj_sprites = self.ship.sprites(&view, &self.enemies);
+        let rand = self.rng.bytes();
+        self.ship.step_guns(&view, &rand, &self.player, &mut self.enemies);
+        hits.hurt && !hidden
+    }
+
+    /// Drops Larry's wand as his state 1 does once he has flown off the top (0x0807230C);
+    /// debug starts (`--wand`) call this in his cabin too.
+    pub fn drop_wand(&mut self) {
+        self.wand = Some(wand::Wand::spawn());
+    }
+
+    /// Larry Koopa (`larry`), with the objects: his main, then his rings (with the
+    /// projectiles), then the player's fireballs on him (0x0808B2F0). His and the rings'
+    /// OAM entries go behind the player. True if he or a ring hurt the player.
+    fn step_larry(&mut self, hidden: bool) -> bool {
+        let camera = self.camera();
+        let Some(l) = &mut self.larry else { return false };
+        let counter = self.frame as u8;
+        let mut view = larry::PlayerView::of(&self.player);
+        view.ignore = hidden;
+        // 0x03007848 + 0xBD1: everything waits while the player changes form.
+        let held = self.player.transforming();
+        let ev = l.step(&self.level, &view, camera, counter, held);
+        let mut hurt = ev.hurt_player;
+        if ev.bounce {
+            self.player.vy = larry::STOMP_BOUNCE;
+            self.player.on_ground = false;
+        }
+        if let Some(vx) = ev.push {
+            self.player.vx = vx;
+        }
+        // 0x03003D0F = 0x81: the clock stops.
+        if ev.beaten {
+            self.clock_stopped = true;
+        }
+        for f in &mut self.player_fireballs {
+            if f.live() && l.fireball(f.px()) {
+                f.hit();
+            }
+        }
+        // 0x0808CC9C -> 0x0808CAEC: a ring hurts; with the star it becomes a puff.
+        if !hidden {
+            if self.player.star != 0 {
+                for at in l.take_rings_touching(&self.player) {
+                    self.puffs.push(fortress::Puff::from_projectile(at, fortress::PuffSlot::None));
+                }
+            } else if l.ring_touches(&self.player) {
+                hurt = true;
+            }
+        }
+        self.obj_sprites = l.sprites(camera, counter);
+        self.obj_front = 0;
+        if ev.wand {
+            self.drop_wand();
+        }
+        hurt
+    }
+
+    /// The wand with the projectiles (0x0808FBD0, after the objects): it falls, is drawn,
+    /// and the draw tests the player (0x0808CC9C -> 0x0808CAEC).
+    fn step_wand(&mut self) {
+        let camera = self.camera();
+        let Some(w) = &mut self.wand else { return };
+        w.step(&self.level);
+        // Larry's step rebuilt `obj_sprites` this frame; without him (`--wand`) they are
+        // the wand's alone.
+        if w.gone(camera) {
+            self.wand = None;
+            if self.larry.is_none() {
+                self.obj_sprites.clear();
+                self.obj_front = 0;
+            }
+            return;
+        }
+        let sprites = w.sprites(camera);
+        self.obj_front = sprites.len();
+        if self.larry.is_some() {
+            self.obj_sprites.splice(0..0, sprites);
+        } else {
+            self.obj_sprites = sprites;
+        }
+        // 0x0808CAEC: not while the player flashes (+0x52 bounces him off instead, not
+        // ported) or is dying.
+        if self.invulnerable == 0 && self.dying.is_none() && w.touches(&self.player) {
+            // The catch: the clock stops (0x03003BB0 / 0x03003771) and is kept for the
+            // tally line, the slot is freed (its OAM entries stay for this frame).
+            self.wand = None;
+            self.wand_clear = Some(wand::Cleared::new(self.status.clock));
+            self.clock_stopped = true;
+        }
+    }
+
+    /// Larry's states 3-7 after the catch (`wand::Cleared`). While the state is 3 or more
+    /// the player is held (0x08094BD8) and drawn in pose 0x0813DEE8[form] (the jump pose)
+    /// with the wand over his head (0x080A83EC); from state 7 he falls 2 px a frame
+    /// (0x080A8000) through the sky, the clouds rising past him. Everything else waits.
+    fn step_wand_clear(&mut self) -> bool {
+        let Some(c) = &mut self.wand_clear else { return false };
+        // The player's update comes before the objects.
+        if c.falling() {
+            self.player.y += wand::FALL_STEP * player::SUB;
+        }
+        // The clouds are drawn (0x08071EC4) before they move.
+        let clouds = c.cloud_sprites();
+        let ev = c.step(&mut self.status.clock, self.frame, self.player.frame().1);
+        self.status.add_score(ev.points);
+        self.level_hidden = c.level_hidden;
+        self.backdrop = (c.state >= 5).then_some(c.backdrop);
+        // 0x08073210: speed 0.
+        self.player.vx = 0;
+        self.player.forced_pose = Some(player::Pose::Jump);
+        let camera = self.camera();
+        let (fx, fy) = self.player.frame();
+        self.obj_sprites = wand::held_sprites(&self.player, (fx - camera.0, fy - camera.1), self.frame);
+        // The wand's entries come before the player's, the clouds' after.
+        self.obj_front = self.obj_sprites.len();
+        self.obj_sprites.extend(clouds);
+        if ev.done {
+            // TODO(port): what follows (mode 1 sub-states 0x1B..: the fade, the King changed
+            // back, the letter, "WORLD 1 CLEAR!") is not ported; the level ends as cleared.
+            self.wand_clear = None;
+            self.obj_sprites.clear();
+            self.obj_front = 0;
+            self.level_hidden = false;
+            self.backdrop = None;
+            self.player.forced_pose = None;
+            self.finish_level();
+        }
+        true
+    }
+
+    /// The airship's intro (`airship::Intro`): the player is scripted, the clock holds
+    /// (the player is busy, 0x08094BD8). True while it holds the game.
+    fn step_intro(&mut self) -> bool {
+        let Some(intro) = &mut self.intro else { return false };
+        let ev = intro.step(&mut self.player, self.frame);
+        self.obj_sprites = intro.sprites();
+        self.level.shift = Some((self.level.pixel_height(), intro.level_shift()));
+        self.bg_scroll = Some((intro.camera_x >> 2, airship::INTRO_BG_Y));
+        if ev.switch {
+            self.curtain_to = pipes::destination(&self.level, &self.player);
+            self.curtain = Some(castle::Curtain::new(castle::CurtainKind::Plain));
+        }
+        true
+    }
+
     /// Sub-state 7 done (0x08068160): a full row of cards is used up, three of a kind
     /// giving extra lives (0x080680C4); back to the map.
     fn finish_level(&mut self) {
@@ -933,6 +1238,11 @@ impl Game {
     pub fn set_time_limit(&mut self, seconds: u16) {
         self.time_limit = seconds;
         self.status.start_clock(seconds);
+        // The throne room hides and holds the clock (0x08093CE4: 0x03003D0F = 0x81); its
+        // digits stay for the airship, whose landing clears 0x03003D0F (0x0809F43C).
+        let throne = self.throne.is_some();
+        self.status.clock_hidden = throne;
+        self.clock_stopped |= throne;
     }
 
     /// One frame of the level's Advance Coins (0x08077720). The objects are frozen (+0xBD1)
@@ -1098,6 +1408,15 @@ impl Game {
         if self.level.width == 0 {
             return;
         }
+        if self.step_curtain() {
+            return;
+        }
+        if self.step_intro() {
+            return;
+        }
+        if self.step_wand_clear() {
+            return;
+        }
         if let Some(d) = &mut self.dying {
             match d.step() {
                 Some(dy) => self.player.y += dy,
@@ -1146,6 +1465,10 @@ impl Game {
             self.step_advance_coins();
             return;
         }
+        // The throne room holds the player every frame (+0x40 = 2, 0x08093E18).
+        if self.throne.is_some() {
+            self.freeze = self.freeze.max(1);
+        }
         // Frozen (+0x40): no input, no movement (0x080A8000 only draws the player).
         let frozen = self.freeze > 0 || self.boss_freeze;
         self.freeze = self.freeze.saturating_sub(1);
@@ -1154,8 +1477,24 @@ impl Game {
         }
         let (held, pressed) = if frozen { (Buttons::empty(), Buttons::empty()) } else { (held, self.input.pressed) };
         self.player.camera_y = self.camera().1;
+        // 0x080A7D94 (+0x45 = 4): only once the autoscroll runs; up with gravity 4 and along
+        // with the scroll until the speed is no longer negative, then the usual control.
+        let landing = self.landing.is_some();
+        if let Some(vy) = self.landing
+            && self.autoscroll.is_some()
+        {
+            self.player.y += vy as i32 * 16;
+            self.landing = (vy < 0).then_some(vy.wrapping_add(4));
+            self.player.vy = vy.wrapping_add(4) as i32 * player::UNIT;
+            if self.landing.is_none() {
+                self.player.forced_pose = None;
+                // 0x080A7D94: +0x45 = 0 and 0x03003D0F = 0, the clock shows and runs.
+                self.status.clock_hidden = false;
+                self.clock_stopped = false;
+            }
+        }
         let was_left = self.player.facing_left;
-        let head_hit = if frozen { None } else { self.player.step(held, pressed, &self.level, self.frame) };
+        let head_hit = if frozen || landing { None } else { self.player.step(held, pressed, &self.level, self.frame) };
         self.player.step_hold(was_left);
         // Tile 0x79 on an idle Advance Coin's cell (0x080750F0) for everything else.
         let camera = self.camera();
@@ -1171,6 +1510,9 @@ impl Game {
             return;
         }
         if self.step_house(pressed, frozen) {
+            return;
+        }
+        if self.step_throne() {
             return;
         }
         // 0x080A8000: flying out of the top of the area (+0x27 sky flight, frame y < 0):
@@ -1300,12 +1642,23 @@ impl Game {
         if !self.player.transforming()
             && let (Some(a), Some(scripts)) = (&mut self.autoscroll, &self.autoscroll_scripts)
         {
+            let before = a.camera().0;
+            let before_y = a.camera().1;
             a.step(scripts);
+            self.scroll_step = (a.camera().0 - before, a.camera().1 - before_y);
             let speed = a.vx * player::UNIT;
-            self.push_along(speed);
+            if self.landing.is_some() {
+                // 0x08092214: until the first landing the player moves with the scroll.
+                self.player.x += (a.camera().0 - before) * player::SUB;
+            } else {
+                self.push_along(speed);
+            }
         }
         let camera_x = self.camera().0;
         self.spawner.spawn(camera_x, &self.player, &mut self.enemies, &mut self.goomba_pipes);
+        for s in self.spawner.take_ship() {
+            self.ship.add(&s);
+        }
         if let Some(row) = self.spawner.take_autoscroll() {
             let camera_y = self.level.start_camera_y.unwrap_or(self.camera().1);
             if row >> 4 == CRUSHER_KIND {
@@ -1362,7 +1715,8 @@ impl Game {
         let b_held = held.contains(Buttons::B);
         self.enemies.retain_mut(|e| {
             e.spits_twice = twice;
-            e.step(level, player, frame) && !(e.from_pipe && e.off_screen(camera))
+            let gone = if e.kind == ship::BULLET_BILL { e.leaves(camera.0, frame) } else { e.from_pipe && e.off_screen(camera) };
+            e.step(level, player, frame) && !gone
         });
         self.step_carried(b_held);
         for e in &self.enemies {
@@ -1536,6 +1890,9 @@ impl Game {
         if !hidden && self.step_fortress() {
             hurt = true;
         }
+        if self.step_larry(hidden) {
+            hurt = true;
+        }
         // 0x0808CC9C -> 0x0808CAEC: a fireball, boomerang or hammer hurts like an enemy
         // (0x0804A5F4) and flies on; with the star (+0x3D) it turns into a puff of smoke in
         // its own slot instead (0x0808CA84, sound 0x7F).
@@ -1549,6 +1906,10 @@ impl Game {
                 hurt = true;
             }
         }
+        if self.step_ship(hidden) {
+            hurt = true;
+        }
+        self.step_wand();
         if hurt {
             self.hurt();
         }
@@ -1557,7 +1918,7 @@ impl Game {
         self.status.step_popups(self.frame);
         // Clock (0x080044B8); running out of time kills the player.
         // 0x080044B8 holds the clock while the player is busy (0x03003D08), e.g. growing.
-        if !self.player.transforming() && !self.clock_stopped && self.status.tick_clock() {
+        if !self.player.transforming() && !self.clock_stopped && self.landing.is_none() && self.status.tick_clock() {
             self.die();
         }
         // Falling out of the level costs a life straight away.
@@ -3005,5 +3366,97 @@ mod tests {
         assert_eq!(m.phase, MapPhase::Idle);
         assert_eq!(m.checkpoint, (0x40, 0x20), "not a checkpoint (tileset 15)");
         assert!(g.status.lives == 4 || g.status.lives >= 6, "lost, or 2 lives or more won");
+    }
+
+    #[test]
+    fn larry_beaten_by_three_stomps_flies_off_and_his_wand_comes_down() {
+        let mut g = Game::new();
+        let list = [sma4_assets::EnemySpawn { kind: larry::LARRY, col: 10, row: 7, ..Default::default() }];
+        g.enter_level(block_level((20, 2)), (0x20, 9 * TILE_PX - 16), &list);
+        g.set_time_limit(300);
+        let (mut cooldown, mut stomps, mut drawn) = (0u32, 0, false);
+        for _ in 0..3000 {
+            g.invulnerable = 100;
+            if let Some(l) = &g.larry {
+                drawn |= l.state == 0 && g.obj_sprites.iter().any(|s| s.pal == larry::PALETTE);
+                if l.state == 0 && l.shell == 0 && l.magic == 0 && cooldown == 0 {
+                    // Dropped onto him from a little above.
+                    let (lx, ly) = l.px();
+                    g.player.set_frame_sub((lx + 4) * player::SUB, (ly - 0x18) * player::SUB);
+                    g.player.vy = 0x20 * player::UNIT;
+                    g.player.on_ground = false;
+                    cooldown = 40;
+                }
+            }
+            cooldown = cooldown.saturating_sub(1);
+            let hits = g.larry.as_ref().map_or(0, |l| l.hits);
+            g.step(Buttons::empty());
+            if g.larry.as_ref().is_some_and(|l| l.hits > hits) {
+                stomps += 1;
+                assert!(g.player.vy < 0, "the player bounces off him");
+            }
+            if g.wand.is_some() {
+                break;
+            }
+        }
+        assert!(drawn, "his sprites");
+        assert_eq!(stomps, 3);
+        assert!(g.clock_stopped, "the third stomp stops the clock");
+        assert_eq!(g.larry.as_ref().map(|l| l.state), Some(2), "flew off the top");
+        assert!(g.wand.is_some(), "the wand falls");
+    }
+
+    #[test]
+    fn catching_the_wand_holds_mario_and_counts_the_clock_at_200_points_a_second() {
+        let mut g = Game::new();
+        // Standing where the wand comes down (x 0x80).
+        g.enter_level(block_level((20, 2)), (0x7C, 9 * TILE_PX - 16), &[]);
+        g.set_time_limit(100);
+        g.drop_wand();
+        for _ in 0..200 {
+            g.step(Buttons::empty());
+            if g.wand_clear.is_some() {
+                break;
+            }
+        }
+        assert!(g.wand.is_none() && g.wand_clear.is_some(), "caught");
+        let kept = g.status.clock;
+        let (pos, score) = (g.player.px(), g.status.score);
+        let mut frames = 0;
+        let mut states = [0u32; 8];
+        while g.screen == Screen::Level {
+            let fy = g.player.frame().1;
+            let was = g.wand_clear.map_or(0, |c| c.state);
+            g.step(Buttons::RIGHT | Buttons::A);
+            frames += 1;
+            let Some(c) = g.wand_clear else { break };
+            states[c.state as usize] += 1;
+            assert_eq!(g.player.forced_pose, Some(player::Pose::Jump));
+            assert_eq!(g.status.bar_clock, kept, "the bar keeps the stopped clock");
+            if was < 7 {
+                assert_eq!(g.player.px(), pos, "held");
+                assert_eq!(g.obj_front, 2, "the wand over his head");
+                assert!(g.obj_sprites[..2].iter().all(|s| s.tile == 0x97));
+            }
+            if c.state < 7 {
+                assert_eq!(g.obj_front, 2);
+            }
+            if was == 7 {
+                assert_eq!(g.player.frame().1, fy + wand::FALL_STEP, "falling");
+                assert!(g.level_hidden && g.backdrop.is_some());
+            }
+            assert!(frames < 2000);
+        }
+        // States 3-4: 0x150 frames of delay, a drain step per ten seconds and per second,
+        // 0x30 + 1 frames after (mGBA, 287 s: 420 frames from the catch); state 5 0xC0
+        // frames, state 6 0xFF, state 7 until the frame y reaches 0x200.
+        let steps = kept[0] as u32 * 10 + kept[1] as u32 + kept[2] as u32;
+        assert_eq!(states[3] + states[4] + 1, 385 + steps);
+        assert_eq!((states[5], states[6]), (0xC0, 0xFF));
+        assert_eq!(g.player.frame().1, 0x200);
+        assert!(g.wand_clear.is_none() && g.backdrop.is_none());
+        let seconds = kept[0] as u32 * 100 + kept[1] as u32 * 10 + kept[2] as u32;
+        assert_eq!(g.status.score - score, seconds * 20);
+        assert_eq!(g.status.clock, [0, 0, 0]);
     }
 }

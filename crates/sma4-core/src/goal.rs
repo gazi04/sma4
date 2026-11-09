@@ -226,7 +226,7 @@ impl Goal {
 
 /// One step of the clock drain (0x08066F08): ten seconds while there are any, then
 /// seconds; `points` (tens) per ten seconds / per second. The clock must not be empty.
-fn drain(clock: &mut [u8; 3], points: [u32; 2]) -> u32 {
+pub(crate) fn drain(clock: &mut [u8; 3], points: [u32; 2]) -> u32 {
     let digit = if clock[0] == 0 && clock[1] == 0 { 2 } else { 1 };
     for d in clock[..=digit].iter_mut().rev() {
         if *d > 0 {

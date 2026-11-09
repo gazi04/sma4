@@ -3,6 +3,7 @@
 //!
 //! The output is derived from the ROM: keep it on your machine, never commit or share it.
 
+mod castle;
 mod emu;
 mod level;
 mod oam;
@@ -100,6 +101,12 @@ const MAP_HOUSE: u16 = 0x102;
 /// World index of the Warp Zone (World 9).
 const WARP_ZONE: u8 = 8;
 const MAP_HOUSE_LIST: u32 = 0x0816_BA4C;
+/// The King's castle (World 1's map tile 0xC9): the throne room.
+const THRONE_ROOM: u16 = 0x1C5;
+/// Its junction chain: the airship's intro, the airship, Larry's cabin.
+const AIRSHIP_INTRO: u16 = 0x202;
+const AIRSHIP: u16 = 0x205;
+const AIRSHIP_CABIN: u16 = 0x213;
 
 fn run(args: &Args) -> Result<(), String> {
     let rom = Rom::open(&args.rom).map_err(|e| format!("{}: {e}", args.rom))?;
@@ -185,6 +192,22 @@ fn run(args: &Args) -> Result<(), String> {
         if id == LIFT_LEVEL {
             objects::extract_lift(&rom, &mut m, &args.out).map_err(|e| e.0)?;
             objects::extract_advance_coin(&rom, &mut m, &args.out).map_err(|e| e.0)?;
+        }
+        // The King's castle: the throne room (its junction chain leads on to the airship).
+        if id == THRONE_ROOM {
+            castle::extract_throne(&rom, &mut m, &args.out, id).map_err(|e| e.0)?;
+        }
+        if id == AIRSHIP_INTRO {
+            castle::extract_intro(&mut m, &args.out, id).map_err(|e| e.0)?;
+        }
+        if id == AIRSHIP {
+            castle::extract_sky(&rom, &m, &args.out).map_err(|e| e.0)?;
+        }
+        if id == AIRSHIP {
+            castle::write_bank(&m, &args.out, id).map_err(|e| e.0)?;
+        }
+        if id == AIRSHIP_CABIN {
+            castle::extract_cabin(&rom, &mut m, &args.out, id).map_err(|e| e.0)?;
         }
         if id == HAMMER_BRO_LEVEL {
             objects::extract_hammer_bro(&rom, &mut m, &args.out).map_err(|e| e.0)?;

@@ -221,10 +221,9 @@ pub fn extract_at(
     m.w8(V_SKY_COLOUR, (hdr[5] & 0x1C) >> 2)?;
     m.w8(V_EXTRA_PALETTE, hdr[9] >> 4)?;
     m.w8(V_SCENE_MODE, hdr[9] & 0xF)?;
-    m.w8(
-        V_SCENE_PALETTE,
-        rom.u8(rom.ptr(SCENE_DATA + hdr[10] as u32 * 4)?)?,
-    )?;
+    // Scene 0 (the King's throne room) has no data: no background, palette 0.
+    let scene_data = rom.u32(SCENE_DATA + hdr[10] as u32 * 4)?;
+    m.w8(V_SCENE_PALETTE, if scene_data == 0 { 0 } else { rom.u8(scene_data)? })?;
     for (addr, v) in BG_CNT_SHADOWS {
         m.w16(addr, v)?;
     }
@@ -362,7 +361,11 @@ pub fn extract_at(
             w
         },
         junction: junction(rom, &hdr, &pointers)?,
-        camera_x: (data == BONUS_ROOM_1_1).then_some(BONUS_ROOM_CAMERA),
+        camera_x: if data == BONUS_ROOM_1_1 {
+            Some(BONUS_ROOM_CAMERA)
+        } else {
+            (level_id == LARRY_CABIN).then_some(LARRY_CABIN_CAMERA)
+        },
         slopes: slopes(rom, tileset, solidity.top)?,
         background,
         atlas: Rgba {
@@ -380,6 +383,13 @@ const ENEMY_LISTS: u32 = 0x0813_6B14;
 /// 0x08155460, level 0x23): x from 0x70 (+0xA0 of the player struct) to 0xA0 (+0x9E).
 const BONUS_ROOM_1_1: u32 = 0x0815_5460;
 const BONUS_ROOM_CAMERA: (u16, u16) = (0x70, 0xA0);
+
+/// Larry Koopa's cabin (level 0x213, one page): the camera stays at x 8 wherever the
+/// player is (measured in mGBA, player x 0x0D to 0xE3). TODO(re): the routine that holds
+/// it; 0x080A4D4C's fixed-x list (streams 0x08158135..0x081585FB, 0x081550CC) does not
+/// name the cabin's stream 0x081623FA.
+const LARRY_CABIN: u16 = 0x213;
+const LARRY_CABIN_CAMERA: (u16, u16) = (8, 8);
 
 /// The alternate area named by header bytes 0-3 / 6 (0x08014F20 -> 0x030037CE, 0x030037D0,
 /// 0x030037DE) and the pipe exits into it, decoded like 0x08005290: value_b low nibble =
@@ -482,6 +492,7 @@ fn slopes(rom: &Rom, tileset: u8, top: [u8; 4]) -> Result<Option<Slopes>> {
 /// 0x08221738, scene 10: 0x0822246C). Its tiles come with the graphics set, in BG char
 /// block 0.
 const SCENE_DATA: u32 = 0x0813_9A2C;
+const AIRSHIP_SKY_MODE: u8 = 3;
 const SCENE_LOADERS: u32 = 0x0813_9C90;
 const SCENE_MAP: u32 = 0x0201_C000;
 const V_SCENE_FOLLOW_Y: u32 = 0x0300_3BBD;
@@ -499,6 +510,10 @@ const V_BG2_CNT: u32 = 0x0300_2DA8;
 const CLOUD_BG2_CNT: u16 = 0xDC02;
 
 fn background(rom: &Rom, m: &mut Machine, scene: u8, mode: u8) -> Result<Option<Background>> {
+    // Scene 0 has no data; scene mode 3 (the airship's sky) is drawn from `castle::extract_sky`.
+    if rom.u32(SCENE_DATA + scene as u32 * 4)? == 0 || mode == AIRSHIP_SKY_MODE {
+        return Ok(None);
+    }
     let data = rom.ptr(SCENE_DATA + scene as u32 * 4)?;
     m.w8(V_SCENE_FOLLOW_Y, rom.u8(data + 1)?)?;
     m.call(rom.u32(SCENE_LOADERS + scene as u32 * 4)?, &[])?;

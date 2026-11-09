@@ -231,7 +231,7 @@ fn debug_start(mut debug: ResMut<DebugSpade>, mut streak: ResMut<DebugStreak>, m
 
 /// The iris (0x03003B64): black outside a circle of radius `r` round `(cx, cy)`; the
 /// left / right edges at cx - r and cx + r - 1 as measured in mGBA. Negative: all black.
-fn draw_iris(image: &mut Image, (cx, cy): (i32, i32), r: i32) {
+pub(crate) fn draw_iris(image: &mut Image, (cx, cy): (i32, i32), r: i32) {
     let Some(data) = image.data.as_mut() else { return };
     for y in 0..SCREEN_H as i32 {
         for x in 0..SCREEN_W as i32 {

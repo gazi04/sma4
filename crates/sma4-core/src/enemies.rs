@@ -383,6 +383,9 @@ pub struct Enemy {
     pub woke_stuck: bool,
     /// Made by a Goomba pipe: removed once off the screen (0x0804A0C4).
     pub from_pipe: bool,
+    /// Object slot (0x0804CB98 gives 4..0 to what generators make); the off-screen test
+    /// of a Bullet Bill runs on frames picked by it.
+    pub slot: u8,
     /// Boomerang Bro: phase timer +0x34 and the boomerang thrown this frame.
     wait: u8,
     pub thrown: Option<Boomerang>,
@@ -495,6 +498,7 @@ impl Enemy {
             emerging: 0,
             from_pipe: false,
             woke_stuck: false,
+            slot: 0,
             wait: 0,
             thrown: None,
             through: 0,
@@ -551,6 +555,7 @@ impl Enemy {
             emerging: 0,
             from_pipe: false,
             woke_stuck: false,
+            slot: 0,
             wait: 0,
             thrown: None,
             through: 0,
@@ -626,6 +631,12 @@ impl Enemy {
             }
             EnemyState::Collapsed { step, timer } => self.step_collapsed(level, player, step, timer.saturating_sub(1)),
             // 0x08053704 with +0x1C: out of the pipe, across only, the walk cycle +1 a frame.
+            // 0x0805440C: straight across (0x08049DE0), drawn behind for +0x23 frames.
+            // TODO(re): 0x080542D4 also carries it with the autoscroll's y step.
+            EnemyState::Walking if self.kind == crate::ship::BULLET_BILL => {
+                self.emerging = self.emerging.saturating_sub(1);
+                self.x += self.vx;
+            }
             EnemyState::Walking if self.emerging > 0 => {
                 self.emerging -= 1;
                 self.x += self.vx;
@@ -1490,7 +1501,7 @@ impl Enemy {
                         self.was_para = true;
                     }
                     // 0x08048B3C, 0x0816A2BB[type] bit 0: knocked out (state 6, sound 0x7F).
-                    BOOMERANG_BRO | HAMMER_BRO => {
+                    BOOMERANG_BRO | HAMMER_BRO | crate::ship::BULLET_BILL => {
                         self.state = EnemyState::Dead;
                         self.vx = 0;
                         self.vy = 0;
@@ -1606,7 +1617,8 @@ impl Enemy {
         if vertical >= h + 0xE || across >= w + 8 {
             return None;
         }
-        if matches!(self.kind, BUZZY | DRY_BONES) {
+        // 0x0816A516[0x78] = 0x201: Bullet Bills are fire-proof too.
+        if matches!(self.kind, BUZZY | DRY_BONES | crate::ship::BULLET_BILL) {
             return Some(false);
         }
         if self.is_plant() {
@@ -1813,6 +1825,17 @@ impl GoombaPipe {
 }
 
 impl Enemy {
+    /// 0x0804A0C4 as it runs: on frames where (slot + frame counter 0x03003AE8) & 3 is 0
+    /// the right limit (camera + 0x120) is tested, at 2 the left one (camera - 0x40).
+    pub fn leaves(&self, camera_x: i32, counter: u32) -> bool {
+        let x = self.px().0;
+        match (self.slot as u32 + counter) & 3 {
+            0 => x > camera_x + OFFSCREEN_RIGHT,
+            2 => x < camera_x - OFFSCREEN_LEFT,
+            _ => false,
+        }
+    }
+
     /// 0x0804A0C4: off the screen for good.
     pub fn off_screen(&self, camera: (i32, i32)) -> bool {
         let x = self.px().0;
@@ -1841,6 +1864,8 @@ pub struct Spawner {
     /// Mini-fortress objects and level settings whose column was reached
     /// (`crate::fortress::OBJECTS`).
     fortress: Vec<EnemySpawn>,
+    /// The airship's generators and propellers whose column was reached (`crate::ship`).
+    ship: Vec<EnemySpawn>,
 }
 
 impl Spawner {
@@ -1850,6 +1875,7 @@ impl Spawner {
             SUPPORTED.contains(k)
                 || [GOOMBA_PIPE, crate::goal::GOAL, crate::autoscroll::AUTOSCROLL, crate::lifts::LIFT, crate::advance_coin::COIN, crate::advance_coin::QUOTA].contains(k)
                 || crate::fortress::OBJECTS.contains(k)
+                || crate::ship::handles(*k)
         };
         Self { pending: list.iter().copied().filter(|e| wanted(&e.kind)).collect(), ..Self::default() }
     }
@@ -1879,6 +1905,7 @@ impl Spawner {
         let advance = &mut self.advance;
         let quota = &mut self.quota;
         let fortress = &mut self.fortress;
+        let ship = &mut self.ship;
         self.pending.retain(|s| {
             let x = s.col as i32 * TILE_PX;
             if !columns.contains(&x) {
@@ -1895,6 +1922,7 @@ impl Spawner {
                 crate::advance_coin::COIN => advance.push(*s),
                 crate::advance_coin::QUOTA => *quota = Some(*s),
                 k if crate::fortress::OBJECTS.contains(&k) => fortress.push(*s),
+                k if crate::ship::handles(k) => ship.push(*s),
                 _ => active.push(Enemy::spawn(s, player)),
             }
             false
@@ -1916,6 +1944,11 @@ impl Spawner {
     /// The coin quota entry's column came up (once).
     pub fn take_quota(&mut self) -> Option<EnemySpawn> {
         self.quota.take()
+    }
+
+    /// The airship's generators and propellers whose column came up.
+    pub fn take_ship(&mut self) -> Vec<EnemySpawn> {
+        std::mem::take(&mut self.ship)
     }
 
     /// Mini-fortress objects whose column came up.
@@ -2013,7 +2046,7 @@ impl Fireball {
 }
 
 /// 0x0808CC9C: a projectile at `(x, y)` px touches the player.
-fn projectile_touches((x, y): (i32, i32), player: &Player) -> bool {
+pub(crate) fn projectile_touches((x, y): (i32, i32), player: &Player) -> bool {
     let (fx, fy) = player.frame();
     let big = (player.form != crate::player::Form::Small) as usize;
     let dy = (y - fy - FIRE_TOP[big] + 8) as u16;

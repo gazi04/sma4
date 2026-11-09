@@ -212,6 +212,8 @@ pub enum Pose {
     /// Swimming: stroke step 0-5 (0x0813DE43), or paddling in place, step 0-3 (0x0813DE4F).
     Swim(u8),
     SwimIdle(u8),
+    /// Hanging on the airship's anchor (0x081737CC[form], 0x080A855C).
+    Hang,
     /// Carrying a shell (0x0809EEB4): walk step 0-3 (0x0813DEC0[0x0813DD6F[form] + step]);
     /// in the air step 0 (1 small), the raccoon wagging its tail 0x0813DF00[+0x65 >> 2].
     Hold(u8),
@@ -243,6 +245,7 @@ impl Pose {
             Pose::Throw(s) => a::PLAYER_THROW + s as usize,
             Pose::Swim(s) => a::PLAYER_SWIM + s as usize,
             Pose::SwimIdle(s) => a::PLAYER_SWIM_IDLE + s as usize,
+            Pose::Hang => a::PLAYER_HANG,
             Pose::Hold(s) => a::PLAYER_HOLD + s as usize,
             Pose::HoldWag(s) => a::PLAYER_HOLD_WAG + s as usize,
             Pose::HoldTurn => a::PLAYER_HOLD_TURN,
@@ -263,6 +266,8 @@ pub struct Player {
     pub vy: i32,
     pub on_ground: bool,
     pub facing_left: bool,
+    /// A pose set by a scripted mode (the airship's intro, +0x45) instead of the usual one.
+    pub forced_pose: Option<Pose>,
     pub form: Form,
     /// Walk-cycle step 0-3 (player byte +0x36); picks the ground pose.
     pub walk_step: u8,
@@ -424,6 +429,12 @@ impl Player {
     /// Top-left of the ROM's 16x32 player frame, in pixels.
     pub fn frame(&self) -> (i32, i32) {
         self.frame_at(self.x, self.y)
+    }
+
+    /// Puts the frame's top-left at (fx, fy), 1/256 px (the ROM's +0 / +4).
+    pub fn set_frame_sub(&mut self, fx: i32, fy: i32) {
+        self.x = fx + (FRAME_W / 2 - HITBOX_W / 2) * SUB;
+        self.y = fy + (FRAME_H - self.height()) * SUB;
     }
 
     /// The frame for a box at (x, y), 1/256 px.
@@ -1064,6 +1075,9 @@ impl Player {
     /// Sprite pose, following the ROM's pose routines (0x08097800, 0x08097ACC,
     /// 0x080981C4, 0x080984E8, 0x080983F8).
     pub fn pose(&self) -> Pose {
+        if let Some(p) = self.forced_pose {
+            return p;
+        }
         if self.puff == 0 && self.morph == 0 && !self.in_water {
             // 0x08097ACC: the kick pose last, over everything else; before it the shell's
             // poses (0x0809EEB4) replace the walking, running and jumping ones.

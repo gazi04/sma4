@@ -38,9 +38,19 @@ pub const CHEST: u16 = 0x52;
 pub const CHEST_ITEM: u16 = 0x1AA;
 pub const CHEST_EXIT: u16 = 0x166;
 
-/// The enemy-list types this module (and `crate::boom_boom`) handles.
-pub const OBJECTS: [u16; 9] =
-    [PODOBOO, ROTO_DISC, ROTO_DISC_CCW, crate::boom_boom::BOOM_BOOM, CAMERA_MAX, CAMERA_MIN, CHEST, CHEST_ITEM, CHEST_EXIT];
+/// The enemy-list types this module (and `crate::boom_boom`, `crate::larry`) handles.
+pub const OBJECTS: [u16; 10] = [
+    PODOBOO,
+    ROTO_DISC,
+    ROTO_DISC_CCW,
+    crate::boom_boom::BOOM_BOOM,
+    crate::larry::LARRY,
+    CAMERA_MAX,
+    CAMERA_MIN,
+    CHEST,
+    CHEST_ITEM,
+    CHEST_EXIT,
+];
 
 /// A camera limit entry coming up: (min, max) camera x after it, given the current limits.
 pub fn camera_limit(s: &EnemySpawn, camera_x: i32, limits: (Option<i32>, Option<i32>)) -> (Option<i32>, Option<i32>) {

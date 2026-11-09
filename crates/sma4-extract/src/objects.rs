@@ -76,6 +76,8 @@ const SLIDE_POSE_SMALL: u8 = 0x33;
 const SLIDE_POSE: u8 = 0x31;
 /// Crouching (+0x48), as seen in mGBA; the small form cannot crouch.
 const CROUCH_POSE: u8 = 0x0F;
+/// 0x081737CC[form]: hanging on the airship's anchor.
+const HANG_POSES: u32 = 0x0817_37CC;
 /// Shell carrying (0x0809EEB4): poses 0x0813DEC0[0x0813DD6F[form] + step], the raccoon's
 /// in the air 0x0813DF00[+0x65 >> 2]; the turn and kick poses are immediates in 0x08097ACC.
 const HOLD_POSES: u32 = 0x0813_DEC0;
@@ -103,9 +105,9 @@ const FIRE: u8 = 2;
 const FN_PLAYER_PALETTE: u32 = 0x0809_FB54;
 const FN_STAR_PALETTE: u32 = 0x0800_9208;
 
-struct Sheet<'a> {
-    chars: &'a [u8],
-    palette: Vec<sma4_rom::gfx::Bgr555>,
+pub(crate) struct Sheet<'a> {
+    pub(crate) chars: &'a [u8],
+    pub(crate) palette: Vec<sma4_rom::gfx::Bgr555>,
 }
 
 impl Sheet<'_> {
@@ -115,7 +117,7 @@ impl Sheet<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn tile_flip(
+    pub(crate) fn tile_flip(
         &self,
         out: &mut [u8],
         w: u32,
@@ -1084,7 +1086,23 @@ pub fn extract_course_clear(
         course_clear_path(out_dir),
     )?;
     render(&[0xB0], CARD_GOT_AT, CARD_GOT_TILES, card_got_path(out_dir))?;
-    println!("  course clear texts");
+    // The clock tally line's glyphs (0x08066C3C: digits 0x0816EE64[d], white with
+    // palette 15 (| 0xF000), "x" 0x29A, the clock icon 0x29B, "=" 0x282).
+    let glyphs: Vec<(u32, u32)> = (0..10)
+        .map(|d| (0x290 + d, 0))
+        .chain((0..10).map(|d| (0x290 + d, 15)))
+        .chain([(0x29A, 0), (0x29B, 0), (0x282, 0)])
+        .collect();
+    debug_assert_eq!(glyphs.len(), sma4_assets::TALLY_GLYPHS as usize);
+    let w = glyphs.len() as u32 * 8;
+    let mut px = vec![0u8; (w * 8 * 4) as usize];
+    for (i, &(tile, pal)) in glyphs.iter().enumerate() {
+        sheet.tile_flip(&mut px, w, tile, i as u32 * 8, 0, false, false, pal);
+    }
+    Rgba { width: w, height: 8, pixels: px }
+        .write_png(&sma4_assets::tally_glyphs_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))?;
+    println!("  course clear texts, tally glyphs");
     Ok(())
 }
 
@@ -1221,6 +1239,8 @@ fn player_poses(rom: &Rom, form: u8) -> Result<Vec<u8>, ExtractError> {
     } else {
         poses.extend([crouch; 3]);
     }
+    // The airship intro's hold on the anchor (0x080A855C).
+    poses.push(rom.u8(HANG_POSES + f)?);
     // Carrying a shell (0x0809EEB4, 0x08097ACC).
     let hold = table(HOLD_POSES + rom.u8(HOLD_BASES + f)? as u32, 0, 4)?;
     poses.extend(&hold);

@@ -92,6 +92,11 @@ impl Machine {
         self.uc.mem_read_as_vec(addr as u64, len).map_err(err)
     }
 
+    /// R0 after a `call`: the function's return value.
+    pub fn r0(&self) -> Result<u32> {
+        self.uc.reg_read(RegisterARM::R0).map(|v| v as u32).map_err(err)
+    }
+
     /// Calls a Thumb function with up to four arguments and runs it to completion.
     pub fn call(&mut self, func: u32, args: &[u32]) -> Result<()> {
         let uc = &mut self.uc;

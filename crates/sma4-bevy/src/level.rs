@@ -63,6 +63,9 @@ pub struct StartOptions {
     pub progress: u8,
     /// `--items`: the inventory at the start.
     pub items: Vec<u8>,
+    /// `--wand`: Larry's wand drops at the start (his cabin, level 0x213; Larry is not
+    /// ported yet).
+    pub wand: bool,
 }
 
 pub struct LevelPlugin;
@@ -88,7 +91,8 @@ impl Plugin for LevelPlugin {
                     sync_water,
                 ),
             )
-            .add_systems(Update, sync_background.after(crate::player::CameraMoved));
+            .add_systems(Update, sync_background.after(crate::player::CameraMoved))
+            .add_systems(Update, sync_backdrop);
     }
 }
 
@@ -312,6 +316,9 @@ fn spawn_level(
     game.0.set_time_limit(level.time_limit);
     if let Some(s) = &start {
         game.0.inventory = s.items.clone();
+        if s.wand {
+            game.0.drop_wand();
+        }
     }
     let start = start.map(|s| (s.on_map, s.hit, s.form, s.lives, s.behind, s.progress)).unwrap_or_default();
     let (on_map, hit, form, lives, behind, progress) = start;
@@ -517,12 +524,35 @@ fn sync_tiles(
     }
 }
 
+/// The backdrop: the level's, or the colour a sequence sets (`Game::backdrop`, BGR555;
+/// Larry's sky).
+fn sync_backdrop(game: Res<GameRes>, level: Res<LevelRes>, mut clear: ResMut<ClearColor>) {
+    let want = match game.0.backdrop {
+        Some(c) if game.0.screen == sma4_core::Screen::Level => {
+            let ch = |s: u16| {
+                let v = ((c >> s) & 0x1F) as u8;
+                (v << 3) | (v >> 2)
+            };
+            Color::srgb_u8(ch(0), ch(5), ch(10))
+        }
+        _ => {
+            let [r, g, b] = level.0.backdrop;
+            Color::srgb_u8(r, g, b)
+        }
+    };
+    if clear.0 != want {
+        clear.0 = want;
+    }
+}
+
 /// Background tile animation: shows the tilemap of the current animation frame.
 fn animate_tiles(game: Res<GameRes>, mut maps: Query<(&LevelTiles, &mut Visibility)>) {
     let current = anim_frame(game.0.frame);
     for (map, mut vis) in &mut maps {
         // The crushing ceiling's split draws copies instead (`crate::fortress`).
-        let want = if map.0 == current && game.0.level.shift.is_none() { Visibility::Inherited } else { Visibility::Hidden };
+        // `Game::level_hidden`: the ROM scrolled the level's BGs onto empty rows.
+        let shown = map.0 == current && game.0.level.shift.is_none() && !game.0.level_hidden;
+        let want = if shown { Visibility::Inherited } else { Visibility::Hidden };
         if *vis != want {
             *vis = want;
         }
@@ -829,7 +859,7 @@ fn sync_background(
     }
     let Some(art) = art else { return };
     let Some(image) = art.image.clone() else { return };
-    if game.0.screen != sma4_core::Screen::Level {
+    if game.0.screen != sma4_core::Screen::Level || game.0.level_hidden {
         return;
     }
     let (transform, projection) = *cam;
@@ -841,7 +871,13 @@ fn sync_background(
     let left = (transform.translation.x - view.x / 2.0).round() as i32;
     let top = (-transform.translation.y - view.y / 2.0).round() as i32;
     let size = sma4_assets::BACKGROUND_PX as i32;
-    // The background pixel at the view's top-left is (hofs, vofs), modulo the BG size.
+    // The background pixel at the view's top-left is (hofs, vofs), modulo the BG size; a
+    // room that sets the scroll itself gives it for the GBA screen's top-left.
+    if let Some((hofs, vofs)) = game.0.bg_scroll {
+        let (cx, cy) = game.0.camera();
+        spawn_wrapped(&mut commands, &image, (size, size), (cx - size, cy - size), (hofs, vofs), view, Z_BACKGROUND);
+        return;
+    }
     let scroll = background_scroll((left, top), art.scroll);
     spawn_wrapped(&mut commands, &image, (size, size), (left, top), scroll, view, Z_BACKGROUND);
     if let Some(far) = &art.far {

@@ -69,9 +69,16 @@ pub struct Status {
     pub coins: u8,
     /// Clock digits (0x03003D0B..0D) and the per-second counter (0x03003D0E).
     pub clock: [u8; 3],
+    /// The clock digits on the bar: only the tick (0x080044B8 -> 0x08004434) and the level
+    /// load (0x08016434) redraw them, so a clock tally (0x08066F08) drains `clock` while
+    /// the bar keeps showing the time it stopped at.
+    pub bar_clock: [u8; 3],
     clock_sub: u8,
     /// Whether this level has a clock.
     pub timed: bool,
+    /// 0x03003D0F = 0x81 (the King's throne room): the clock and its icon are not drawn;
+    /// the digits stay for the airship, whose landing clears it (0x0809F43C).
+    pub clock_hidden: bool,
     pub popups: Vec<ScorePopup>,
     /// Goal cards collected (0x03002C52..54): 0 none, 1 mushroom, 2 flower, 3 star.
     pub cards: [u8; 3],
@@ -85,8 +92,10 @@ impl Default for Status {
             score: 0,
             coins: 0,
             clock: [0; 3],
+            bar_clock: [0; 3],
             clock_sub: 0,
             timed: false,
+            clock_hidden: false,
             popups: Vec::new(),
             cards: [0; 3],
         }
@@ -98,6 +107,7 @@ impl Status {
     pub fn start_clock(&mut self, seconds: u16) {
         self.timed = seconds != 0;
         self.clock = [(seconds / 100 % 10) as u8, (seconds / 10 % 10) as u8, (seconds % 10) as u8];
+        self.bar_clock = self.clock;
         // A full second before the first tick (0x08014F20 reloads 0x03003D0E with 0x28).
         self.clock_sub = CLOCK_RELOAD;
     }
@@ -123,6 +133,7 @@ impl Status {
             }
             *d = 9;
         }
+        self.bar_clock = self.clock;
         self.seconds() == 0
     }
 
@@ -208,9 +219,12 @@ impl Status {
             m[LIVES_AT + i] = c;
         }
 
-        // Clock (0x08004434): yellow digits.
-        for (i, &d) in self.clock.iter().enumerate() {
-            m[CLOCK_AT + i] = digit(d as u32);
+        // Clock (0x08004434): yellow digits; none at all while hidden (the icon too).
+        for (i, &d) in self.bar_clock.iter().enumerate() {
+            m[CLOCK_AT + i] = if self.clock_hidden { BLANK } else { digit(d as u32) };
+        }
+        if self.clock_hidden {
+            m[CLOCK_AT - 1] = BLANK;
         }
 
         // Coins (0x08003DF4): two digits, blank tens.

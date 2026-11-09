@@ -2,14 +2,20 @@
 //! and the course-clear texts, all extracted from the user's own ROM by `sma4-extract`
 //! (`objects/goal.png`, `coin_spin.png`, `course_clear.png`, `card_got.png`,
 //! the card in the frame drawn with the card sprite). The sequence itself runs in `sma4-core` (`goal.rs`).
+//! Also the airship's "LEVEL CLEARED!" and its clock tally line (`tally_glyphs.png`,
+//! `sma4_core::wand`).
 
 use bevy::prelude::*;
 use sma4_assets::{
     CARD_GOT_AT, CARD_GOT_TILES, CLEAR_CARD_AT, COURSE_CLEAR_AT, COURSE_CLEAR_TILES, GOAL_BOX, GOAL_FLYING,
-    KOOPA_CELL_H, KOOPA_CELL_W, KOOPA_ORIGIN, Rgba, card_got_path, coin_spin_path,
-    course_clear_path, goal_path,
+    KOOPA_CELL_H, KOOPA_CELL_W, KOOPA_ORIGIN, Rgba, TALLY_CLOCK, TALLY_DIGITS, TALLY_EQUALS, TALLY_TIMES,
+    TALLY_WHITE_DIGITS, card_got_path, coin_spin_path, course_clear_path, goal_path, tally_glyphs_path,
 };
-use sma4_core::{SCREEN_H, SCREEN_W, goal::Phase};
+use sma4_core::{
+    SCREEN_H, SCREEN_W,
+    goal::Phase,
+    wand::{Glyph, LINE_AT},
+};
 
 use crate::GameRes;
 use crate::player::{load_cells, sprite_image};
@@ -34,6 +40,7 @@ struct Art {
     coins: Vec<Handle<Image>>,
     course_clear: Option<Handle<Image>>,
     card_got: Option<Handle<Image>>,
+    tally: Vec<Handle<Image>>,
 }
 
 #[derive(Component)]
@@ -55,6 +62,7 @@ fn load_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMu
         coins: load_cells(&coin_spin_path(&dir.0), 16, 16, &mut images),
         course_clear: load_one(&course_clear_path(&dir.0), &mut images),
         card_got: load_one(&card_got_path(&dir.0), &mut images),
+        tally: load_cells(&tally_glyphs_path(&dir.0), 8, 8, &mut images),
     };
     commands.insert_resource(art);
 }
@@ -98,6 +106,36 @@ fn sync_goal(
             let t = Transform::from_xyz((x + 8) as f32, -((y + 8) as f32), Z_CARD);
             commands.spawn((GoalSprite, Sprite::from_image(image.clone()), t));
         }
+    }
+    if let Some(c) = &g.wand_clear {
+        let mut texts = Vec::new();
+        if c.text()
+            && let Some(image) = &art.course_clear
+        {
+            let (w, h) = (COURSE_CLEAR_TILES.0 * 8, COURSE_CLEAR_TILES.1 * 8);
+            texts.push((image.clone(), screen_at(COURSE_CLEAR_AT, w, h)));
+        }
+        if let Some(line) = c.line(&g.status.clock) {
+            for (i, glyph) in line.cells().into_iter().enumerate() {
+                let k = match glyph {
+                    Glyph::Digit(d) => TALLY_DIGITS + d as usize,
+                    Glyph::White(d) => TALLY_WHITE_DIGITS + d as usize,
+                    Glyph::Times => TALLY_TIMES,
+                    Glyph::Clock => TALLY_CLOCK,
+                    Glyph::Equals => TALLY_EQUALS,
+                    Glyph::Blank => continue,
+                };
+                if let Some(image) = art.tally.get(k) {
+                    texts.push((image.clone(), screen_at((LINE_AT.0 + i as u32, LINE_AT.1), 8, 8)));
+                }
+            }
+        }
+        commands.entity(*camera).with_children(|cam| {
+            for (image, t) in texts {
+                cam.spawn((GoalSprite, Sprite::from_image(image), t));
+            }
+        });
+        return;
     }
     let Some(goal) = &g.goal else { return };
     // The box stays where the card started; it fades out (blend b / 16) after the touch.
