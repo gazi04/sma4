@@ -3,7 +3,8 @@
 //! Addresses are for the European ROM (AX4P rev 0).
 
 use sma4_assets::{
-    ANIM_FRAMES, BACKGROUND_PX, Background, BlockRules, EnemySpawn, Junction, LevelAsset, METATILE,
+    ANIM_FRAMES, BACKGROUND_PX, Background, BlockRules, EnemySpawn, FAR_BACKGROUND_H, FAR_BACKGROUND_W,
+    FarBackground, Junction, LevelAsset, METATILE,
     METATILES, PipeExit, Rgba, SLOPE_SHAPES, Slopes, Solidity,
 };
 use sma4_rom::{
@@ -508,6 +509,8 @@ fn background(rom: &Rom, m: &mut Machine, scene: u8, mode: u8) -> Result<Option<
         return Ok(None);
     }
     let follow_y = m.read(V_SCENE_FOLLOW_Y, 1)?[0] != 0;
+    // 0x080245B4 (some scene loaders): BG2 priority 3, BG3 2.
+    let far_front = m.read(V_BG2_CNT, 1)?[0] & 3 == 3;
     let map = if scene == SCENE_CLOUDS {
         let cnt = m.read(V_BG2_CNT, 2)?;
         m.w16(V_BG2_CNT, CLOUD_BG2_CNT)?;
@@ -519,6 +522,7 @@ fn background(rom: &Rom, m: &mut Machine, scene: u8, mode: u8) -> Result<Option<
     };
     let chars = m.read(0x0600_0000, 0x8000)?;
     let palette = parse_palette(&m.read(PAL_BUFFER, 0x200)?);
+    let far = far_background(rom, m, mode, &palette)?.map(|image| FarBackground { front: far_front, image });
     // 512x512 text BG: four 32x32 screen blocks, top-left, top-right, bottom-left,
     // bottom-right.
     let w = BACKGROUND_PX as usize;
@@ -548,12 +552,55 @@ fn background(rom: &Rom, m: &mut Machine, scene: u8, mode: u8) -> Result<Option<
         scene,
         follow_y,
         mode,
+        far,
         image: Rgba {
             width: BACKGROUND_PX,
             height: BACKGROUND_PX,
             pixels: px,
         },
     }))
+}
+
+/// Scene-mode routines (0x08016434 calls 0x081378AC[0x03003B9A]); some unpack a map into
+/// 0x0201C000 and copy it to BG3's screen block (0x080257DC).
+const SCENE_MODES: u32 = 0x0813_78AC;
+/// The modes whose BG3 scroll the port follows (VBlank 0x0800092C): 2 (World 1-1's
+/// clouds) and 9, 0xA, 0xF (the fortress's and World 1-5's arches).
+const FAR_MODES: [u8; 4] = [2, 9, 0xA, 0xF];
+const V_BG3_CNT: u32 = 0x0300_2DAA;
+/// BG3's tiles: char block 2 (BG3CNT 0x960B).
+const FAR_CHARS: u32 = 0x0600_8000;
+
+/// BG3 as the scene mode's routine leaves it: 32x64 map entries (two screen blocks, one
+/// above the other) over char block 2, colour 0 transparent.
+fn far_background(rom: &Rom, m: &mut Machine, mode: u8, palette: &[sma4_rom::gfx::Bgr555]) -> Result<Option<Rgba>> {
+    if !FAR_MODES.contains(&mode) {
+        return Ok(None);
+    }
+    m.call(rom.u32(SCENE_MODES + mode as u32 * 4)?, &[])?;
+    let cnt = u16::from_le_bytes(m.read(V_BG3_CNT, 2)?.try_into().unwrap());
+    let map = m.read(0x0600_0000 + (cnt as u32 & 0x1F00) * 8, 0x1000)?;
+    let chars = m.read(FAR_CHARS, 0x8000)?;
+    let (w, h) = (FAR_BACKGROUND_W as usize, FAR_BACKGROUND_H as usize);
+    let mut px = vec![0u8; w * h * 4];
+    for (i, e) in map.chunks_exact(2).enumerate() {
+        let e = sma4_rom::gfx::MapEntry::from(u16::from_le_bytes([e[0], e[1]]));
+        let (tx, ty) = (i % 32, i / 32);
+        let tile = &chars[(e.tile as usize * 32).min(chars.len() - 32)..][..32];
+        for y in 0..8 {
+            for x in 0..8 {
+                let sx = if e.hflip { 7 - x } else { x };
+                let sy = if e.vflip { 7 - y } else { y };
+                let b = tile[sy * 4 + sx / 2];
+                let ci = if sx & 1 == 1 { b >> 4 } else { b & 0xF };
+                if ci != 0 {
+                    let o = ((ty * 8 + y) * w + tx * 8 + x) * 4;
+                    px[o..o + 4].copy_from_slice(&palette[e.palette as usize * 16 + ci as usize].to_rgba(255));
+                }
+            }
+        }
+    }
+    Ok(Some(Rgba { width: w as u32, height: h as u32, pixels: px }))
 }
 
 /// End rooms per world (transition 4, 0x080056A0).

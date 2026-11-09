@@ -145,11 +145,19 @@ struct SkidDustSprite;
 /// Just behind the player.
 const Z_SKID_DUST: f32 = 9.5;
 
-/// The level's background scene (BG2), when it has one.
+/// The level's background scene (BG2), when it has one, and its far layer (BG3).
 #[derive(Resource, Default)]
 struct BackgroundArt {
     image: Option<Handle<Image>>,
     scroll: BackgroundScroll,
+    far: Option<FarArt>,
+}
+
+/// BG3: its image, whether it is drawn over BG2, and the scene mode that scrolls it.
+struct FarArt {
+    image: Handle<Image>,
+    front: bool,
+    mode: u8,
 }
 
 /// How BG2 follows the camera (VBlank 0x0800092C).
@@ -185,6 +193,9 @@ impl BackgroundScroll {
 struct BackgroundSprite;
 /// Behind the level and the items coming out of blocks.
 const Z_BACKGROUND: f32 = -10.0;
+/// BG3 (priority 3 behind BG2's 2, or 2 in front of BG2's 3).
+const Z_FAR_BEHIND: f32 = -11.0;
+const Z_FAR_FRONT: f32 = -9.5;
 
 fn tile(m: u16) -> Option<TileData> {
     (m != SKY && m != BUMP_PLACEHOLDER).then(|| TileData::from_tileset_index(m))
@@ -212,18 +223,24 @@ fn spawn_tilemaps(commands: &mut Commands, images: &mut Assets<Image>, level: &L
         .collect();
     info!("level {:#x}: {}x{} metatiles", level.level_id, level.width, level.height);
 
-    let background = level.background.as_ref().map(|b| {
+    let mut add = |image: &sma4_assets::Rgba| {
         images.add(Image::new(
-            Extent3d { width: b.image.width, height: b.image.height, depth_or_array_layers: 1 },
+            Extent3d { width: image.width, height: image.height, depth_or_array_layers: 1 },
             TextureDimension::D2,
-            b.image.pixels.clone(),
+            image.pixels.clone(),
             TextureFormat::Rgba8UnormSrgb,
             RenderAssetUsages::RENDER_WORLD,
         ))
-    });
+    };
+    let background = level.background.as_ref().map(|b| add(&b.image));
+    let far = level
+        .background
+        .as_ref()
+        .and_then(|b| b.far.as_ref().map(|f| FarArt { image: add(&f.image), front: f.front, mode: b.mode }));
     commands.insert_resource(BackgroundArt {
         image: background,
         scroll: level.background.as_ref().map(BackgroundScroll::of).unwrap_or_default(),
+        far,
     });
 
     let size = UVec2::new(level.width as u32, level.height as u32);
@@ -762,6 +779,43 @@ fn background_scroll(camera: (i32, i32), scroll: BackgroundScroll) -> (i32, i32)
     (x >> 1, y)
 }
 
+/// BG3 scroll from the camera (VBlank 0x0800092C, by scene mode 0x03003B9A): mode 2
+/// (0x03003760 = BG2's x, 0x03003764 = y * 7/8 + 0x20) and modes 9, 0xA, 0xF (x / 4,
+/// BG2's y + 0x11); `bg2_y` is BG2's y (0x0300375C).
+fn far_scroll(camera: (i32, i32), mode: u8, bg2_y: i32) -> (i32, i32) {
+    let (x, y) = camera;
+    match mode {
+        2 => (x >> 1, y - (y >> 3) + 0x20),
+        _ => (x >> 2, bg2_y + 0x11),
+    }
+}
+
+/// An image repeated every `w` x `h` px (the BG wraps) to cover the view, its pixel
+/// (hofs, vofs) at the view's top-left (`left`, `top`).
+#[allow(clippy::too_many_arguments)]
+fn spawn_wrapped(
+    commands: &mut Commands,
+    image: &Handle<Image>,
+    (w, h): (i32, i32),
+    (left, top): (i32, i32),
+    (hofs, vofs): (i32, i32),
+    view: Vec2,
+    z: f32,
+) {
+    let (x0, y0) = (left - hofs.rem_euclid(w), top - vofs.rem_euclid(h));
+    let (nx, ny) = ((view.x as i32) / w + 2, (view.y as i32) / h + 2);
+    for i in 0..nx {
+        for j in 0..ny {
+            let (x, y) = (x0 + i * w, y0 + j * h);
+            commands.spawn((
+                BackgroundSprite,
+                Sprite::from_image(image.clone()),
+                Transform::from_xyz((x + w / 2) as f32, -((y + h / 2) as f32), z),
+            ));
+        }
+    }
+}
+
 /// The background, repeated every 512 px (the BG wraps) to cover the view.
 fn sync_background(
     mut commands: Commands,
@@ -773,7 +827,8 @@ fn sync_background(
     for e in &old {
         commands.entity(e).despawn();
     }
-    let Some(image) = art.as_ref().and_then(|a| a.image.clone()) else { return };
+    let Some(art) = art else { return };
+    let Some(image) = art.image.clone() else { return };
     if game.0.screen != sma4_core::Screen::Level {
         return;
     }
@@ -785,21 +840,14 @@ fn sync_background(
     // Top-left of the view in level pixels.
     let left = (transform.translation.x - view.x / 2.0).round() as i32;
     let top = (-transform.translation.y - view.y / 2.0).round() as i32;
-    let (hofs, vofs) = background_scroll((left, top), art.as_ref().map(|a| a.scroll).unwrap_or_default());
     let size = sma4_assets::BACKGROUND_PX as i32;
     // The background pixel at the view's top-left is (hofs, vofs), modulo the BG size.
-    let x0 = left - hofs.rem_euclid(size);
-    let y0 = top - vofs.rem_euclid(size);
-    let (nx, ny) = ((view.x as i32) / size + 2, (view.y as i32) / size + 2);
-    for i in 0..nx {
-        for j in 0..ny {
-            let (x, y) = (x0 + i * size, y0 + j * size);
-            commands.spawn((
-                BackgroundSprite,
-                Sprite::from_image(image.clone()),
-                Transform::from_xyz((x + size / 2) as f32, -((y + size / 2) as f32), Z_BACKGROUND),
-            ));
-        }
+    let scroll = background_scroll((left, top), art.scroll);
+    spawn_wrapped(&mut commands, &image, (size, size), (left, top), scroll, view, Z_BACKGROUND);
+    if let Some(far) = &art.far {
+        let (w, h) = (sma4_assets::FAR_BACKGROUND_W as i32, sma4_assets::FAR_BACKGROUND_H as i32);
+        let z = if far.front { Z_FAR_FRONT } else { Z_FAR_BEHIND };
+        spawn_wrapped(&mut commands, &far.image, (w, h), (left, top), far_scroll((left, top), far.mode, scroll.1), view, z);
     }
 }
 
@@ -833,7 +881,16 @@ fn spawn_point(map: &Level, tx: i32) -> (i32, i32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackgroundScroll, background_scroll};
+    use super::{BackgroundScroll, background_scroll, far_scroll};
+
+    #[test]
+    fn the_far_background_scrolls_by_the_scene_mode() {
+        // Measured in mGBA in World 1-5 (mode 0xA, BG2 following the camera): camera
+        // (0x198, 0x110) -> BG2 (0xCC, 0x110), BG3 (0x66, 0x121).
+        let bg2 = background_scroll((0x198, 0x110), BackgroundScroll::FollowY);
+        assert_eq!(bg2, (0xCC, 0x110));
+        assert_eq!(far_scroll((0x198, 0x110), 0xA, bg2.1), (0x66, 0x121));
+    }
 
     #[test]
     fn background_scrolls_at_half_speed_across_and_three_quarters_down() {
