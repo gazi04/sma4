@@ -435,6 +435,28 @@ impl Game {
         (held, fire, numbered)
     }
 
+    /// The shell in the player's hands (state 4, 0x08043F0C), after the objects' update:
+    /// B let go kicks it (0x080436A0, with the kick pose); a shell that woke up in a wall
+    /// scores 100 (0x08093560 kind 5); touching another object knocks both out
+    /// (0x08043434 -> 0x08048868, 100 points, chain 0). The player's flag 0x03007820 + 0
+    /// follows.
+    fn step_carried(&mut self, b_held: bool) {
+        for e in &mut self.enemies {
+            if e.woke_stuck {
+                let (x, y) = e.px();
+                self.status.popup(x, y, 5);
+            }
+            if matches!(e.state, EnemyState::Carried(_)) && !b_held {
+                e.release(&self.player);
+                self.player.kick = player::KICK_POSE_FRAMES;
+            }
+        }
+        if let Some((x, y)) = enemies::carried_hits(&mut self.enemies, &self.player) {
+            self.status.chain_popup(x, y, 0);
+        }
+        self.player.carrying = self.enemies.iter().any(|e| matches!(e.state, EnemyState::Carried(_)));
+    }
+
     /// The player takes a hit: big shrinks to small, small dies.
     pub fn hurt(&mut self) {
         // 0x0804A5F4 ignores hits while the star (+0x3D) runs.
@@ -1132,7 +1154,9 @@ impl Game {
         }
         let (held, pressed) = if frozen { (Buttons::empty(), Buttons::empty()) } else { (held, self.input.pressed) };
         self.player.camera_y = self.camera().1;
+        let was_left = self.player.facing_left;
         let head_hit = if frozen { None } else { self.player.step(held, pressed, &self.level, self.frame) };
+        self.player.step_hold(was_left);
         // Tile 0x79 on an idle Advance Coin's cell (0x080750F0) for everything else.
         let camera = self.camera();
         self.level.solid_cells = self.advance_coins.iter().filter(|c| c.solid(camera)).map(|c| c.cell()).collect();
@@ -1335,10 +1359,12 @@ impl Game {
         for (i, e) in self.enemies.iter_mut().enumerate() {
             e.rand = self.rng.byte(i);
         }
+        let b_held = held.contains(Buttons::B);
         self.enemies.retain_mut(|e| {
             e.spits_twice = twice;
             e.step(level, player, frame) && !(e.from_pipe && e.off_screen(camera))
         });
+        self.step_carried(b_held);
         for e in &self.enemies {
             if let Some(falling) = e.splash {
                 // 0x0804A224: slots 1 and 2 in turn.
@@ -1468,6 +1494,8 @@ impl Game {
             }
         }
         let mut hurt = false;
+        // 0x08048E8C: B held, nothing carried (0x03007848 + 0xC91), not swimming (+0x4F).
+        self.player.grab = held.contains(Buttons::B) && !self.player.carrying && !self.player.in_water;
         // 0x08048960 / 0x0808CAEC: nothing touches a player hidden behind the scenery.
         let hidden = self.player.hidden;
         for e in self.enemies.iter_mut().filter(|_| !hidden) {
@@ -1487,6 +1515,7 @@ impl Game {
                     self.player.stomp_chain += 1;
                 }
                 Contact::KickedFromAbove => {
+                    self.player.kick = player::KICK_POSE_FRAMES;
                     let (x, y) = e.px();
                     self.status.chain_popup(x, y, self.player.stomp_chain);
                     self.player.stomp_chain += 1;
@@ -1498,7 +1527,10 @@ impl Game {
                     self.status.chain_popup(x, y, self.player.star_chain.min(STAR_CHAIN_MAX));
                     self.player.star_chain += 1;
                 }
-                Contact::Kicked | Contact::None => {}
+                // 0x080436A0: the kick pose (+0x41 = 0x0C).
+                Contact::Kicked => self.player.kick = player::KICK_POSE_FRAMES,
+                Contact::Grabbed => self.player.carrying = true,
+                Contact::None => {}
             }
         }
         if !hidden && self.step_fortress() {
@@ -2617,6 +2649,109 @@ mod tests {
         assert_eq!(g.level.metatile(block.0 as i32, block.1 as i32), Some(0x5F), "block used up");
         assert_eq!(g.items.len(), 1, "it released its item");
         assert!(g.enemies[0].vx < 0, "the shell bounced back");
+    }
+
+    /// A game with a Koopa shell resting on the ground 2 tiles right of the player.
+    fn shell_game() -> Game {
+        let mut g = Game::new();
+        g.enter_level(block_level((20, 2)), (2 * TILE_PX, 9 * TILE_PX - 16), &[]);
+        for _ in 0..30 {
+            g.step(Buttons::empty());
+        }
+        let mut shell = enemies::Enemy::spawn_at(enemies::KOOPA, 4 * TILE_PX, 8 * TILE_PX, &g.player);
+        shell.state = EnemyState::Shell(0xFF);
+        shell.vx = 0;
+        g.enemies = vec![shell];
+        g
+    }
+
+    fn walk_into_shell(g: &mut Game, held: Buttons) {
+        for _ in 0..90 {
+            g.step(held);
+            if g.enemies[0].state != EnemyState::Shell(0xFF) && !matches!(g.enemies[0].state, EnemyState::Shell(_)) {
+                break;
+            }
+        }
+    }
+
+    /// mGBA (1-1, a Koopa poked into a shell): walking into it with B held picks it up; it
+    /// sits 0xB px ahead of the frame and 0xE below its top, Mario shows the carrying
+    /// poses; letting go of B kicks it away with the kick pose for 12 frames.
+    #[test]
+    fn b_held_picks_up_a_shell_and_letting_go_kicks_it() {
+        let mut g = shell_game();
+        walk_into_shell(&mut g, Buttons::B | Buttons::RIGHT);
+        assert!(matches!(g.enemies[0].state, EnemyState::Carried(_)));
+        assert!(g.player.carrying);
+        for _ in 0..10 {
+            g.step(Buttons::B | Buttons::RIGHT);
+            let (fx, fy) = g.player.frame();
+            assert_eq!(g.enemies[0].px(), (fx + 0x0B, fy + 0x0E));
+            assert!(matches!(g.player.pose(), player::Pose::Hold(_)), "{:?}", g.player.pose());
+        }
+        g.step(Buttons::empty());
+        assert_eq!(g.enemies[0].state, EnemyState::Kicked);
+        assert!(g.enemies[0].vx > 0, "away from the player");
+        assert!(!g.player.carrying);
+        let mut kick = 0;
+        for _ in 0..20 {
+            g.step(Buttons::empty());
+            kick += (g.player.pose() == player::Pose::Kick) as u32;
+        }
+        assert_eq!(kick, 12);
+    }
+
+    /// Without B the shell is kicked as before; turning round with it shows the turn pose
+    /// for 7 frames and swings it round (0x0816943E: 4 px, then -4).
+    #[test]
+    fn turning_round_with_a_shell() {
+        let mut g = shell_game();
+        walk_into_shell(&mut g, Buttons::RIGHT);
+        assert_eq!(g.enemies[0].state, EnemyState::Kicked);
+        let mut g = shell_game();
+        walk_into_shell(&mut g, Buttons::B | Buttons::RIGHT);
+        for _ in 0..30 {
+            g.step(Buttons::B);
+        }
+        let mut turn = Vec::new();
+        for _ in 0..40 {
+            g.step(Buttons::B | Buttons::LEFT);
+            let fx = g.player.frame().0;
+            turn.push((g.player.pose() == player::Pose::HoldTurn, g.enemies[0].px().0 - fx));
+            if !g.player.facing_left {
+                turn.clear();
+            }
+        }
+        let frames: Vec<i32> = turn.iter().filter(|t| t.0).map(|t| t.1).collect();
+        assert_eq!(frames, [4, 4, -4, -4, -4, -4, -0x0B]);
+        assert_eq!(turn.last().unwrap().1, -0x0B);
+    }
+
+    /// The carried shell knocks out what it touches, and goes too (0x08048868).
+    #[test]
+    fn a_carried_shell_knocks_out_an_enemy_and_itself() {
+        let mut g = shell_game();
+        walk_into_shell(&mut g, Buttons::B | Buttons::RIGHT);
+        let goomba = enemies::Enemy::spawn_at(enemies::WALKER, g.player.px().0 + 40, 8 * TILE_PX, &g.player);
+        g.enemies.push(goomba);
+        for _ in 0..30 {
+            g.step(Buttons::B | Buttons::RIGHT);
+        }
+        assert!(g.enemies.iter().all(|e| e.state == EnemyState::Dead), "{:?}", g.enemies.iter().map(|e| e.state).collect::<Vec<_>>());
+        assert!(!g.player.carrying);
+        assert_eq!(g.status.popups.len(), 1);
+    }
+
+    /// Held too long, the Koopa comes out (0x08044720) and walks toward the player.
+    #[test]
+    fn a_shell_held_too_long_wakes_up() {
+        let mut g = shell_game();
+        walk_into_shell(&mut g, Buttons::B | Buttons::RIGHT);
+        g.enemies[0].state = EnemyState::Carried(2);
+        g.step(Buttons::B);
+        g.step(Buttons::B);
+        assert_eq!(g.enemies[0].state, EnemyState::Walking);
+        assert!(!g.player.carrying);
     }
 
     /// Stomping two enemies without landing scores 100 then 200 (0x08093654 chain).

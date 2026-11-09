@@ -76,6 +76,15 @@ const SLIDE_POSE_SMALL: u8 = 0x33;
 const SLIDE_POSE: u8 = 0x31;
 /// Crouching (+0x48), as seen in mGBA; the small form cannot crouch.
 const CROUCH_POSE: u8 = 0x0F;
+/// Shell carrying (0x0809EEB4): poses 0x0813DEC0[0x0813DD6F[form] + step], the raccoon's
+/// in the air 0x0813DF00[+0x65 >> 2]; the turn and kick poses are immediates in 0x08097ACC.
+const HOLD_POSES: u32 = 0x0813_DEC0;
+const HOLD_BASES: u32 = 0x0813_DD6F;
+const HOLD_WAG_POSES: u32 = 0x0813_DF00;
+const HOLD_TURN_SMALL: u8 = 0x32;
+const HOLD_TURN: u8 = 0x05;
+const KICK_SMALL: u8 = 0x42;
+const KICK: u8 = 0x2D;
 const CROUCH_POSE_RACCOON: u8 = 0x07;
 /// The raccoon crouched in the air (0x080981C4): by the tail wag timer +0x65 >> 2.
 const RACCOON_CROUCH_AIR_POSES: u32 = 0x0813_DE9B;
@@ -1212,6 +1221,16 @@ fn player_poses(rom: &Rom, form: u8) -> Result<Vec<u8>, ExtractError> {
     } else {
         poses.extend([crouch; 3]);
     }
+    // Carrying a shell (0x0809EEB4, 0x08097ACC).
+    let hold = table(HOLD_POSES + rom.u8(HOLD_BASES + f)? as u32, 0, 4)?;
+    poses.extend(&hold);
+    if form == RACCOON {
+        poses.extend(table(HOLD_WAG_POSES, 0, 3)?);
+    } else {
+        poses.extend([hold[0]; 3]);
+    }
+    poses.push(if form == 0 { HOLD_TURN_SMALL } else { HOLD_TURN });
+    poses.push(if form == 0 { KICK_SMALL } else { KICK });
     debug_assert_eq!(poses.len(), PLAYER_FRAMES as usize);
     Ok(poses)
 }

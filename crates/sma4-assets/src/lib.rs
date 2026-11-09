@@ -1312,7 +1312,14 @@ pub const PLAYER_CROUCH: usize = 48;
 /// Crouched in the air: the raccoon's 0x0813DE9B[tail wag +0x65 >> 2] (3 steps; the other
 /// forms keep the crouch pose).
 pub const PLAYER_CROUCH_AIR: usize = 49;
-pub const PLAYER_FRAMES: u32 = 52;
+/// Carrying a shell (0x0809EEB4): 4 walk steps 0x0813DEC0[0x0813DD6F[form] + step], the
+/// raccoon's 3 tail-wag steps in the air 0x0813DF00 (the others repeat step 0), the turn
+/// (0x32 small, 0x05 others) and the kick (0x42 small, 0x2D others), 0x08097ACC.
+pub const PLAYER_HOLD: usize = 52;
+pub const PLAYER_HOLD_WAG: usize = 56;
+pub const PLAYER_HOLD_TURN: usize = 59;
+pub const PLAYER_KICK: usize = 60;
+pub const PLAYER_FRAMES: u32 = 61;
 /// Star flashing: the player is drawn in palette 7 = 0x08133210[k], k = 0 being the
 /// form's own palette (`player_path`), 1-3 in `player_star_path`.
 pub const PLAYER_STAR_PALETTES: u32 = 4;

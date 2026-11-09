@@ -186,6 +186,13 @@ const SHELL_LEG_MASKS: [u8; 5] = [2, 2, 4, 8, 0x10];
 const KICK_SPEED: i32 = 48;
 /// Contact is ignored for 16 frames after a kick (+0x24).
 const KICK_GRACE: u8 = 0x10;
+/// Shell held in front of the player: x offsets 0x0816943E (right, left, turning...), y
+/// below the frame's top (0x08043434).
+const HOLD_DX: [i32; 5] = [0x0B, -0x0B, 4, -4, 4];
+const HOLD_DY_SMALL: i32 = 0x0E;
+const HOLD_DY_BIG: i32 = 0x0D;
+/// Waking up inside a wall while held (0x08044720): speed byte 0xC0.
+const WAKE_STUCK_SPEED: i32 = -0x40 * 16;
 /// ...and for 8 frames after a stomp (0x08048B3C sets +0x24 = 8; 0x080493AC skips the
 /// contact test while it runs), so the bounce does not stomp a Paragoomba twice.
 const STOMP_GRACE: u8 = 8;
@@ -287,6 +294,8 @@ pub enum EnemyState {
     Squished(u8),
     /// Koopa shell lying still (state 3), with its wake-up timer.
     Shell(u8),
+    /// Shell carried by the player (state 4, 0x08043F0C), with its wake-up timer.
+    Carried(u8),
     /// Kicked shell sliding along (state 5).
     Kicked,
     /// Knocked out by a shell: falls off the screen upside down (state 6).
@@ -369,6 +378,9 @@ pub struct Enemy {
     /// A Goomba coming out of a Goomba pipe: frames left of +0x1C, during which it only
     /// moves across and is drawn behind the scenery (main 0x08053704, draw 0x08053664).
     pub emerging: u8,
+    /// A carried shell woke up inside a wall this frame and was knocked out (0x08044720:
+    /// 100 points, 0x08093560 kind 5).
+    pub woke_stuck: bool,
     /// Made by a Goomba pipe: removed once off the screen (0x0804A0C4).
     pub from_pipe: bool,
     /// Boomerang Bro: phase timer +0x34 and the boomerang thrown this frame.
@@ -402,6 +414,8 @@ pub enum Contact {
     Kicked,
     /// Landed on a resting shell, kicking it (0x08048E58: chain points, no bounce).
     KickedFromAbove,
+    /// Picked up a resting shell (B held, 0x08048E8C): state 4.
+    Grabbed,
     /// Slid into it: knocked out, the stomp's chain points, no bounce (0x080493AC).
     SlideKill,
     HurtPlayer,
@@ -480,6 +494,7 @@ impl Enemy {
             dropped: None,
             emerging: 0,
             from_pipe: false,
+            woke_stuck: false,
             wait: 0,
             thrown: None,
             through: 0,
@@ -535,6 +550,7 @@ impl Enemy {
             dropped: None,
             emerging: 0,
             from_pipe: false,
+            woke_stuck: false,
             wait: 0,
             thrown: None,
             through: 0,
@@ -583,6 +599,7 @@ impl Enemy {
         self.grace = self.grace.saturating_sub(1);
         self.turn_wait = self.turn_wait.saturating_sub(1);
         self.wall_hit = None;
+        self.woke_stuck = false;
         self.spit = None;
         self.dropped = None;
         self.thrown = None;
@@ -642,6 +659,7 @@ impl Enemy {
                 self.walk_cycle(landed);
             }
             EnemyState::Shell(t) => self.shell(level, player, t, frame),
+            EnemyState::Carried(t) => self.carried(level, player, t, frame),
             EnemyState::Kicked => {
                 // 0x08042FF0: the wall probe's cell is hit like a head hit (0x08042EF8 ->
                 // 0x0809FC1C(4)), then the shell turns around.
@@ -1153,6 +1171,53 @@ impl Enemy {
         }
     }
 
+    /// State 4 (0x08043F0C), after the game has handled B's release. The timer runs down
+    /// more slowly than on the ground (0x08044AF0: at 0x60 and above only on frames where
+    /// 0x03003AE8 & 3 is 0). At 0 (0x08044720) the Koopa comes out, walking toward the
+    /// player, or, stuck in a wall (0x08045DF4's flags), is knocked out (state 6, speed byte
+    /// 0xC0, 100 points: `woke_stuck`). Otherwise it sits in the player's hands.
+    fn carried(&mut self, level: &Level, player: &Player, t: u8, frame: u32) {
+        let t = if t >= SHELL_SLOW_TICKS && frame & 3 != 0 { t } else { t - 1 };
+        if t == 0 {
+            let (x, y) = self.px();
+            let (cx, cy) = ((x + SIZE / 2).div_euclid(TILE_PX), (y + SIZE / 2).div_euclid(TILE_PX));
+            self.flipped = false;
+            if level.at(cx, cy) == TileKind::Solid {
+                self.state = EnemyState::Dead;
+                self.vx = 0;
+                self.vy = WAKE_STUCK_SPEED;
+                self.woke_stuck = true;
+            } else {
+                self.state = EnemyState::Walking;
+                self.vx = toward(player, self.x) * WALK_SPEED;
+            }
+            return;
+        }
+        self.state = EnemyState::Carried(t);
+        self.hold(player);
+    }
+
+    /// 0x08043434: in front of the player's frame by 0x0816943E[i] px (i from 0x08043354:
+    /// 0 facing right, 1 left; + 2 while turning (+0x42), + 3 when +0x42 > 4), 14 px below
+    /// its top (13 for the big forms); the speed is the player's.
+    pub fn hold(&mut self, player: &Player) {
+        let (fx, fy) = player.frame();
+        let mut i = player.facing_left as usize;
+        if player.hold_turn != 0 {
+            i += if player.hold_turn > 4 { 3 } else { 2 };
+        }
+        let dy = if player.form == crate::player::Form::Small { HOLD_DY_SMALL } else { HOLD_DY_BIG };
+        self.x = (fx + HOLD_DX[i]) * SUB;
+        self.y = (fy + dy) * SUB;
+        self.vx = player.vx;
+        self.vy = player.vy;
+    }
+
+    /// B let go (0x08043F0C -> 0x080436A0): kicked like from the side.
+    pub fn release(&mut self, player: &Player) {
+        self.kick(player);
+    }
+
     /// 0x080538FC: on walking off a ledge, turn around and step back onto it.
     fn walk_red(&mut self, level: &Level) {
         let (y, vy) = (self.y, self.vy);
@@ -1445,6 +1510,13 @@ impl Enemy {
                 }
                 Contact::Stomped
             }
+            // 0x08048E8C: touched from the side with B held and nothing carried: picked up
+            // (state 4).
+            EnemyState::Shell(t) if !stomp && player.grab => {
+                self.state = EnemyState::Carried(t);
+                self.hold(player);
+                Contact::Grabbed
+            }
             // Landing on or touching a resting shell kicks it (0x08048E58 / 0x08048E8C).
             EnemyState::Shell(_) => {
                 self.kick(player);
@@ -1454,6 +1526,7 @@ impl Enemy {
                 self.state = EnemyState::Shell(SHELL_TIMER);
                 Contact::Stomped
             }
+            EnemyState::Carried(_) => Contact::None,
             // 0x08048D88: a sliding shell only hurts when it moves toward the player.
             EnemyState::Kicked if (self.vx > 0) != (toward(player, self.x) > 0) => Contact::None,
             _ => Contact::HurtPlayer,
@@ -1620,7 +1693,7 @@ impl Enemy {
             // 0x08053704: frame (+0x3A >> 2) & 1.
             (EnemyState::Walking, WALKER) => ((self.walk_count >> 2) & 1) as usize,
             (EnemyState::Walking, _) => (self.age / 8 % 2) as usize,
-            (EnemyState::Shell(t), _) => {
+            (EnemyState::Shell(t) | EnemyState::Carried(t), _) => {
                 let legs = t < SHELL_LEGS_BELOW && t & SHELL_LEG_MASKS[(t >> 4) as usize] != 0;
                 if legs { KOOPA_SHELL_WAKING } else { KOOPA_SHELL }
             }
@@ -1630,6 +1703,30 @@ impl Enemy {
         }
     }
 }
+
+/// A carried shell touching another live object (0x08043434 -> 0x08048868, while its
+/// +0x24 grace is 0): both are knocked out (state 6, speed byte 0xD0; the other moves
+/// 0x0816944A[side] = -8 / 8 away from the player). Returns where the shell was, for the
+/// 100-point popup (0x08093654 with chain 0).
+pub fn carried_hits(enemies: &mut [Enemy], player: &Player) -> Option<(i32, i32)> {
+    let c = enemies.iter().position(|e| matches!(e.state, EnemyState::Carried(_)) && e.grace == 0)?;
+    let (sx, sy) = enemies[c].px();
+    let hit = (0..enemies.len()).find(|&j| {
+        j != c && enemies[j].alive() && !enemies[j].is_plant() && enemies[j].overlaps_box(sx, sy, SIZE, SIZE)
+    })?;
+    let o = &mut enemies[hit];
+    o.state = EnemyState::Dead;
+    o.flipped = false;
+    o.vy = KNOCKOUT_SPEED;
+    o.vx = -toward(player, o.x) * CARRY_KNOCK_DRIFT;
+    let shell = &mut enemies[c];
+    shell.state = EnemyState::Dead;
+    shell.vy = KNOCKOUT_SPEED;
+    Some((sx, sy))
+}
+
+/// 0x0816944A: an object hit by the carried shell moves away at speed byte 8.
+const CARRY_KNOCK_DRIFT: i32 = 8 * 16;
 
 /// Kicked shells knock out enemies they touch; two sliding shells knock each other out.
 /// Checked every other frame, like 0x08042C10. Returns (knocked-out enemy's top-left,

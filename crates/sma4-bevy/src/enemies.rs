@@ -32,6 +32,8 @@ const Z_ENEMY: f32 = 8.0;
 const Z_BEHIND: f32 = -1.0;
 /// Riding Micro-Goombas show over the player (0x0808D7E0 uses OBJ priority 1, like it).
 const Z_MICRO: f32 = 10.5;
+/// Over the player (z 10).
+const Z_CARRIED_FRONT: f32 = 10.6;
 
 /// Sprite cells per enemy type, the puff of smoke, the fireball, the Micro-Goomba, the
 /// boomerang and the hammer.
@@ -263,7 +265,16 @@ fn sync_enemies(
             let raise = if enemies::is_bro(kind) { sma4_assets::BRO_RAISE } else { 0 };
             (x - KOOPA_ORIGIN.0 + w / 2, y - KOOPA_ORIGIN.1 + raise + h / 2 + if dead { 16 } else { 0 })
         };
-        let z = if e.emerging > 0 { Z_BEHIND } else { Z_ENEMY };
+        // A carried shell is drawn behind the player (OAM after his), in front while he
+        // turns round (0x08043354 moves it to OAM 5).
+        let turning = matches!(e.state, EnemyState::Carried(_)) && game.0.player.hold_turn != 0;
+        let z = if e.emerging > 0 {
+            Z_BEHIND
+        } else if turning {
+            Z_CARRIED_FRONT
+        } else {
+            Z_ENEMY
+        };
         commands.spawn((EnemySprite, sprite, Transform::from_xyz(cx as f32, -(cy as f32), z)));
     }
 }

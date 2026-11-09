@@ -96,6 +96,10 @@ const JUMP_BASE: i32 = -0x38;
 const JUMP_BONUS: [i32; 8] = [0, 2, 4, 8, 0x10, 0x18, 0x18, 0x18];
 /// Gravity per frame: 1 while rising faster than -0x20 with A held, otherwise 5.
 const GRAVITY_HOLD: i32 = 1;
+/// +0x42 on a turn with a shell (0x08097ACC).
+const HOLD_TURN_FRAMES: u8 = 7;
+/// +0x41 after a kick (0x080436A0).
+pub const KICK_POSE_FRAMES: u8 = 0x0C;
 const GRAVITY: i32 = 5;
 const HOLD_ABOVE: i32 = -0x20;
 const MAX_FALL: i32 = 0x40;
@@ -208,6 +212,14 @@ pub enum Pose {
     /// Swimming: stroke step 0-5 (0x0813DE43), or paddling in place, step 0-3 (0x0813DE4F).
     Swim(u8),
     SwimIdle(u8),
+    /// Carrying a shell (0x0809EEB4): walk step 0-3 (0x0813DEC0[0x0813DD6F[form] + step]);
+    /// in the air step 0 (1 small), the raccoon wagging its tail 0x0813DF00[+0x65 >> 2].
+    Hold(u8),
+    HoldWag(u8),
+    /// Turning round with a shell (+0x42, 0x08097ACC: pose 0x32 small, 0x05 the others).
+    HoldTurn,
+    /// Kicking a shell (+0x41, 0x08097ACC: pose 0x42 small, 0x2D the others).
+    Kick,
 }
 
 impl Pose {
@@ -231,6 +243,10 @@ impl Pose {
             Pose::Throw(s) => a::PLAYER_THROW + s as usize,
             Pose::Swim(s) => a::PLAYER_SWIM + s as usize,
             Pose::SwimIdle(s) => a::PLAYER_SWIM_IDLE + s as usize,
+            Pose::Hold(s) => a::PLAYER_HOLD + s as usize,
+            Pose::HoldWag(s) => a::PLAYER_HOLD_WAG + s as usize,
+            Pose::HoldTurn => a::PLAYER_HOLD_TURN,
+            Pose::Kick => a::PLAYER_KICK,
             Pose::ThrowAir(s) => a::PLAYER_THROW_AIR + s as usize,
             // Drawn from their own sheets; the standing cell as a fallback.
             Pose::Morph(_) | Pose::Puff(_) => a::PLAYER_WALK + STAND_STEP as usize,
@@ -307,6 +323,18 @@ pub struct Player {
     slide_pose: bool,
     /// Crouching (+0x48, `crouch`): the collision is the small form's.
     pub crouch: bool,
+    /// Carrying a shell (0x03007820 + 0, set each frame by the shell, 0x08043434).
+    pub carrying: bool,
+    /// B is held and nothing is carried yet: touching a resting shell from the side picks
+    /// it up (0x08048E8C; set by the game).
+    pub grab: bool,
+    /// +0x42: frames of the turn with a shell (7 when the facing changes, 0x08097ACC), and
+    /// whether this frame showed it.
+    pub hold_turn: u8,
+    turning: bool,
+    /// +0x41: frames of the kick pose (0x0C from 0x080436A0), and whether this frame shows it.
+    pub kick: u8,
+    kicking: bool,
     /// Standing on an object (0x030038C5), with its speed byte across; set by the game.
     pub riding: Option<i32>,
     /// Micro-Goombas riding the player (0x03007820 + 7), set by the game every frame.
@@ -1017,9 +1045,45 @@ impl Player {
         Some(((fx + dx).div_euclid(TILE_PX), (fy + 24).div_euclid(TILE_PX)))
     }
 
+    /// 0x08097ACC's timers, after the player's update: the kick pose (+0x41) and, on the
+    /// ground with a shell, the turn (+0x42 = 7 when the facing changed this frame, then
+    /// down by 1 a frame, the turn pose while it ran).
+    pub fn step_hold(&mut self, was_left: bool) {
+        self.kicking = self.kick != 0;
+        self.kick = self.kick.saturating_sub(1);
+        if self.hold_turn == 0 && self.carrying && self.on_ground && self.facing_left != was_left {
+            self.hold_turn = HOLD_TURN_FRAMES;
+        }
+        self.turning = self.hold_turn != 0 && self.carrying;
+        self.hold_turn = self.hold_turn.saturating_sub(1);
+        if !self.carrying {
+            self.hold_turn = 0;
+        }
+    }
+
     /// Sprite pose, following the ROM's pose routines (0x08097800, 0x08097ACC,
     /// 0x080981C4, 0x080984E8, 0x080983F8).
     pub fn pose(&self) -> Pose {
+        if self.puff == 0 && self.morph == 0 && !self.in_water {
+            // 0x08097ACC: the kick pose last, over everything else; before it the shell's
+            // poses (0x0809EEB4) replace the walking, running and jumping ones.
+            if self.kicking {
+                return Pose::Kick;
+            }
+            if self.carrying {
+                if self.turning {
+                    return Pose::HoldTurn;
+                }
+                if self.on_ground {
+                    return Pose::Hold(self.walk_step);
+                }
+                return match self.form {
+                    Form::Raccoon => Pose::HoldWag((self.wag >> 2).min(2)),
+                    Form::Small => Pose::Hold(1),
+                    _ => Pose::Hold(0),
+                };
+            }
+        }
         if self.puff != 0 {
             return Pose::Puff((self.puff & 0xC) >> 2);
         }
