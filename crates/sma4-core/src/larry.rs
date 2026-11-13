@@ -64,6 +64,8 @@ const BEATEN_FIRE: u8 = 0x7F;
 /// The player's bounce off him (+0x1D = 0xD0) and the push of the shell (+0x1C 0xD0 / 0x30).
 pub const STOMP_BOUNCE: i32 = -0x30 * UNIT;
 pub const SHELL_PUSH: i32 = 0x30 * UNIT;
+/// 0x080735DC: the push also sets the player's +0x70 (`Player::push_timer`).
+pub const PUSH_TIME: u8 = 8;
 /// State 1: the speed toward x 0x80 is (0x80 - x low byte) >> 1; up at 0xA0 once +0x24 is
 /// below 8; the wand comes once both rows are off the top (+0x1B == 3) with (x low byte -
 /// 0x78) < 0x10.

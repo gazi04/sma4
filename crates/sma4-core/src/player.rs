@@ -286,6 +286,10 @@ pub struct Player {
     wag: u8,
     /// Tail whip timer (+0x6A).
     pub whip: u8,
+    /// Push timer +0x70 (8 after Larry's shell pushes the player, 0x080735DC): while it
+    /// runs, the wall push-out 0x0809E664 snaps the frame to the 16 px grid in one go
+    /// instead of 1 px a frame, and clears it.
+    pub push_timer: u8,
     /// Tanooki statue timer +0x52 (Down + B as a Tanooki, 0x08097FE0). The port has no
     /// Tanooki suit yet, so nothing sets it; the wand reacts to it (`wand`).
     pub statue: u8,
@@ -587,6 +591,7 @@ impl Player {
         self.wag = self.wag.saturating_sub(1);
         self.whip = self.whip.saturating_sub(1);
         self.throw = self.throw.saturating_sub(1);
+        self.push_timer = self.push_timer.saturating_sub(1);
         // 0x080A6E0C: the star runs down on odd frames.
         if self.star != 0 {
             if frame & 1 != 0 {
@@ -1344,16 +1349,38 @@ impl Player {
         if self.vx > 0 {
             let tx = (px + HITBOX_W - 1).div_euclid(TILE_PX);
             if rows.iter().any(|&ty| map.at(tx, ty) == TileKind::Solid) {
+                let moved = self.frame_x_sub();
                 self.x = (tx * TILE_PX - HITBOX_W) * SUB;
                 self.vx = 0;
+                self.pushed_snap(-1, moved);
             }
         } else if self.vx < 0 {
             let tx = px.div_euclid(TILE_PX);
             if rows.iter().any(|&ty| map.at(tx, ty) == TileKind::Solid) {
+                let moved = self.frame_x_sub();
                 self.x = (tx + 1) * TILE_PX * SUB;
                 self.vx = 0;
+                self.pushed_snap(1, moved);
             }
         }
+    }
+
+    /// 0x0809E664 with the push timer (+0x70) running: the frame pushed out of a wall goes
+    /// to the 16 px grid (x & ~0xFFF, + 0x1000 pushing right) rather than to where the side
+    /// probe lines up with the wall; the timer is cleared. `moved` is the frame x (1/256
+    /// px) after the move, before the port's own push-out: the ROM snaps that.
+    fn pushed_snap(&mut self, dir: i32, moved: i32) {
+        if self.push_timer == 0 {
+            return;
+        }
+        self.push_timer = 0;
+        let snapped = (moved & !0xFFF) + if dir > 0 { 0x1000 } else { 0 };
+        self.x += snapped - self.frame_x_sub();
+    }
+
+    /// The frame's x in 1/256 px (the ROM's +0).
+    fn frame_x_sub(&self) -> i32 {
+        self.x + (HITBOX_W / 2 - FRAME_W / 2) * SUB
     }
 
     fn move_y(&mut self, map: &Level) -> Option<(i32, i32)> {
@@ -1561,6 +1588,11 @@ impl Player {
             let (dir, edge) = if left_half { (-1, 0xD) } else { (1, 4) };
             if (px(fx) + edge) & 0xF != 0 {
                 fx += dir * SUB;
+                // 0x0809E664 with +0x70: to the 16 px grid at once.
+                if self.push_timer != 0 {
+                    self.push_timer = 0;
+                    fx = (fx & !0xFFF) + if dir > 0 { 0x1000 } else { 0 };
+                }
                 if (dir < 0) == (self.vx >= 0) {
                     self.vx = 0;
                     self.slide = 0;
@@ -1860,6 +1892,41 @@ mod tests {
         s.run(Buttons::LEFT, 300);
         assert_eq!(s.p.px().0, 5 * TILE_PX);
         assert_eq!(s.p.vx, 0);
+    }
+
+    #[test]
+    fn pushed_into_a_wall_the_frame_snaps_to_the_16_px_grid() {
+        let (w, h) = (40, 6);
+        let mut kinds = vec![TileKind::Empty; w * h];
+        for x in 0..w {
+            kinds[(h - 1) * w + x] = TileKind::Solid;
+        }
+        for y in 0..h {
+            kinds[y * w + 4] = TileKind::Solid;
+        }
+        let mut s = Sim::new(Level::from_kinds(w, h, &kinds), 6 * TILE_PX);
+        s.run(Buttons::empty(), 10);
+        // Larry's shell push: speed 0x30 left (3 px a frame), +0x70 = 8.
+        s.p.vx = -0x30 * UNIT;
+        s.p.push_timer = 8;
+        let mut snapped = false;
+        for _ in 0..40 {
+            s.run(Buttons::empty(), 1);
+            if s.p.vx == 0 && s.p.frame().0 < 5 * TILE_PX + 8 {
+                snapped = true;
+                break;
+            }
+        }
+        assert!(snapped);
+        // 0x0809E664: x & ~0xFFF + 0x1000 (pushed right), not the wall's edge (frame x 0x4E).
+        assert_eq!(s.p.frame().0, 5 * TILE_PX);
+        assert_eq!(s.p.push_timer, 0, "used up");
+        // Without the timer: the wall's edge.
+        let mut s = Sim::new(Level::from_kinds(w, h, &kinds), 6 * TILE_PX);
+        s.run(Buttons::empty(), 10);
+        s.p.vx = -0x30 * UNIT;
+        s.run(Buttons::empty(), 10);
+        assert_eq!(s.p.frame().0, 5 * TILE_PX - 2);
     }
 
     /// 10x6 map: a solid floor on row 5 and a row of white blocks (id 0x25) on row 3.

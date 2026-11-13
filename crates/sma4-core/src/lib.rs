@@ -1024,6 +1024,8 @@ impl Game {
         }
         if let Some(vx) = ev.push {
             self.player.vx = vx;
+            // 0x080735DC: +0x70 = 8 (`Player::push_timer`).
+            self.player.push_timer = larry::PUSH_TIME;
         }
         // 0x03003D0F = 0x81: the clock stops; objects in slots 4..0 become puffs.
         if ev.beaten {
