@@ -35,6 +35,7 @@
 //! * While the state is 3 or more, the player is held (0x08094BD8) in pose 0x0813DEE8[form]
 //!   (the jump pose) and 0x080A83EC draws the wand held over his head.
 
+use crate::goal::TallyLine;
 use crate::level::{Level, TILE_PX};
 use crate::obj::ObjSprite;
 use crate::player::{Player, SUB, UNIT};
@@ -446,6 +447,8 @@ const TALLY_DELAY: u16 = 0x160;
 const CLEAR_TEXT_AT: u16 = 0x50;
 const LINE_BELOW: u16 = 0x30;
 const DRAIN_AT: u16 = 0x10;
+/// 0x08066C3C / 0x08066F08's param: the wand's line (x 200).
+const LINE: u8 = 4;
 /// 0x0816EE44[4] / [5]: tens of points per ten seconds and per second drained.
 pub const POINTS: [u32; 2] = [200, 20];
 /// Larry's +0x23 after the tally (0x0807336C), and the value that ends state 4.
@@ -706,73 +709,12 @@ impl Cleared {
     /// The tally line, once written (0x08066C3C runs while the delay is below 0x30 and
     /// during the drain): the kept clock, then the drained clock's points.
     pub fn line(&self, clock: &[u8; 3]) -> Option<TallyLine> {
-        (!self.erased && (self.tallied || self.delay < LINE_BELOW))
-            .then(|| TallyLine { kept: self.kept, points: tally_points(clock) })
+        (!self.erased && (self.tallied || self.delay < LINE_BELOW)).then(|| TallyLine::new(LINE, self.kept, clock))
     }
 
     /// The player falls this frame (0x080A8000 with 0x030038C6 >= 7, before the objects).
     pub fn falling(&self) -> bool {
         self.state >= 7
-    }
-}
-
-/// The value the line shows after "=": the clock left x 0x0816EE44[5] (tens; the line's
-/// last cell is a fixed 0).
-fn tally_points(clock: &[u8; 3]) -> u32 {
-    POINTS[1] * (clock[0] as u32 * 100 + clock[1] as u32 * 10 + clock[2] as u32)
-}
-
-/// One BG0 cell of the tally line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Glyph {
-    /// Yellow digit (palette 0, tiles 0x290-0x299).
-    Digit(u8),
-    /// White digit (palette 15).
-    White(u8),
-    /// 0x29A.
-    Times,
-    /// The clock icon 0x29B.
-    Clock,
-    /// 0x282.
-    Equals,
-    Blank,
-}
-
-/// The tally line 0x08066C3C writes at BG0 cell (8, 8): 15 cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TallyLine {
-    pub kept: [u8; 3],
-    /// Tens of points.
-    pub points: u32,
-}
-
-/// Where the line starts (BG0 cell; 0x0816EE78[4] = 0x200 + 0x10 bytes into the map).
-pub const LINE_AT: (u32, u32) = (8, 8);
-/// 0x0816EE86[4..6] and the cell after: "200".
-const MULTIPLIER: [u8; 3] = [2, 0, 0];
-
-impl TallyLine {
-    pub fn cells(&self) -> Vec<Glyph> {
-        let mut out = vec![Glyph::Clock];
-        out.extend(self.kept.iter().map(|&d| Glyph::Digit(d)));
-        out.push(Glyph::Times);
-        out.extend(MULTIPLIER.iter().map(|&d| Glyph::White(d)));
-        out.push(Glyph::Equals);
-        // Five digits without leading zeros (10000 down to 1), then the fixed 0.
-        let mut v = self.points % 100_000;
-        let mut lead = true;
-        for place in [10_000, 1_000, 100, 10, 1] {
-            let d = (v / place) as u8;
-            v %= place;
-            if lead && d == 0 {
-                out.push(Glyph::Blank);
-            } else {
-                lead = false;
-                out.push(Glyph::White(d));
-            }
-        }
-        out.push(Glyph::White(0));
-        out
     }
 }
 
@@ -937,21 +879,6 @@ mod tests {
         assert_eq!((out[0].tile, out[1].tile, out[2].tile, out[7].tile), (0x10A, 0x12A, 0x10B, 0x12A));
         assert!(out[7].hflip && !out[0].hflip);
         assert_eq!((out[1].pal, out[1].y, out[6].x), (6, 0x18, 0x48));
-    }
-
-    #[test]
-    fn the_line_shows_the_kept_clock_and_the_points_left() {
-        let line = TallyLine { kept: [2, 8, 7], points: 20 * 267 };
-        use Glyph::*;
-        assert_eq!(
-            line.cells(),
-            vec![
-                Clock, Digit(2), Digit(8), Digit(7), Times, White(2), White(0), White(0), Equals, Blank, White(5),
-                White(3), White(4), White(0), White(0)
-            ]
-        );
-        let zero = TallyLine { kept: [2, 8, 7], points: 0 };
-        assert_eq!(&zero.cells()[9..], &[Blank, Blank, Blank, Blank, Blank, White(0)]);
     }
 
     #[test]

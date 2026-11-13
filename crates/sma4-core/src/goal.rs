@@ -46,6 +46,13 @@ const TALLY_DELAY: u16 = 0xA8;
 const TALLY_START: u16 = 0x10;
 /// Points per drained clock step (0x0816EE44, in tens): 10 seconds 50, 1 second 5.
 const TALLY_POINTS: [u32; 2] = [50, 5];
+/// 0x08066F08 writes the tally line (0x08066C3C) once the delay is below this.
+const LINE_BELOW: u16 = 0x30;
+/// 0x08066F08 / 0x08066C3C's param: the goal's (x 50) and the fortress ball's (x 100) lines.
+const LINE_GOAL: u8 = 0;
+pub const LINE_BALL: u8 = 2;
+/// The ball's "LEVEL CLEARED!" (text 0xAF) is written when its delay is 0x50 (0x0806DF60).
+const BALL_TEXT_AT: u16 = 0x50;
 /// The player has left once it is 0x120 px into the screen (sub-state 5 compares the low
 /// byte of player +0x14 with 0x20; 0x0806743C freezes it at 0x120).
 const OFF_SCREEN: i32 = 0x120;
@@ -91,6 +98,8 @@ pub struct Goal {
     tally_delay: u16,
     /// The clock has been counted into the score.
     pub tallied: bool,
+    /// The clock when the card was touched (0x080684D4 copies it to 0x03007848 + 0xDC4).
+    kept: [u8; 3],
 }
 
 /// What the goal asks of the game this frame.
@@ -119,6 +128,7 @@ impl Goal {
             box_fade: 0xFF,
             tally_delay: TALLY_DELAY,
             tallied: false,
+            kept: [0; 3],
         }
     }
 
@@ -169,6 +179,7 @@ impl Goal {
                     self.phase = Phase::Rising;
                     self.box_fade = BOX_FADE;
                     self.tally_delay = TALLY_DELAY;
+                    self.kept = *clock;
                 }
             }
             Phase::Rising => {
@@ -218,6 +229,14 @@ impl Goal {
         false
     }
 
+    /// The tally line (0x08066C3C(0), BG0 row 11), once written: sub-state 5 writes it when
+    /// the delay drops below 0x30 and at each drain step; it stays until the level ends.
+    pub fn line(&self, clock: &[u8; 3]) -> Option<TallyLine> {
+        let written = matches!(self.phase, Phase::Results | Phase::Leaving)
+            && (self.tallied || self.tally_delay < LINE_BELOW);
+        written.then(|| TallyLine::new(LINE_GOAL, self.kept, clock))
+    }
+
     /// Whether the player has walked far enough to stop (0x0806743C sets +0x40).
     pub fn player_stopped(player: &Player, camera: (i32, i32)) -> bool {
         player.px().0 - camera.0 >= OFF_SCREEN
@@ -240,19 +259,27 @@ pub(crate) fn drain(clock: &mut [u8; 3], points: [u32; 2]) -> u32 {
 
 /// The clock tally on its own (0x08066F08 called from an object, e.g. the fortress's ball):
 /// a delay counted down to 0x10, the drain, then `leave` frames (the object's +0x23 = 0x40,
-/// leaving at 1) before the level ends.
+/// leaving at 1) before the level ends. The ball (0x0806DF60) writes "LEVEL CLEARED!" when
+/// the delay is 0x50 and its tally line (param 2) below 0x30.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClockTally {
     delay: u16,
     points: [u32; 2],
     leave: Option<u8>,
+    /// The clock when the tally began (0x0806DDD4 copies it to 0x03007848 + 0xDC4).
+    kept: [u8; 3],
+    /// 0x08066C3C's param.
+    param: u8,
+    text: bool,
+    line: bool,
 }
 
 const TALLY_LEAVE: u8 = 0x40;
 
 impl ClockTally {
-    pub fn new(delay: u16, points: [u32; 2]) -> Self {
-        Self { delay, points, leave: None }
+    /// `kept` is the clock as it stopped, `param` the line's (`LINE_BALL`).
+    pub fn new(delay: u16, points: [u32; 2], kept: [u8; 3], param: u8) -> Self {
+        Self { delay, points, leave: None, kept, param, text: false, line: false }
     }
 
     /// One frame: points (tens) earned, and whether the level ends.
@@ -261,15 +288,104 @@ impl ClockTally {
             *t -= 1;
             return (0, *t == 1);
         }
+        if self.delay == BALL_TEXT_AT {
+            self.text = true;
+        }
         if self.delay != TALLY_START {
             self.delay -= 1;
+            self.line |= self.delay < LINE_BELOW;
             return (0, false);
         }
         if clock.iter().all(|&d| d == 0) {
             self.leave = Some(TALLY_LEAVE);
             return (0, false);
         }
+        self.line = true;
         (drain(clock, self.points), false)
+    }
+
+    /// "LEVEL CLEARED!" is on the screen (from the delay's 0x50 on, until the level ends).
+    pub fn text(&self) -> bool {
+        self.text
+    }
+
+    /// The tally line, once written.
+    pub fn line(&self, clock: &[u8; 3]) -> Option<TallyLine> {
+        self.line.then(|| TallyLine::new(self.param, self.kept, clock))
+    }
+}
+
+/// One BG0 cell of a tally line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Glyph {
+    /// Yellow digit (palette 0, tiles 0x290-0x299).
+    Digit(u8),
+    /// White digit (palette 15).
+    White(u8),
+    /// 0x29A.
+    Times,
+    /// The clock icon 0x29B.
+    Clock,
+    /// 0x282.
+    Equals,
+    Blank,
+}
+
+/// The clock tally line 0x08066C3C(param) writes on BG0 (15 cells from column 8; row from
+/// 0x0816EE78[param]: 0x2C0 = row 11 for the goal, which sets 0x03003B98 = 0, 0x200 = row
+/// 8 for the ball and the wand): the clock icon, the kept clock (0x03007848 + 0xDC4..),
+/// "x", the multiplier 0x0816EE86[param..param + 2] and a fixed 0, "=", the clock left x
+/// 0x0816EE44[param + 1] as five digits without leading zeros, and a fixed 0. Seen in mGBA
+/// at World 1-1's goal: "<clock>290x 50=  14500" on row 11.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TallyLine {
+    pub param: u8,
+    pub kept: [u8; 3],
+    /// Tens of points.
+    pub points: u32,
+}
+
+/// 0x0816EE86 by param (0xF0FF: blank): " 5", "10", "20", then the line's fixed 0.
+const MULTIPLIERS: [[Option<u8>; 2]; 3] = [[None, Some(5)], [Some(1), Some(0)], [Some(2), Some(0)]];
+/// 0x0816EE44[param + 1]: tens of points per second.
+const LINE_POINTS: [u32; 3] = [5, 10, 20];
+/// 0x0816EE78[param] / 0x40: the BG0 row.
+const LINE_ROWS: [u32; 3] = [11, 8, 8];
+pub const LINE_COL: u32 = 8;
+
+impl TallyLine {
+    pub fn new(param: u8, kept: [u8; 3], clock: &[u8; 3]) -> Self {
+        let seconds = clock[0] as u32 * 100 + clock[1] as u32 * 10 + clock[2] as u32;
+        Self { param, kept, points: LINE_POINTS[(param >> 1) as usize] * seconds }
+    }
+
+    /// The BG0 cell of its first glyph.
+    pub fn at(&self) -> (u32, u32) {
+        (LINE_COL, LINE_ROWS[(self.param >> 1) as usize])
+    }
+
+    pub fn cells(&self) -> Vec<Glyph> {
+        let mut out = vec![Glyph::Clock];
+        out.extend(self.kept.iter().map(|&d| Glyph::Digit(d)));
+        out.push(Glyph::Times);
+        out.extend(MULTIPLIERS[(self.param >> 1) as usize].iter().map(|d| d.map_or(Glyph::Blank, Glyph::White)));
+        out.push(Glyph::White(0));
+        out.push(Glyph::Equals);
+        // Five digits without leading zeros (10000 down to 1), then the fixed 0.
+        let mut v = self.points % 100_000;
+        let mut lead = true;
+        for place in [10_000, 1_000, 100, 10, 1] {
+            let d = (v / place) as u8;
+            v %= place;
+            if lead && d == 0 {
+                out.push(Glyph::Blank);
+            } else {
+                lead = false;
+                out.push(Glyph::White(d));
+            }
+        }
+        out.push(Glyph::White(0));
+        out
     }
 }
 
@@ -421,4 +537,74 @@ mod tests {
         assert_eq!(bonus_lives(&[1, 2, 1]), 0);
         assert_eq!(bonus_lives(&[0, 0, 0]), 0);
     }
+    #[test]
+    fn the_line_shows_the_kept_clock_and_the_points_left() {
+        let line = TallyLine::new(4, [2, 8, 7], &[2, 6, 7]);
+        use Glyph::*;
+        assert_eq!(
+            line.cells(),
+            vec![
+                Clock, Digit(2), Digit(8), Digit(7), Times, White(2), White(0), White(0), Equals, Blank, White(5),
+                White(3), White(4), White(0), White(0)
+            ]
+        );
+        let zero = TallyLine::new(4, [2, 8, 7], &[0; 3]);
+        assert_eq!(&zero.cells()[9..], &[Blank, Blank, Blank, Blank, Blank, White(0)]);
+    }
+
+    #[test]
+    fn the_goal_line_reads_x_50_on_row_11() {
+        // mGBA, World 1-1's goal with 290 seconds kept: row 11 from column 8, "x 50", and
+        // after ten tens drained (190 left) "9500".
+        let line = TallyLine::new(0, [2, 9, 0], &[1, 9, 0]);
+        use Glyph::*;
+        assert_eq!(line.at(), (8, 11));
+        assert_eq!(
+            line.cells(),
+            vec![
+                Clock, Digit(2), Digit(9), Digit(0), Times, Blank, White(5), White(0), Equals, Blank, Blank,
+                White(9), White(5), White(0), White(0)
+            ]
+        );
+        let ball = TallyLine::new(LINE_BALL, [1, 0, 0], &[0, 0, 7]);
+        assert_eq!((ball.at(), &ball.cells()[5..8]), ((8, 8), &[White(1), White(0), White(0)][..]));
+        assert_eq!(ball.points, 70);
+    }
+
+    #[test]
+    fn the_goal_writes_its_line_below_0x30() {
+        let p = Player::spawn(0, 0);
+        let mut g = goal_at(0x40, 0, &p);
+        let mut clock = [2, 9, 0];
+        g.phase = Phase::Results;
+        g.kept = clock;
+        let mut f = 0;
+        while g.line(&clock).is_none() {
+            g.step(&p, (0, 0), &mut clock, 0);
+            f += 1;
+        }
+        // mGBA: the line is in VRAM 168 frames after the touch at delay 0x2E (written the
+        // frame before, at 0x2F).
+        assert_eq!(f, (TALLY_DELAY - 0x2F) as u32);
+    }
+
+    #[test]
+    fn the_ball_shows_level_cleared_at_0x50_and_its_line_below_0x30() {
+        let mut clock = [0, 0, 3];
+        let mut t = ClockTally::new(0x150, [10, 1], clock, LINE_BALL);
+        let (mut text, mut line) = (None, None);
+        for f in 1..0x200 {
+            if t.step(&mut clock).1 {
+                break;
+            }
+            if t.text() && text.is_none() {
+                text = Some(f);
+            }
+            if t.line(&clock).is_some() && line.is_none() {
+                line = Some(f);
+            }
+        }
+        assert_eq!((text, line), (Some(0x101), Some(0x121)));
+    }
+
 }

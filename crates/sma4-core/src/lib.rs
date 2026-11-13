@@ -727,7 +727,12 @@ impl Game {
             && ball.step(&self.level, pbox)
         {
             // 0x0806DDD4: course clear music 0x21, the clock stops and is counted.
-            self.fortress_clear = Some(goal::ClockTally::new(boom_boom::BALL_TALLY_DELAY, boom_boom::BALL_TALLY_POINTS));
+            self.fortress_clear = Some(goal::ClockTally::new(
+                boom_boom::BALL_TALLY_DELAY,
+                boom_boom::BALL_TALLY_POINTS,
+                self.status.clock,
+                goal::LINE_BALL,
+            ));
             self.ball = None;
         }
         // 0x0804D12C: no projectile and no Bro left, a chest drops in on the far side

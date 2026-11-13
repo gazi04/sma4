@@ -2,8 +2,8 @@
 //! and the course-clear texts, all extracted from the user's own ROM by `sma4-extract`
 //! (`objects/goal.png`, `coin_spin.png`, `course_clear.png`, `card_got.png`,
 //! the card in the frame drawn with the card sprite). The sequence itself runs in `sma4-core` (`goal.rs`).
-//! Also the airship's "LEVEL CLEARED!" and its clock tally line (`tally_glyphs.png`,
-//! `sma4_core::wand`).
+//! Also the clock tally lines (`tally_glyphs.png`, `sma4_core::goal::TallyLine`) of the goal,
+//! the fortress's ball and the airship's wand, and the ball's and wand's "LEVEL CLEARED!".
 
 use bevy::prelude::*;
 use sma4_assets::{
@@ -13,8 +13,7 @@ use sma4_assets::{
 };
 use sma4_core::{
     SCREEN_H, SCREEN_W,
-    goal::Phase,
-    wand::{Glyph, LINE_AT},
+    goal::{Glyph, Phase, TallyLine},
 };
 
 use crate::GameRes;
@@ -85,6 +84,24 @@ fn screen_at((col, row): (u32, u32), w: u32, h: u32) -> Transform {
     )
 }
 
+/// The BG0 cells of a tally line (`Glyph::Blank` cells left out).
+fn line_sprites(line: &TallyLine, art: &Art, out: &mut Vec<(Handle<Image>, Transform)>) {
+    let (col, row) = line.at();
+    for (i, glyph) in line.cells().into_iter().enumerate() {
+        let k = match glyph {
+            Glyph::Digit(d) => TALLY_DIGITS + d as usize,
+            Glyph::White(d) => TALLY_WHITE_DIGITS + d as usize,
+            Glyph::Times => TALLY_TIMES,
+            Glyph::Clock => TALLY_CLOCK,
+            Glyph::Equals => TALLY_EQUALS,
+            Glyph::Blank => continue,
+        };
+        if let Some(image) = art.tally.get(k) {
+            out.push((image.clone(), screen_at((col + i as u32, row), 8, 8)));
+        }
+    }
+}
+
 fn sync_goal(
     mut commands: Commands,
     game: Res<GameRes>,
@@ -107,28 +124,17 @@ fn sync_goal(
             commands.spawn((GoalSprite, Sprite::from_image(image.clone()), t));
         }
     }
-    if let Some(c) = &g.wand_clear {
+    // The wand's and the ball's "LEVEL CLEARED!" and their lines.
+    let clear = g.wand_clear.map(|c| (c.text(), c.line(&g.status.clock)));
+    let clear = clear.or(g.fortress_clear.map(|t| (t.text(), t.line(&g.status.clock))));
+    if let Some((text, line)) = clear {
         let mut texts = Vec::new();
-        if c.text()
-            && let Some(image) = &art.course_clear
-        {
+        if text && let Some(image) = &art.course_clear {
             let (w, h) = (COURSE_CLEAR_TILES.0 * 8, COURSE_CLEAR_TILES.1 * 8);
             texts.push((image.clone(), screen_at(COURSE_CLEAR_AT, w, h)));
         }
-        if let Some(line) = c.line(&g.status.clock) {
-            for (i, glyph) in line.cells().into_iter().enumerate() {
-                let k = match glyph {
-                    Glyph::Digit(d) => TALLY_DIGITS + d as usize,
-                    Glyph::White(d) => TALLY_WHITE_DIGITS + d as usize,
-                    Glyph::Times => TALLY_TIMES,
-                    Glyph::Clock => TALLY_CLOCK,
-                    Glyph::Equals => TALLY_EQUALS,
-                    Glyph::Blank => continue,
-                };
-                if let Some(image) = art.tally.get(k) {
-                    texts.push((image.clone(), screen_at((LINE_AT.0 + i as u32, LINE_AT.1), 8, 8)));
-                }
-            }
+        if let Some(line) = line {
+            line_sprites(&line, &art, &mut texts);
         }
         commands.entity(*camera).with_children(|cam| {
             for (image, t) in texts {
@@ -160,6 +166,9 @@ fn sync_goal(
     if clear && let Some(image) = &art.course_clear {
         let (w, h) = (COURSE_CLEAR_TILES.0 * 8, COURSE_CLEAR_TILES.1 * 8);
         texts.push((image.clone(), screen_at(COURSE_CLEAR_AT, w, h)));
+    }
+    if let Some(line) = goal.line(&g.status.clock) {
+        line_sprites(&line, &art, &mut texts);
     }
     if card_line && let Some(image) = &art.card_got {
         let (w, h) = (CARD_GOT_TILES.0 * 8, CARD_GOT_TILES.1 * 8);
