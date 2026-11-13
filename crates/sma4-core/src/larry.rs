@@ -426,7 +426,7 @@ impl Larry {
             self.shell = SHELL_TIME;
             return;
         }
-        // Every other object (slots 4..0) would become a puff; none are in the cabin.
+        // Every other object in slots 4..0 becomes a puff (`Enemy::larry_beaten`).
         self.state = 1;
         self.fire = BEATEN_FIRE;
         self.shell = BEATEN_TIME;

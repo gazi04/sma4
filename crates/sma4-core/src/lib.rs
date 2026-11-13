@@ -1025,9 +1025,10 @@ impl Game {
         if let Some(vx) = ev.push {
             self.player.vx = vx;
         }
-        // 0x03003D0F = 0x81: the clock stops.
+        // 0x03003D0F = 0x81: the clock stops; objects in slots 4..0 become puffs.
         if ev.beaten {
             self.clock_stopped = true;
+            self.enemies.iter_mut().for_each(enemies::Enemy::larry_beaten);
         }
         for f in &mut self.player_fireballs {
             if f.live() && l.fireball(f.px()) {
@@ -1136,6 +1137,10 @@ impl Game {
             self.wand = None;
             self.wand_clear = Some(wand::Cleared::new(self.status.clock));
             self.clock_stopped = true;
+            // 0x0808CA90: the objects still around become puffs.
+            for e in &mut self.enemies {
+                e.wand_caught();
+            }
         }
     }
 
@@ -1182,6 +1187,9 @@ impl Game {
         self.obj_sprites.extend(clouds);
         let sparkles = self.step_wand_sparkles(camera);
         self.obj_sprites.extend(sparkles);
+        // The object loop runs on: the puffs 0x0808CA90 left fade out.
+        let (level, player, frame) = (&self.level, &self.player, self.frame);
+        self.enemies.retain_mut(|e| e.step(level, player, frame));
         if ev.done {
             // TODO(port): what follows (mode 1 sub-states 0x1B..: the fade, the King changed
             // back, the letter, "WORLD 1 CLEAR!") is not ported; the level ends as cleared.

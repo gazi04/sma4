@@ -1155,6 +1155,33 @@ impl Enemy {
         true
     }
 
+    /// The wand caught (0x0808CA90): an object in state 2, 3 or 5 (walking, a shell lying or
+    /// sliding; not carried) whose 0x0816AC24 bit 7 is clear (all of the port's enemies)
+    /// becomes a puff 8 px to the right. Returns whether it did.
+    pub fn wand_caught(&mut self) -> bool {
+        let caught = matches!(
+            self.state,
+            EnemyState::Walking
+                | EnemyState::Shell(_)
+                | EnemyState::Kicked
+                | EnemyState::Plant { .. }
+                | EnemyState::Collapsed { .. }
+        );
+        if caught {
+            self.puff();
+            self.x += 8 * SUB;
+        }
+        caught
+    }
+
+    /// Larry beaten (0x0807214C): whatever is in object slots 4..0 becomes a puff (state 8,
+    /// +0x23 = 0x1F).
+    pub fn larry_beaten(&mut self) {
+        if self.slot <= 4 {
+            self.puff();
+        }
+    }
+
     /// Knocked out with no body left to fall (0x0804448C class 7 -> 0x08044460): state 8.
     fn puff(&mut self) {
         self.state = EnemyState::Puff(PUFF_TIME);
@@ -3067,4 +3094,24 @@ mod tests {
         assert_eq!(e.state, EnemyState::Dead);
         assert_eq!(e.stomp_bonus(), BRO_STOMP_BONUS);
     }
+
+    #[test]
+    fn the_caught_wand_and_beaten_larry_turn_objects_into_puffs() {
+        let p = Player::spawn(0, 0);
+        let mut e = Enemy::spawn_at(WALKER, 0x40, 0x40, &p);
+        e.slot = 2;
+        assert!(e.wand_caught());
+        assert!(matches!(e.state, EnemyState::Puff(PUFF_TIME)));
+        assert_eq!(e.px().0, 0x48, "8 px to the right");
+        assert!(!e.wand_caught(), "already a puff");
+        let mut far = Enemy::spawn_at(WALKER, 0x40, 0x40, &p);
+        far.slot = 5;
+        far.larry_beaten();
+        assert_eq!(far.state, EnemyState::Walking, "slot 5 is left alone");
+        e.slot = 4;
+        e.state = EnemyState::Kicked;
+        e.larry_beaten();
+        assert!(matches!(e.state, EnemyState::Puff(_)));
+    }
+
 }
