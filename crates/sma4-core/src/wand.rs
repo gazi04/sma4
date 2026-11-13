@@ -10,6 +10,9 @@
 //!   0x20 or more it bounces at half the speed, 2 px up, +0x13 - 0x80 (sound 0x58 the
 //!   first time, 0xBF1 + 1); slower it stops (speed 0, 0xBF0 / 0xBF1 = 0, y's pixel low
 //!   nibble 5).
+//! * Fire Mario's fireballs (0x0808E9B0) and the raccoon tail (0x0808EAA4, once every 8
+//!   frames) bump it (0x0808E930): up at 0x08170B2E[hits since it landed], spinning at
+//!   0xD0, sparkling (0x0809137C: effect 6 every 8 frames, `Sparkle`) until it rests.
 //! * 0x0808EBB0 draws it (two tall 8x16 OBJs, palette 1, priority 1, tiles 0x08170B38 /
 //!   0x08170B40[frame & 7] (frame ^ 7 after an odd number of bounces), the right one
 //!   h-flipped, both v-flipped by 0x08170B48 bit 7) and tests the player (0x0808CC9C).
@@ -34,7 +37,7 @@
 
 use crate::level::{Level, TILE_PX};
 use crate::obj::ObjSprite;
-use crate::player::{Player, SUB};
+use crate::player::{Player, SUB, UNIT};
 use sma4_assets::TileKind;
 
 /// Larry's cabin.
@@ -67,6 +70,159 @@ const TOUCH_TOP: [i32; 2] = [0x12, 0x0A];
 const TOUCH_H: [i32; 2] = [0x10, 0x16];
 const TOUCH_DX: i32 = 6;
 const TOUCH_W: i32 = 0x10;
+/// 0x0808E9B0 / 0x0808EAA4 measure from (x + 6, y + 4); a fireball's top-left within
+/// ((dx + 8) as u16 <= 0xB, (dy + 0xE) as u16 <= 0x15).
+const FIRE_DX: i32 = 6;
+const FIRE_DY: i32 = 4;
+const FIRE_BOX: ((i32, u16), (i32, u16)) = ((8, 0xB), (0xE, 0x15));
+/// 0x08169D82: the tail's reach by facing (left, right); +0x15 = 8 after a tail hit.
+const TAIL_DX: [i32; 2] = [17, -12];
+const TAIL_WAIT: u8 = 8;
+/// 0x08170B2E: the speed a bump sends it up at, by hits since it last landed.
+const BUMP_SPEEDS: [i8; 10] = [-32, -36, -40, -44, -48, -48, -48, -48, -48, -64];
+const BUMP_SPIN: u8 = 0xD0;
+
+/// The statue's bounce off the wand (0x0808ED40) and touch (0x0808CAEC).
+const STATUE_BOUNCE_VY: i32 = -0x20;
+const STATUE_BOUNCE_VX: i32 = 0x10;
+const STATUE_WAIT: u8 = 0x20;
+const STATUE_TOUCH_VY: i32 = -0x10;
+const STATUE_SMOKE_LIFE: u8 = 0x1F;
+const STATUE_BURST: u8 = 0x16;
+
+/// 0x03007848 + 0xC08 (0x08088EF4, after the projectiles): four tall 8x16 OBJs of tile
+/// 0x1F (palette 1, priority 1) flying apart from (x, y): d = 0x16 - timer (0x13 below 3),
+/// at (x + d, y - d / 2), (x + d, y + d / 2), (x - d, y - d / 2), (x - d, y + d / 2); the
+/// timer counts down (unless the objects are held) after d is taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatueBurst {
+    /// Level px (0xC0C / 0xC0A).
+    pub x: i32,
+    pub y: i32,
+    pub timer: u8,
+}
+
+impl StatueBurst {
+    /// One frame: its OAM entries; false once over.
+    pub fn step(&mut self, camera: (i32, i32), out: &mut Vec<ObjSprite>) -> bool {
+        if self.timer == 0 {
+            return false;
+        }
+        let d = if self.timer < 3 { 0x13 } else { 0x16 - self.timer as i32 };
+        self.timer -= 1;
+        let (sx, sy) = ((self.x - camera.0) & 0x1FF, self.y - camera.1);
+        for i in 0..4 {
+            let x = if i & 2 == 0 { sx + d } else { sx - d };
+            let y = if i & 1 == 0 { sy - (d >> 1) } else { sy + (d >> 1) };
+            let a2 = 0x1F | 1 << 10 | 1 << 12;
+            out.extend(ObjSprite::from_attrs((y & 0xFF) as u16 | 0x8000, (x & 0x1FF) as u16, a2));
+        }
+        true
+    }
+}
+
+/// The tail's hit star 0x03007848 + 0xC03 (0x0808C114, after the projectiles; set to 10
+/// by a tail hit on the wand, 0x0808EAA4, or on an object, 0x080496B8): while the timer
+/// runs (counted down before the draw), two tall 8x16 OBJs of tile 0x8B at OAM 0 / 1, at
+/// (x, y) and (x + 8, y) on the screen, the second h-flipped, v-flipped by (0x03003AE8 >> 2)
+/// & 1 (the first) and its opposite (the second), palette 0x03003AE8 & 3, priority 1,
+/// unless (y - camera y + 0x20) as u16 >= 0xE0. mGBA: 10 frames from the hit's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HitStar {
+    /// Level px (0xC06 / 0xC04).
+    pub x: i32,
+    pub y: i32,
+    pub timer: u8,
+}
+
+/// 0x08169D7E: the hit star's x from the player's frame x, by facing (left, right).
+const HIT_STAR_DX: [i32; 2] = [16, -16];
+const HIT_STAR_DY: i32 = 0x10;
+const HIT_STAR_TIME: u8 = 10;
+const HIT_STAR_TILE: u16 = 0x8B;
+
+impl HitStar {
+    /// Where a tail hit puts it (0x0808EAA4 / 0x080496B8).
+    pub fn at_tail(player: &Player) -> Self {
+        let (fx, fy) = player.frame();
+        let dx = if player.facing_left { HIT_STAR_DX[0] } else { HIT_STAR_DX[1] };
+        Self { x: fx + dx, y: fy + HIT_STAR_DY, timer: HIT_STAR_TIME }
+    }
+
+    /// One frame of 0x0808C114: its OAM entries; false once over.
+    pub fn step(&mut self, camera: (i32, i32), frame: u32, out: &mut Vec<ObjSprite>) -> bool {
+        if self.timer == 0 {
+            return false;
+        }
+        self.timer -= 1;
+        let sy = self.y - camera.1;
+        if ((sy + 0x20) as u16) < 0xE0 {
+            let v = (frame >> 2) & 1 != 0;
+            let x = self.x - camera.0;
+            for (dx, hflip, vflip) in [(0, false, v), (8, true, !v)] {
+                out.push(ObjSprite {
+                    x: wrap_x(x + dx),
+                    y: if (sy & 0xFF) >= 0xC0 { (sy & 0xFF) - 0x100 } else { sy & 0xFF },
+                    tile: HIT_STAR_TILE,
+                    shape: 2,
+                    pal: (frame & 3) as u8,
+                    hflip,
+                    vflip,
+                    prio: 1,
+                    ..Default::default()
+                });
+            }
+        }
+        true
+    }
+}
+
+/// Effect 6 (0x08091420): the wand's sparkle, timer +0x12 = 0x12.
+const SPARKLE_TIME: u8 = 0x12;
+/// Piece k (drawn 4 down to 0) shows while (timer - 0x08170D7E[k] + 10) & 0xFF < 10, tile
+/// 0x08170D84[that >> 1] (0x6C small .. 0x68), at (dx, dy) 0x08170D8E[k].
+const SPARKLE_FROM: [u8; 5] = [18, 16, 14, 12, 10];
+const SPARKLE_TILES: [u16; 5] = [0x6C, 0x6B, 0x6A, 0x69, 0x68];
+const SPARKLE_AT: [(i32, i32); 5] = [(4, 8), (12, 0), (22, 6), (8, 4), (24, -2)];
+
+/// One of the wand's sparkles (an effect slot of 0x03007848 + 0x7E0: the ROM keeps screen
+/// pixels and moves them by the camera's step, 0x03003876 / 77; here level pixels).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sparkle {
+    pub x: i32,
+    pub y: i32,
+    pub timer: u8,
+}
+
+impl Sparkle {
+    /// One frame of 0x08091420 (the effects run before the projectiles: a sparkle shows from
+    /// the frame after it appears). Off the screen ((x + 0x30) as u16 >= 0x150 or (y +
+    /// 0x30) as u16 >= 0x100) it is gone; else the timer counts down (unless `held`) and
+    /// it is drawn, the frame after it reaches 0 for the last time. False once gone.
+    pub fn step(&mut self, camera: (i32, i32), held: bool, out: &mut Vec<ObjSprite>) -> bool {
+        let (sx, sy) = (self.x - camera.0, self.y - camera.1);
+        let alive = if self.timer == 0 {
+            false
+        } else {
+            if ((sx + 0x30) as u16) >= 0x150 || ((sy + 0x30) as u16) >= 0x100 {
+                return false;
+            }
+            if !held {
+                self.timer -= 1;
+            }
+            true
+        };
+        for k in (0..5).rev() {
+            let u = self.timer.wrapping_sub(SPARKLE_FROM[k]).wrapping_add(10);
+            if u < 10 {
+                let (dx, dy) = SPARKLE_AT[k];
+                let a2 = SPARKLE_TILES[(u >> 1) as usize] | 1 << 12;
+                out.extend(ObjSprite::from_attrs(((sy + dy) & 0xFF) as u16, ((sx + dx) & 0x1FF) as u16, a2));
+            }
+        }
+        alive
+    }
+}
 
 /// The falling wand (projectile 0x10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,17 +237,129 @@ pub struct Wand {
     spin_acc: u8,
     pub spin_frame: u8,
     bounces: u8,
+    /// Hits by fireballs or the tail since it last touched the floor (+0xD).
+    hits: u8,
+    /// Bumped and still bouncing: it sparkles (+0x11).
+    pub sparkling: bool,
+    /// Frames before the tail can bump it again (+0x15, counted down by 0x0808FB08).
+    tail_wait: u8,
+    /// Touched by a Tanooki statue (+0x12): not drawn, the statue bounces off it once it
+    /// turns back (`statue_bounce`).
+    pub statue: bool,
+    /// +0x16 (counted down by 0x0808FB08): no fireball, tail or player tests while set.
+    pub wait: u8,
 }
 
 impl Wand {
     /// Dropped by Larry (0x0807230C). The projectile runs in the frame it appears: call
     /// `step` once that frame.
     pub fn spawn() -> Self {
-        Self { x: START.0 * SUB, y: START.1 * SUB, vy: 0, spin: SPIN, spin_acc: 0, spin_frame: 0, bounces: 0 }
+        Self {
+            x: START.0 * SUB,
+            y: START.1 * SUB,
+            vy: 0,
+            spin: SPIN,
+            spin_acc: 0,
+            spin_frame: 0,
+            bounces: 0,
+            hits: 0,
+            sparkling: false,
+            tail_wait: 0,
+            statue: false,
+            wait: 0,
+        }
     }
 
-    /// One frame of 0x0808ED40 (without the fireball and tail hits, 0x0808E9B0 /
-    /// 0x0808EAA4, that bounce it up, nor its sparkles, 0x0809137C).
+    /// 0x0808FB08, before the handler: the tail's wait counts down.
+    pub fn count_down(&mut self) {
+        self.tail_wait = self.tail_wait.saturating_sub(1);
+        self.wait = self.wait.saturating_sub(1);
+    }
+
+    /// 0x0808ED40: touched by a statue (+0x12) and the player no longer one (+0x52 == 0):
+    /// the player is sent up (+0x1D = 0xE0, in the air) and away (+0x1C = 0xF0 when left of
+    /// the wand, else 0x10), +0x16 = 0x20, and the wand is bumped (0x0808E930).
+    pub fn statue_bounce(&mut self, player: &mut Player) -> bool {
+        if !self.statue || player.statue != 0 {
+            return false;
+        }
+        player.vy = STATUE_BOUNCE_VY * UNIT;
+        player.on_ground = false;
+        let left = player.frame().0 * SUB + player.x.rem_euclid(SUB) < self.x;
+        player.vx = if left { -STATUE_BOUNCE_VX } else { STATUE_BOUNCE_VX } * UNIT;
+        self.statue = false;
+        self.wait = STATUE_WAIT;
+        self.bump();
+        true
+    }
+
+    /// 0x0808CAEC with player +0x52 (a Tanooki statue): +0x12 = 1, the player +0x1D = 0xF0,
+    /// the burst 0x03007848 + 0xC08 = 0x16 at the wand (`StatueBurst`), smoke (effect 1,
+    /// 0x0808E8D0, life 0x1F) at it, sound 0x8A.
+    pub fn statue_touch(&mut self, player: &mut Player, camera: (i32, i32)) -> (StatueBurst, crate::ship::Smoke) {
+        self.statue = true;
+        player.vy = STATUE_TOUCH_VY * UNIT;
+        let (x, y) = (self.x.div_euclid(SUB), self.y.div_euclid(SUB));
+        let smoke = crate::ship::Smoke { x: (x - camera.0) << 8, y: (y - camera.1) << 8, life: STATUE_SMOKE_LIFE };
+        (StatueBurst { x, y, timer: STATUE_BURST }, smoke)
+    }
+
+    /// 0x0808E9B0: the first of the player's fireballs (`(x, y)` px, slots +0xAE8 then
+    /// +0xAD4) whose top-left is within (x + 6 - 8 .. + 3, y + 4 - 0xE .. + 7) of the wand
+    /// bursts (type 3, sound 0x60) and bumps it. Returns that fireball's index.
+    pub fn fireball_hit(&mut self, fireballs: impl IntoIterator<Item = (i32, i32)>) -> Option<usize> {
+        let (x, y) = (self.x.div_euclid(SUB) + FIRE_DX, self.y.div_euclid(SUB) + FIRE_DY);
+        let i = fireballs.into_iter().position(|(fx, fy)| {
+            ((fy - y + FIRE_BOX.1.0) as u16) <= FIRE_BOX.1.1 && ((fx - x + FIRE_BOX.0.0) as u16) <= FIRE_BOX.0.1
+        })?;
+        self.bump();
+        Some(i)
+    }
+
+    /// 0x0808EAA4: the tail on a hitting frame (0x08169D88[+0x6A]) bumps it once every 8
+    /// frames: player frame y within (wand y + 4 - 0x10) - 0xF .. + 7, x + 0x08169D82[facing
+    /// right] (17 / -12) within wand x + 6 - 0xC .. + 3. The caller starts the tail's hit
+    /// star (`HitStar::at_tail`).
+    pub fn tail_hit(&mut self, player: &Player) -> bool {
+        if self.tail_wait != 0 || !player.tail_hitting_for_projectiles() {
+            return false;
+        }
+        let (fx, fy) = player.frame();
+        let (x, y) = (self.x.div_euclid(SUB) + FIRE_DX, self.y.div_euclid(SUB) + FIRE_DY - 0x10);
+        let reach = fx + if player.facing_left { TAIL_DX[0] } else { TAIL_DX[1] };
+        if ((fy - y + 0xF) as u16) < 0x17 && ((reach - x + 0xC) as u16) < 0x10 {
+            self.tail_wait = TAIL_WAIT;
+            self.bump();
+            return true;
+        }
+        false
+    }
+
+    /// 0x0808E930: sent up at 0x08170B2E[hits] (faster with each hit before it lands),
+    /// spinning at 0xD0 from frame 0 with an odd bounce count, sparkling; sound 0x58.
+    fn bump(&mut self) {
+        self.vy = BUMP_SPEEDS[self.hits.min(9) as usize] as i32;
+        if self.hits < 9 {
+            self.hits += 1;
+        }
+        self.spin = BUMP_SPIN;
+        self.sparkling = true;
+        self.spin_acc = 0;
+        self.spin_frame = 0;
+        self.bounces = 1;
+    }
+
+    /// 0x0809137C: every 8 frames while sparkling and near the screen ((x - camera x +
+    /// 0x20) up to 0x12F, (y - camera y + 0x20) below 0xE0), a sparkle (effect 6) at (x - 8,
+    /// y - 8).
+    pub fn sparkle(&self, camera: (i32, i32), frame: u32) -> Option<Sparkle> {
+        let (x, y) = (self.x.div_euclid(SUB), self.y.div_euclid(SUB));
+        let on = (0..=0x12F).contains(&(x - camera.0 + 0x20)) && ((y - camera.1 + 0x20) as u16) < 0xE0;
+        (self.sparkling && frame & 7 == 0 && on).then(|| Sparkle { x: x - 8, y: y - 8, timer: SPARKLE_TIME })
+    }
+
+    /// One frame of 0x0808ED40 after the fireball and tail tests and the sparkle (the
+    /// bounce off a Tanooki statue, +0x12, is not reachable in the port).
     pub fn step(&mut self, level: &Level) {
         self.y += self.vy * 16;
         if self.vy < GRAVITY_CAP {
@@ -106,6 +374,7 @@ impl Wand {
         let (px, py) = (self.x.div_euclid(SUB) + PROBE.0, self.y.div_euclid(SUB) + PROBE.1);
         if level.at(px.div_euclid(TILE_PX), py.div_euclid(TILE_PX)) == TileKind::Solid && self.vy >= 0 {
             if self.vy < BOUNCE_SPEED {
+                self.sparkling = false;
                 self.vy = 0;
                 self.spin_frame = 0;
                 self.bounces = 0;
@@ -116,6 +385,7 @@ impl Wand {
                 self.bounces = self.bounces.wrapping_add(1);
                 self.spin = self.spin.wrapping_sub(BOUNCE_SPIN);
             }
+            self.hits = 0;
         }
     }
 
@@ -126,8 +396,11 @@ impl Wand {
         dx >= 0x100 || dy > 0
     }
 
-    /// 0x0808EBB0's OAM entries.
+    /// 0x0808EBB0's OAM entries (none while a statue's touch holds it, +0x12 == 1).
     pub fn sprites(&self, camera: (i32, i32)) -> Vec<ObjSprite> {
+        if self.statue {
+            return Vec::new();
+        }
         let mut k = (self.spin_frame & 7) as usize;
         if self.bounces & 1 != 0 {
             k ^= 7;
@@ -149,8 +422,12 @@ impl Wand {
         vec![piece(x, LEFT_TILES[k], false), piece(x + 8, RIGHT_TILES[k], true)]
     }
 
-    /// 0x0808CC9C: the player touches it.
+    /// 0x0808CC9C (from the draw, only while it is drawn and +0x16 is 0): the player
+    /// touches it.
     pub fn touches(&self, player: &Player) -> bool {
+        if self.statue || self.wait != 0 {
+            return false;
+        }
         let (fx, fy) = player.frame();
         let big = (!player.small_box()) as usize;
         let (x, y) = (self.x.div_euclid(SUB), self.y.div_euclid(SUB));
@@ -676,4 +953,100 @@ mod tests {
         let zero = TallyLine { kept: [2, 8, 7], points: 0 };
         assert_eq!(&zero.cells()[9..], &[Blank, Blank, Blank, Blank, Blank, White(0)]);
     }
+
+    #[test]
+    fn a_fireball_bumps_the_wand_up_faster_each_time_until_it_lands() {
+        let level = floor();
+        let mut w = Wand::spawn();
+        for _ in 0..200 {
+            w.step(&level);
+        }
+        assert_eq!(w.vy, 0);
+        // At rest (y 0x95): a fireball at its left half, level with it.
+        let (x, y) = (w.x / SUB, w.y / SUB);
+        assert_eq!(w.fireball_hit([(x + 100, y), (x, y)]), Some(1));
+        assert_eq!((w.vy, w.spin, w.bounces, w.sparkling), (-32, 0xD0, 1, true));
+        w.step(&level);
+        assert_eq!(w.fireball_hit([(x, y + 3)]), Some(0));
+        assert_eq!(w.vy, -36);
+        // Out of reach on either side.
+        assert_eq!(w.fireball_hit([(x - 3, y), (x + 10, y), (x, y + 0x14)]), None);
+    }
+
+    #[test]
+    fn a_sparkle_grows_then_fades_in_five_pieces() {
+        let mut s = Sparkle { x: 0x40, y: 0x40, timer: SPARKLE_TIME };
+        let mut seen = Vec::new();
+        let mut frames = 0;
+        loop {
+            let mut out = Vec::new();
+            let alive = s.step((0, 0), false, &mut out);
+            seen.push(out);
+            frames += 1;
+            if !alive {
+                break;
+            }
+        }
+        // Timer 0x11 down to 0, then drawn once more at 0.
+        assert_eq!(frames, 0x13);
+        // First frame (timer 0x11): piece 0 alone at its first tile 0x68 (u = 9).
+        assert_eq!(seen[0].len(), 1);
+        assert_eq!((seen[0][0].tile, seen[0][0].x, seen[0][0].y, seen[0][0].pal), (0x68, 0x44, 0x48, 1));
+        // Last: piece 4 at 0x6C.
+        let last = seen.last().unwrap();
+        assert_eq!((last.len(), last[0].tile, last[0].x, last[0].y), (1, 0x6C, 0x58, 0x3E));
+        assert!(seen.iter().map(Vec::len).max() <= Some(5));
+    }
+
+    #[test]
+    fn the_hit_star_shows_ten_frames_flipping_and_cycling_palettes() {
+        // mGBA (cabin, Raccoon Mario at frame x 0x72 facing left, y 0x88, camera (8, 0x18)):
+        // OAM (0x7A, 0x80) and (0x82, 0x80) h-flipped, tile 0x8B, palette counter & 3,
+        // v-flips by counter bit 2; 10 frames.
+        let mut star = HitStar { x: 0x72 + 16, y: 0x88 + 0x10, timer: HIT_STAR_TIME };
+        let mut frames = Vec::new();
+        for counter in 113.. {
+            let mut out = Vec::new();
+            if !star.step((8, 0x18), counter, &mut out) {
+                break;
+            }
+            frames.push((counter, out));
+        }
+        assert_eq!(frames.len(), 10);
+        let (c, out) = &frames[0];
+        assert_eq!(*c, 113);
+        assert_eq!((out[0].x, out[0].y, out[0].pal, out[0].vflip, out[0].hflip), (0x7A, 0x80, 1, false, false));
+        assert_eq!((out[1].x, out[1].vflip, out[1].hflip, out[1].tile), (0x82, true, true, 0x8B));
+        let (_, out) = &frames[3];
+        assert_eq!((out[0].vflip, out[1].vflip, out[0].pal), (true, false, 0));
+    }
+
+    #[test]
+    fn a_statue_hides_the_wand_then_bounces_off_it() {
+        let level = floor();
+        let mut w = Wand::spawn();
+        for _ in 0..200 {
+            w.step(&level);
+        }
+        let mut p = Player::spawn((w.x >> 8) - 4, 0x80);
+        p.statue = 0x40;
+        let (burst, smoke) = w.statue_touch(&mut p, (0, 0));
+        assert!(w.statue && w.sprites((0, 0)).is_empty() && !w.touches(&p));
+        assert_eq!((p.vy, smoke.life, burst.timer), (-0x10 * UNIT, 0x1F, 0x16));
+        assert!(!w.statue_bounce(&mut p), "still a statue");
+        p.statue = 0;
+        assert!(w.statue_bounce(&mut p));
+        assert_eq!((p.vy, p.vx, w.vy, w.wait), (-0x20 * UNIT, -0x10 * UNIT, -32, 0x20));
+        assert!(!w.touches(&p), "no player test while +0x16 runs");
+        // The burst: four pieces spreading, 0x16 frames.
+        let mut b = burst;
+        let mut out = Vec::new();
+        let mut n = 0;
+        while b.step((0, 0), &mut out) {
+            n += 1;
+        }
+        assert_eq!(n, 0x16);
+        assert_eq!(out[..4].iter().map(|o| (o.x - b.x, o.tile)).collect::<Vec<_>>(), vec![(0, 0x1F); 4]);
+    }
+
 }

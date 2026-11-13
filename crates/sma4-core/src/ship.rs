@@ -141,6 +141,33 @@ pub struct Smoke {
     pub life: u8,
 }
 
+impl Smoke {
+    /// 0x0809054C: two tall 8x16 OBJs (the second h-flipped, the v-flips alternating with
+    /// the counter's bit 1), tile 0x08170CD6[life >> 3], palette 1, priority 1, while (y +
+    /// 0x10) is within 0..0xB0.
+    pub fn sprites(&self, counter: u8, out: &mut Vec<ObjSprite>) {
+        let (x, y) = ((self.x >> 8) & 0x1FF, (self.y >> 8) as i16 as i32);
+        if !(0..0xB1).contains(&(y + 0x10)) {
+            return;
+        }
+        let tile = SMOKE_TILES[((self.life & 0x7F) >> 3) as usize];
+        let v = counter & 2 != 0;
+        for (dx, hflip, vflip) in [(0, false, v), (8, true, !v)] {
+            out.push(ObjSprite {
+                x: wrap_x(x + dx),
+                y,
+                tile,
+                shape: 2,
+                pal: SMOKE_PAL,
+                hflip,
+                vflip,
+                prio: 1,
+                ..Default::default()
+            });
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Propeller {
     pub x: i32,
@@ -363,25 +390,7 @@ impl Ship {
         let (cx, cy) = view.camera;
         let mut out = Vec::new();
         for s in self.smoke.iter().rev().flatten() {
-            let (x, y) = ((s.x >> 8) & 0x1FF, (s.y >> 8) as i16 as i32);
-            if !(0..0xB1).contains(&(y + 0x10)) {
-                continue;
-            }
-            let tile = SMOKE_TILES[((s.life & 0x7F) >> 3) as usize];
-            let v = view.counter & 2 != 0;
-            for (dx, hflip, vflip) in [(0, false, v), (8, true, !v)] {
-                out.push(ObjSprite {
-                    x: wrap_x(x + dx),
-                    y,
-                    tile,
-                    shape: 2,
-                    pal: SMOKE_PAL,
-                    hflip,
-                    vflip,
-                    prio: 1,
-                    ..Default::default()
-                });
-            }
+            s.sprites(view.counter, &mut out);
         }
         for b in self.balls.iter().rev().flatten() {
             out.push(ObjSprite {

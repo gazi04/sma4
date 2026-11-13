@@ -251,6 +251,13 @@ pub struct Game {
     pub wand: Option<wand::Wand>,
     /// The wand caught: Larry's states 3-4, "LEVEL CLEARED!" and the clock tally.
     pub wand_clear: Option<wand::Cleared>,
+    /// The bumped wand's sparkles (effect 6, `wand::Sparkle`).
+    pub wand_sparkles: Vec<wand::Sparkle>,
+    /// The tail's hit star (0x03007848 + 0xC03, `wand::HitStar`).
+    pub hit_star: Option<wand::HitStar>,
+    /// A Tanooki statue's touch of the wand: the burst (0xC08) and the smoke (effect 1).
+    pub statue_burst: Option<wand::StatueBurst>,
+    pub wand_smoke: Option<ship::Smoke>,
     /// How many of `obj_sprites` go in front of the player (their OAM entries come before
     /// his); the rest go behind.
     pub obj_front: usize,
@@ -362,6 +369,10 @@ impl Game {
         self.larry = None;
         self.wand = None;
         self.wand_clear = None;
+        self.wand_sparkles.clear();
+        self.hit_star = None;
+        self.statue_burst = None;
+        self.wand_smoke = None;
         self.intro = None;
         self.landing = None;
         self.bg_scroll = None;
@@ -1041,11 +1052,55 @@ impl Game {
         hurt
     }
 
-    /// The wand with the projectiles (0x0808FBD0, after the objects): it falls, is drawn,
-    /// and the draw tests the player (0x0808CC9C -> 0x0808CAEC).
+    /// The wand with the projectiles (0x0808FBD0, after the objects): the player's fireballs
+    /// and tail bump it (0x0808E9B0 / 0x0808EAA4), it sparkles, falls, is drawn, and the
+    /// draw tests the player (0x0808CC9C -> 0x0808CAEC). Its sparkles and smoke are effects,
+    /// which run before the projectiles; the tail's hit star (0x0808C114) and a statue's
+    /// burst (0x08088EF4) after them (0x0808C4EC).
     fn step_wand(&mut self) {
         let camera = self.camera();
-        let Some(w) = &mut self.wand else { return };
+        let effects = self.step_wand_sparkles(camera);
+        self.step_wand_projectile(camera, effects);
+        let mut star = Vec::new();
+        if let Some(h) = &mut self.hit_star
+            && !h.step(camera, self.frame, &mut star)
+        {
+            self.hit_star = None;
+        }
+        // OAM 0 and 1: in front of everything.
+        self.obj_front += star.len();
+        self.obj_sprites.splice(0..0, star);
+        let mut burst = Vec::new();
+        if let Some(b) = &mut self.statue_burst
+            && !b.step(camera, &mut burst)
+        {
+            self.statue_burst = None;
+        }
+        self.obj_sprites.extend(burst);
+    }
+
+    /// 0x0808ED40 for the wand; `effects` are the effects' OAM entries this frame.
+    fn step_wand_projectile(&mut self, camera: (i32, i32), effects: Vec<obj::ObjSprite>) {
+        let Some(w) = &mut self.wand else {
+            self.obj_sprites.extend(effects);
+            return;
+        };
+        // 0x0808FB08 before the handler.
+        w.count_down();
+        if w.wait == 0 {
+            let seen: Vec<(usize, (i32, i32))> = (self.player_fireballs.iter().enumerate())
+                .filter_map(|(i, f)| f.seen_by_projectiles().map(|at| (i, at)))
+                .collect();
+            if let Some(k) = w.fireball_hit(seen.iter().map(|&(_, at)| at)) {
+                // Sound 0x60: the fireball bursts (type 3).
+                self.player_fireballs[seen[k].0].burst_by_projectile();
+            }
+            if w.tail_hit(&self.player) {
+                self.hit_star = Some(wand::HitStar::at_tail(&self.player));
+            }
+        }
+        self.wand_sparkles.extend(w.sparkle(camera, self.frame));
+        w.statue_bounce(&mut self.player);
         w.step(&self.level);
         // Larry's step rebuilt `obj_sprites` this frame; without him (`--wand`) they are
         // the wand's alone.
@@ -1055,6 +1110,7 @@ impl Game {
                 self.obj_sprites.clear();
                 self.obj_front = 0;
             }
+            self.obj_sprites.extend(effects);
             return;
         }
         let sprites = w.sprites(camera);
@@ -1064,15 +1120,39 @@ impl Game {
         } else {
             self.obj_sprites = sprites;
         }
-        // 0x0808CAEC: not while the player flashes (+0x52 bounces him off instead, not
-        // ported) or is dying.
+        // The effects' OAM entries come after the player's (index 0x10 on).
+        self.obj_sprites.extend(effects);
+        // 0x0808CAEC: not while the post-hurt flash runs (+0x3C) or the player is dying.
         if self.invulnerable == 0 && self.dying.is_none() && w.touches(&self.player) {
+            if self.player.statue != 0 {
+                // A Tanooki statue (+0x52): it bounces off once it turns back.
+                let (burst, smoke) = w.statue_touch(&mut self.player, camera);
+                self.statue_burst = Some(burst);
+                self.wand_smoke = Some(smoke);
+                return;
+            }
             // The catch: the clock stops (0x03003BB0 / 0x03003771) and is kept for the
             // tally line, the slot is freed (its OAM entries stay for this frame).
             self.wand = None;
             self.wand_clear = Some(wand::Cleared::new(self.status.clock));
             self.clock_stopped = true;
         }
+    }
+
+    /// The wand's sparkles (0x08091F6C -> 0x08091420): one frame each, their OAM entries.
+    fn step_wand_sparkles(&mut self, camera: (i32, i32)) -> Vec<obj::ObjSprite> {
+        let mut out = Vec::new();
+        self.wand_sparkles.retain_mut(|s| s.step(camera, false, &mut out));
+        // A statue's smoke (effect 1, 0x0809054C; the camera does not move in the cabin).
+        if let Some(s) = &mut self.wand_smoke {
+            if s.life & 0x7F == 0 {
+                self.wand_smoke = None;
+            } else {
+                s.life -= 1;
+                s.sprites(self.frame as u8, &mut out);
+            }
+        }
+        out
     }
 
     /// Larry's states 3-7 after the catch (`wand::Cleared`). While the state is 3 or more
@@ -1100,6 +1180,8 @@ impl Game {
         // The wand's entries come before the player's, the clouds' after.
         self.obj_front = self.obj_sprites.len();
         self.obj_sprites.extend(clouds);
+        let sparkles = self.step_wand_sparkles(camera);
+        self.obj_sprites.extend(sparkles);
         if ev.done {
             // TODO(port): what follows (mode 1 sub-states 0x1B..: the fade, the King changed
             // back, the letter, "WORLD 1 CLEAR!") is not ported; the level ends as cleared.
@@ -3460,4 +3542,68 @@ mod tests {
         assert_eq!(g.status.score - score, seconds * 20);
         assert_eq!(g.status.clock, [0, 0, 0]);
     }
+
+    #[test]
+    fn a_fireball_bumps_the_resting_wand_three_frames_after_the_throw() {
+        let mut g = Game::new();
+        g.enter_level(block_level((20, 2)), (0x40, 9 * TILE_PX - 16), &[]);
+        g.player.form = Form::Fire;
+        g.drop_wand();
+        for _ in 0..250 {
+            g.step(Buttons::empty());
+        }
+        let w = g.wand.unwrap();
+        assert_eq!(w.vy, 0, "resting");
+        // mGBA (cabin): Fire Mario standing at x 0x8E (the wand at 0x80) facing left throws
+        // on frame 0; the wand is bumped during frame 3 (speed -32, then -31 after its
+        // move), sparkles appear from frame 4; the fireball is a puff (type 4) where it was.
+        let (fx, fy) = g.player.frame();
+        g.player.set_frame_sub(((w.x >> 8) + 0x0E) * player::SUB, fy * player::SUB);
+        g.player.facing_left = true;
+        assert_eq!(g.player.frame(), ((w.x >> 8) + 0x0E, fy), "{fx}");
+        let mut bumped = None;
+        for f in 0..12 {
+            g.step(if f < 2 { Buttons::B } else { Buttons::empty() });
+            if bumped.is_none() && g.wand.unwrap().vy < 0 {
+                bumped = Some(f);
+                assert_eq!(g.wand.unwrap().vy, -31);
+                assert!(!g.player_fireballs[0].live());
+            }
+        }
+        assert_eq!(bumped, Some(3));
+        // A sparkle on frames with (counter & 7) == 0 while it flies.
+        assert!(!g.wand_sparkles.is_empty() || g.obj_sprites.iter().any(|s| (0x68..=0x6C).contains(&s.tile)));
+    }
+
+
+    #[test]
+    fn the_tail_bumps_the_resting_wand_on_the_fourth_frame_of_the_whip() {
+        let mut g = Game::new();
+        g.enter_level(block_level((20, 2)), (0x40, 9 * TILE_PX - 16), &[]);
+        g.player.form = Form::Raccoon;
+        g.drop_wand();
+        for _ in 0..250 {
+            g.step(Buttons::empty());
+        }
+        let w = g.wand.unwrap();
+        // mGBA (cabin): Raccoon Mario at x 0x73 (the wand at 0x80) facing left whips on
+        // frame 0; the wand is bumped during frame 4 (+0x15 = 8).
+        let (_, fy) = g.player.frame();
+        g.player.set_frame_sub(((w.x >> 8) - 0x0D) * player::SUB, fy * player::SUB);
+        g.player.facing_left = true;
+        let mut bumped = None;
+        for f in 0..20 {
+            g.step(if f < 2 { Buttons::B } else { Buttons::empty() });
+            if bumped.is_none() && g.wand.unwrap().vy < 0 {
+                bumped = Some(f);
+                assert_eq!(g.wand.unwrap().vy, -31);
+            }
+            // mGBA: the hit star (tile 0x8B, OAM 0 / 1) in frames 4..13.
+            let star = g.obj_sprites.len() >= 2 && g.obj_sprites[..2].iter().all(|o| o.tile == 0x8B);
+            assert_eq!(star, (4..14).contains(&f), "frame {f}");
+        }
+        assert_eq!(bumped, Some(4));
+        assert!(g.wand.unwrap().vy > -31, "once: the tail waits 8 frames, then it is out of reach");
+    }
+
 }

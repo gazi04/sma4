@@ -55,6 +55,10 @@ pub struct PlayerFireball {
     floor_hits: u8,
     /// Type 3.. once it has burst (0x0808AA64), up to 0x10.
     pub puff: u8,
+    /// Where it was at the start of the last two steps (1/256 px): `seen[1]` is what the
+    /// ROM's projectiles (0x0808FBD0, before the fireballs move) see this frame, since the
+    /// port's fireball moves in the frame it is thrown and so leads the ROM's by one.
+    seen: [Option<(i32, i32)>; 2],
 }
 
 /// What a frame did to a fireball.
@@ -80,6 +84,7 @@ impl PlayerFireball {
             counter: 0,
             floor_hits: 0,
             puff: 0,
+            seen: [None; 2],
         }
     }
 
@@ -111,6 +116,7 @@ impl PlayerFireball {
 
     /// One frame. `camera` is the view's top-left.
     pub fn step(&mut self, level: &Level, camera: (i32, i32)) -> FireStep {
+        self.seen = [Some((self.x, self.y)), self.seen[0]];
         if self.puff != 0 {
             self.puff += 1;
             return if self.puff == PUFF_END { FireStep::Gone } else { FireStep::Flying };
@@ -198,6 +204,21 @@ impl PlayerFireball {
     /// Burst on an enemy (0x0808B2F0 -> 0x0808AA64).
     pub fn hit(&mut self) {
         self.puff = PUFF_FIRST;
+    }
+
+    /// Where the ROM's projectiles see it this frame (pixels): none in the frame after it
+    /// was thrown, nor once it has burst.
+    pub fn seen_by_projectiles(&self) -> Option<(i32, i32)> {
+        self.seen[1].filter(|_| self.puff == 0 || self.puff == PUFF_FIRST + 1).map(|(x, y)| (x >> 8, y >> 8))
+    }
+
+    /// Burst by a projectile (the wand, 0x0808E9B0: type 3, which its own handler, running
+    /// after, turns into 4 where it was): back there, one puff step ahead as the port leads.
+    pub fn burst_by_projectile(&mut self) {
+        if let Some((x, y)) = self.seen[1] {
+            (self.x, self.y) = (x, y);
+        }
+        self.puff = PUFF_FIRST + 2;
     }
 }
 

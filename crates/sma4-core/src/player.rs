@@ -286,6 +286,9 @@ pub struct Player {
     wag: u8,
     /// Tail whip timer (+0x6A).
     pub whip: u8,
+    /// Tanooki statue timer +0x52 (Down + B as a Tanooki, 0x08097FE0). The port has no
+    /// Tanooki suit yet, so nothing sets it; the wand reacts to it (`wand`).
+    pub statue: u8,
     /// Speed dithering accumulator (0x03003CED).
     dither: u8,
     /// Enemies stomped since last on the ground (+0x5A), for the score chain; cleared on
@@ -1043,6 +1046,14 @@ impl Player {
         let (fx, fy) = self.frame();
         let dx = if self.facing_left { 17 } else { -12 };
         Some((fx + dx, fy + 16, 12, 15))
+    }
+
+    /// Whether the ROM's projectiles (0x0808EAA4) see the tail on a hitting frame
+    /// (0x08169D88[+0x6A]: 8, 9, 12, 13). The ROM sets +0x6A = 0x12 before its timer loop
+    /// takes 1 off in the same frame (mGBA: 17 after the press frame), so its +0x6A is
+    /// `whip` - 1 when they run.
+    pub fn tail_hitting_for_projectiles(&self) -> bool {
+        self.is_raccoon() && matches!(self.whip.wrapping_sub(1), 8 | 9 | 12 | 13)
     }
 
     /// Block cell the tail probes this frame (0x0809A748 on whip frame 9: (dy, dx) from
