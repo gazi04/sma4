@@ -364,7 +364,7 @@ pub fn extract_at(
         camera_x: if data == BONUS_ROOM_1_1 {
             Some(BONUS_ROOM_CAMERA)
         } else {
-            (level_id == LARRY_CABIN).then_some(LARRY_CABIN_CAMERA)
+            pinned_camera(data).then_some(PINNED_CAMERA)
         },
         slopes: slopes(rom, tileset, solidity.top)?,
         background,
@@ -384,12 +384,18 @@ const ENEMY_LISTS: u32 = 0x0813_6B14;
 const BONUS_ROOM_1_1: u32 = 0x0815_5460;
 const BONUS_ROOM_CAMERA: (u16, u16) = (0x70, 0xA0);
 
-/// Larry Koopa's cabin (level 0x213, one page): the camera stays at x 8 wherever the
-/// player is (measured in mGBA, player x 0x0D to 0xE3). TODO(re): the routine that holds
-/// it; 0x080A4D4C's fixed-x list (streams 0x08158135..0x081585FB, 0x081550CC) does not
-/// name the cabin's stream 0x081623FA.
-const LARRY_CABIN: u16 = 0x213;
-const LARRY_CABIN_CAMERA: (u16, u16) = (8, 8);
+/// The level load 0x08016434 (0x030037DC clear) pins the camera at x 8 (0x03003750 = 8,
+/// player +0x9E = +0xA0 = 8) for level data (0x03003B0C) in 0x081623FA..0x081624C6,
+/// 0x08162611..0x08162691 or at 0x081625D9 / 0x08161224 / 0x081626D1: the airships'
+/// boss cabins (Larry's 0x213, ...) and levels 0x203 and 0x21A..0x21E. (Data in
+/// 0x0815D87B..0x0815D96B, levels 0x15E..0x160, pins it 8 px right of where it starts:
+/// not handled.) Checked in mGBA: +0x9E = +0xA0 = 8 in Larry's cabin.
+fn pinned_camera(data: u32) -> bool {
+    (0x0816_23FA..=0x0816_24C6).contains(&data)
+        || (0x0816_2611..=0x0816_2691).contains(&data)
+        || [0x0816_25D9, 0x0816_1224, 0x0816_26D1].contains(&data)
+}
+const PINNED_CAMERA: (u16, u16) = (8, 8);
 
 /// The alternate area named by header bytes 0-3 / 6 (0x08014F20 -> 0x030037CE, 0x030037D0,
 /// 0x030037DE) and the pipe exits into it, decoded like 0x08005290: value_b low nibble =
