@@ -159,7 +159,7 @@ pub(crate) fn draw_oam(
         if y >= 160 {
             y -= 256;
         }
-        let (t, p, hf) = ((a2 & 0x3FF) as u32, (a2 >> 12) as u32, a1 & 0x1000 != 0);
+        let (t, p, hf, vf) = ((a2 & 0x3FF) as u32, (a2 >> 12) as u32, a1 & 0x1000 != 0, a1 & 0x2000 != 0 && a0 & 0x100 == 0);
         for sy in 0..h {
             for sx in 0..w {
                 let tile = t + (sy / 8) * 32 + sx / 8;
@@ -168,7 +168,7 @@ pub(crate) fn draw_oam(
                 let c = if sx & 1 == 1 { b >> 4 } else { b & 0xF };
                 let (cx, cy) = (
                     x + if hf { (w - 1 - sx) as i32 } else { sx as i32 },
-                    y + sy as i32,
+                    y + if vf { (h - 1 - sy) as i32 } else { sy as i32 },
                 );
                 if c != 0 && (0..240).contains(&cx) && (0..160).contains(&cy) {
                     let o = ((cy * 240 + cx) * 4) as usize;

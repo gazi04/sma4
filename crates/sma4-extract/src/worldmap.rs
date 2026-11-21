@@ -63,6 +63,7 @@ const ANIM_BYTES: usize = 0x1000;
 /// pose from the map form 0x03003CB6 and frame-counter bit 3.
 const FN_DRAW_MARIO: u32 = 0x0800_C45C;
 const MAP_FORM: u32 = 0x0300_3CB6;
+const FN_MAP_FORM_PALETTE: u32 = 0x0800_B4F0;
 const FRAME_COUNTER: u32 = 0x0300_3AE8;
 const MAP_SUB_STATE: u32 = 0x0300_385D;
 const IDLE: u8 = 0x0E;
@@ -271,11 +272,16 @@ pub fn extract_world_map(
         pixels: vec![0; (MAP_MARIO_W * MAP_MARIO_FORMS * 2 * MAP_MARIO_H * 4) as usize],
     };
     m.w8(MAP_SUB_STATE, IDLE)?;
-    for (i, form) in [0u8, 1, 3].into_iter().enumerate() {
+    for (i, form) in (0..MAP_MARIO_FORMS as u8).enumerate() {
         for phase in 0..2u32 {
             for s in 0..128 {
                 m.w16(OAM_BUF + s * 8, 0xA0)?;
             }
+            // 0x0800B4F0: the form's palette into OBJ palette 7 (the cloud: 0x0821E380).
+            // It leaves the P-Wing's alone: the item set Mario's own (0x080062BC:
+            // 0x0821E380[0x0813AD00[8] = 0x50]), the raccoon's.
+            m.w8(MAP_FORM, if form == 8 { 3 } else { form })?;
+            m.call(FN_MAP_FORM_PALETTE, &[])?;
             m.w8(MAP_FORM, form)?;
             m.w8(FRAME_COUNTER, (phase * 8) as u8)?;
             m.call(FN_DRAW_MARIO, &[])?;
@@ -313,6 +319,7 @@ pub fn extract_world_map(
         pixels: vec![0; (hs * MAP_SPIN_PHASES * hs * 4) as usize],
     };
     m.w8(MAP_FORM, 0)?;
+    m.call(FN_MAP_FORM_PALETTE, &[])?;
     m.w8(GAME_OVER_LOOK, 1)?;
     for phase in 0..MAP_SPIN_PHASES {
         for s in 0..128 {
@@ -568,7 +575,50 @@ pub fn extract_map_objects(rom: &Rom, m: &mut Machine, world: u8, out_dir: &std:
         }
     }
     println!("  world map {} objects: {:?}", world + 1, objects.iter().map(|o| (o.kind, o.y, o.x)).collect::<Vec<_>>());
-    MapObjectsAsset { objects, sprites }.write(out_dir, world).map_err(|e| ExtractError(e.to_string()))
+    MapObjectsAsset { objects, sprites }.write(out_dir, world).map_err(|e| ExtractError(e.to_string()))?;
+    if world == 0 {
+        extract_map_puff(rom, m, out_dir)?;
+    }
+    Ok(())
+}
+
+/// The map's puffs: four 16x16 OBJs around a cell, the same tile in each, flipped none / h
+/// / v / both (attr1 0x4000 / 0x5000 / 0x6000 / 0x7000), priority 0. A map object beaten
+/// in battle (map sub-state 8, 0x0800F61C): palette 3, tile 0x0813A799[step] as t & 0xF |
+/// (t & 0xF0) << 1 | 0x10 (0x16, 0x16, 0x18, 0x1A, 0x1C); an item used on the map
+/// (0x08005E10): palette 1, tiles 0x0813AD24 (0x16 .. 0x1E). One 32x32 cell per tile
+/// 0x16, 0x18, 0x1A, 0x1C, 0x1E; a row per palette (3, then 1).
+const PUFF_TILE0: u16 = 0x16;
+const PUFF_PALETTES: [u16; 2] = [3, 1];
+
+fn extract_map_puff(_rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{MAP_PUFF_FRAMES, MAP_PUFF_SIZE};
+    let s = MAP_PUFF_SIZE;
+    let rows = PUFF_PALETTES.len() as u32;
+    let mut sheet =
+        Rgba { width: s * MAP_PUFF_FRAMES, height: s * rows, pixels: vec![0; (s * MAP_PUFF_FRAMES * s * rows * 4) as usize] };
+    for (row, pal) in PUFF_PALETTES.into_iter().enumerate() {
+        for f in 0..MAP_PUFF_FRAMES {
+            let tile = PUFF_TILE0 + 2 * f as u16;
+            for slot in 0..128 {
+                m.w16(OAM_BUF + slot * 8, 0xA0)?;
+            }
+            for (i, (y, attr1)) in [(0, 0x4000), (0, 0x5010), (0x10, 0x6000), (0x10, 0x7010)].into_iter().enumerate() {
+                let at = OAM_BUF + (OBJ_SLOT + i as u32) * 8;
+                m.w16(at, y)?;
+                m.w16(at + 2, attr1)?;
+                m.w16(at + 4, tile | pal << 12)?;
+            }
+            let mut canvas = Rgba { width: 240, height: 160, pixels: vec![0; 240 * 160 * 4] };
+            draw_oam(m, &mut canvas, OBJ_SLOT..OBJ_SLOT + 4)?;
+            for y in 0..s {
+                let src = (y * 240 * 4) as usize;
+                let dst = (((row as u32 * s + y) * sheet.width + f * s) * 4) as usize;
+                sheet.pixels[dst..dst + (s * 4) as usize].copy_from_slice(&canvas.pixels[src..src + (s * 4) as usize]);
+            }
+        }
+    }
+    sheet.write_png(&sma4_assets::map_puff_path(out_dir)).map_err(|e| ExtractError(e.to_string()))
 }
 
 /// The map's item panel (see `sma4_core::inventory`): BG0's panel map (LZ77 0x0821F674,

@@ -14,12 +14,24 @@
 //!   0x081324EC[row]).
 //! * 6 (0x08007458): the panel goes down, VOFS - 8 a frame to -0x77, then the bar's map is
 //!   back at -0x90; 7 (0x080074C4): it rises, + 4 a frame to -0x78, and the chosen item's
-//!   effect runs (0x0813249C[item]); 8 (0x08007524): the map goes on.
+//!   effect runs (0x0813249C[item]); 8 (0x08007524): the map goes on once 0x03003CB1 is 0.
 //!
-//! Effects: items 1-8 and 14 (0x080062BC) set the map form 0x03003CB6 = 0x0813ACF0[item]
-//! (Mario's form in the next level), flash his palette and play 0x0813ACD0[item]; the
-//! Starman (9, 0x08006454) gives the next level a star; the Warp Whistle (12, 0x08006850)
-//! calls the whirlwind (`crate::warp`). The used item leaves the list (0x080061E8).
+//! Checks (0x081324F4[item], refused with sound 0x1A): the frog suit while 0x03003A74 bit 4
+//! is set (0x08006C80; never in the port), the Starman while the next level already has one
+//! (0x08006CA8), the anchor unless an airship (map object kind 2) is on the map and this
+//! world's anchor (0x03002D4C bit) is unused, in Worlds 1-8 (0x08006CC8), the hammer unless
+//! a rock (tile 0x51 / 0x52) is next to Mario (0x08006D20). The music box (13) and items 14
+//! and 15 are not ported (refused).
+//!
+//! Effects: items 1-8 (0x080062BC) set the map form 0x03003CB6 = 0x0813ACF0[item] (7 the
+//! cloud, 8 the P-Wing) and, but for the cloud, the level form 0x03002CE2 (the P-Wing's is
+//! the raccoon's), flash his palette and play 0x0813ACD0[item]; the Starman (9,
+//! 0x08006454) gives the next level a star; the anchor (10, 0x080064C4) sets this world's
+//! bit; the hammer (11, 0x08006610) breaks the rock (`WorldMap::break_rock`); the Warp
+//! Whistle (12, 0x08006850) calls the whirlwind (`crate::warp`). The forms and the hammer
+//! set 0x03003CB1 = 0x14: a puff (0x08005E10) at the map spot +0x63 / +0x64 (Mario, or the
+//! rock) for that many frames, the map held meanwhile. The used item leaves the list
+//! (0x080061E8).
 
 use crate::input::Buttons;
 
@@ -30,8 +42,26 @@ pub const PER_ROW: usize = 9;
 pub const MUSHROOM: u8 = 1;
 pub const FIRE_FLOWER: u8 = 2;
 pub const LEAF: u8 = 3;
+pub const FROG_SUIT: u8 = 4;
+pub const TANOOKI_SUIT: u8 = 5;
+pub const HAMMER_SUIT: u8 = 6;
+pub const CLOUD: u8 = 7;
+pub const P_WING: u8 = 8;
 pub const STARMAN: u8 = 9;
+pub const ANCHOR: u8 = 0x0A;
+pub const HAMMER: u8 = 0x0B;
 pub const WARP_WHISTLE: u8 = 0x0C;
+/// Map forms (0x03003CB6) of items 0-8 (0x0813ACF0): the form number, 7 the cloud, 8 the
+/// P-Wing.
+pub const MAP_FORMS: [u8; 9] = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+pub const MAP_FORM_CLOUD: u8 = 7;
+pub const MAP_FORM_P_WING: u8 = 8;
+/// 0x03003CB1 after a form or the hammer: the puff's frames.
+pub const PUFF_FRAMES: u8 = 0x14;
+/// Puff tiles 0x0813AD24[(t & 0x1C) >> 2] by 0x03003CB1 t (0x08005E10): 0x1E, 0x1C, 0x1A,
+/// 0x18, 0x16, 0x16; as cells of `sma4_assets::map_puff_path` (tiles 0x16, 0x18, 0x1A,
+/// 0x1C, 0x1E).
+const PUFF_CELLS: [u32; 6] = [4, 3, 2, 1, 0, 0];
 /// BG0 vertical offsets (0x0300374C, signed): the bar at the bottom, slid out, the panel
 /// just in, the panel open.
 pub const BAR: i16 = -0x78;
@@ -60,15 +90,30 @@ pub enum State {
     Lowering,
     /// 7: the bar coming back.
     BarUp,
+    /// 8: the effect's puff (0x03003CB1, counted down by 0x08005E10) before the map goes on.
+    Puff(u8),
 }
 
 /// What closing the panel did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Used {
-    /// A power-up: Mario's form id (0x0813ACF0).
+    /// A power-up, suit, the cloud or the P-Wing: the map form (0x0813ACF0).
     Form(u8),
     Starman,
+    Anchor,
+    Hammer,
     WarpWhistle,
+}
+
+/// What the item checks (0x081324F4) see on the map.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Checks {
+    /// The next level already starts with a star (player +0x5C).
+    pub star_pending: bool,
+    /// An airship waits on the map and this world's anchor is unused (0x08006CC8).
+    pub anchor: bool,
+    /// A rock is next to Mario (0x08006D20).
+    pub rock: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +128,8 @@ pub struct Inventory {
     pub col: usize,
     /// The item to use once the panel has closed (map +0x68).
     chosen: Option<u8>,
+    /// The item checks, set by the game before each step.
+    pub checks: Checks,
 }
 
 /// One frame's outcome.
@@ -94,15 +141,18 @@ pub struct Step {
     pub used: Option<Used>,
     /// A refused item (sound 0x1A).
     pub refused: bool,
+    /// The effect's puff drawn this frame: a cell of `sma4_assets::map_puff_path`.
+    pub puff: Option<u32>,
 }
 
-/// What an item does from the panel in this port (0x081324F4 checks, 0x0813249C effects).
-/// Forms the port does not have (frog, tanooki, hammer suit, cloud, P-wing) and the items
-/// whose effect is not ported (anchor, hammer, music box) are refused.
-pub fn effect(item: u8) -> Option<Used> {
+/// What an item does from the panel (0x081324F4 checks, 0x0813249C effects); `None` is
+/// refused.
+pub fn effect(item: u8, checks: &Checks) -> Option<Used> {
     match item {
-        MUSHROOM | FIRE_FLOWER | LEAF => Some(Used::Form(item)),
-        STARMAN => Some(Used::Starman),
+        MUSHROOM..=P_WING => Some(Used::Form(MAP_FORMS[item as usize])),
+        STARMAN if !checks.star_pending => Some(Used::Starman),
+        ANCHOR if checks.anchor => Some(Used::Anchor),
+        HAMMER if checks.rock => Some(Used::Hammer),
         WARP_WHISTLE => Some(Used::WarpWhistle),
         _ => None,
     }
@@ -111,7 +161,7 @@ pub fn effect(item: u8) -> Option<Used> {
 impl Inventory {
     /// L on the map (0x08005ECC runs that frame).
     pub fn open() -> Self {
-        Self { state: State::BarDown, vofs: BAR, panel_map: false, row: 0, col: 0, chosen: None }
+        Self { state: State::BarDown, vofs: BAR, panel_map: false, row: 0, col: 0, chosen: None, checks: Checks::default() }
     }
 
     /// The cursor's slot.
@@ -167,7 +217,7 @@ impl Inventory {
                 }
                 if pressed.contains(Buttons::A) {
                     let it = item(self.slot());
-                    if effect(it).is_some() {
+                    if effect(it, &self.checks).is_some() {
                         self.chosen = Some(it);
                         self.state = State::Lowering;
                     } else {
@@ -193,9 +243,20 @@ impl Inventory {
                         if slot < items.len() {
                             items.remove(slot);
                         }
-                        out.used = effect(it);
+                        out.used = effect(it, &self.checks);
+                        // The forms and the hammer: the puff, the map held (0x08007524).
+                        if matches!(out.used, Some(Used::Form(_) | Used::Hammer)) {
+                            out.done = false;
+                            self.state = State::Puff(PUFF_FRAMES);
+                        }
                     }
                 }
+            }
+            State::Puff(t) => {
+                // 0x08005E10 draws with t and counts down, then 0x08007524 sees 0.
+                out.puff = Some(PUFF_CELLS[((t & 0x1C) >> 2) as usize]);
+                self.state = State::Puff(t - 1);
+                out.done = t == 1;
             }
         }
         out
@@ -229,12 +290,12 @@ mod tests {
     #[test]
     fn the_cursor_skips_empty_slots_and_a_uses_the_item_after_closing() {
         let mut items = vec![MUSHROOM, 0x0A, WARP_WHISTLE];
-        let mut inv = Inventory { state: State::Menu, vofs: PANEL_OPEN, panel_map: true, row: 0, col: 0, chosen: None };
+        let mut inv = Inventory { state: State::Menu, panel_map: true, vofs: PANEL_OPEN, ..Inventory::open() };
         run(&mut inv, &mut items, Buttons::LEFT);
         assert_eq!(inv.col, 2, "left wraps round to the last item");
         run(&mut inv, &mut items, Buttons::LEFT);
         assert_eq!(inv.col, 1);
-        assert!(run(&mut inv, &mut items, Buttons::A).refused, "the anchor's effect is not ported");
+        assert!(run(&mut inv, &mut items, Buttons::A).refused, "no airship on the map: the anchor is refused");
         run(&mut inv, &mut items, Buttons::RIGHT);
         run(&mut inv, &mut items, Buttons::A);
         let mut last = Step::default();

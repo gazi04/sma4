@@ -43,7 +43,7 @@ const USAGE: &str = "usage: sma4 [--assets <dir>] [--level <hex id>] [--viewer]
   --place <hex type>@<col>  debug: add an enemy standing on the ground at a column
             (a Piranha Plant goes in the pipe there: column = the pipe's left column)
   --hit <col>,<row>  debug: hit the block at a cell from below when the level starts
-  --form <0-3>  debug: start small, big, fire or raccoon
+  --form <0-6>  debug: start small, big, fire, raccoon, frog, tanooki or hammer
   --behind  debug: start behind the scenery (as just through a white block)
   --no-enemies  debug: leave the level's enemy list out
   --map  start on the world map even with debug options / scripts

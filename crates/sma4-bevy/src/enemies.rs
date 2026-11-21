@@ -86,6 +86,8 @@ fn load_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMu
         warn!("no objects/hammer.png; re-run sma4-extract");
     }
     commands.insert_resource(Art(art, puff, fireball, micro, boomerang, hammer));
+    let s = sma4_assets::PLAYER_HAMMER_CELL;
+    commands.insert_resource(PlayerHammerArt(load_cells(&sma4_assets::player_hammer_path(&dir.0), s, s, &mut images)));
     // The Advance Coin's sheet: idle coin, digits, frame, banner (`sma4_assets::ADVANCE_COIN_*`).
     let (aw, ah) = sma4_assets::ADVANCE_COIN_CELL;
     commands.insert_resource(AdvanceArt(load_cells(&sma4_assets::advance_coin_path(&dir.0), aw, ah, &mut images)));
@@ -145,10 +147,15 @@ fn spawn_advance_coins(commands: &mut Commands, game: &sma4_core::Game, art: &Ad
     }
 }
 
+/// The Hammer Suit's hammers (`sma4_assets::player_hammer_path`).
+#[derive(Resource)]
+struct PlayerHammerArt(Vec<Handle<Image>>);
+
 fn sync_enemies(
     mut commands: Commands,
     game: Res<GameRes>,
     art: Res<Art>,
+    player_hammer: Res<PlayerHammerArt>,
     advance: Res<AdvanceArt>,
     old: Query<Entity, With<EnemySprite>>,
 ) {
@@ -173,6 +180,19 @@ fn sync_enemies(
         if !f.live() {
             if let Some(image) = art.1.get(f.puff_cell()) {
                 let t = Transform::from_xyz((x - 4 + 8) as f32, -((y + 8) as f32), Z_ENEMY + 0.5);
+                commands.spawn((EnemySprite, Sprite::from_image(image.clone()), t));
+            }
+            continue;
+        }
+        // The Hammer Suit's hammer (0x0808B6A0): its spin step, the position at the cell's
+        // origin.
+        if f.hammer {
+            let cell = f.hammer_cell() + if f.vx < 0 { sma4_assets::PLAYER_HAMMER_FRAMES as usize } else { 0 };
+            if let Some(image) = player_hammer.0.get(cell) {
+                let s = sma4_assets::PLAYER_HAMMER_CELL as i32;
+                let (ox, oy) = sma4_assets::PLAYER_HAMMER_ORIGIN;
+                let (cx, cy) = (x - ox + s / 2, y - oy + s / 2);
+                let t = Transform::from_xyz(cx as f32, -(cy as f32), Z_ENEMY + 0.5);
                 commands.spawn((EnemySprite, Sprite::from_image(image.clone()), t));
             }
             continue;

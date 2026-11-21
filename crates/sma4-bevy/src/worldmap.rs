@@ -13,7 +13,7 @@ use bevy::{
 };
 use sma4_assets::{MAP_ANIM_FRAMES, MAP_MARIO_H, MAP_MARIO_W, MAP_SPIN_SIZE, MAP_STAR_SIZE, WorldMapAsset};
 use sma4_core::screens::MenuMario;
-use sma4_core::{Form, MapPhase, SCREEN_H, SCREEN_W, Screen, WorldMap};
+use sma4_core::{MapPhase, SCREEN_H, SCREEN_W, Screen, WorldMap};
 
 use crate::GameRes;
 use crate::player::sprite_image;
@@ -32,6 +32,8 @@ const Z_TILES: f32 = 41.2;
 const Z_OBJECTS: f32 = 41.4;
 const Z_MARIO: f32 = 41.5;
 const Z_STARS: f32 = 41.6;
+/// The puff of an item used on the map: OBJ priority 0.
+const Z_PUFF: f32 = 41.7;
 const Z_IRIS: f32 = 41.8;
 /// The item panel is BG0, the status bar's layer (priority 0: over the map's sprites).
 const Z_PANEL: f32 = 43.0;
@@ -62,6 +64,8 @@ struct MapArt {
     stars: Vec<Handle<Image>>,
     /// Map objects (Hammer Bros), [`sma4_assets::map_object_cell`].
     objects: Vec<Handle<Image>>,
+    /// The puffs (`sma4_assets::map_puff_path`), row by row.
+    puff: Vec<Handle<Image>>,
     /// The spade panel by streak count, [count][frame] (`sma4_assets::map_spade_path`).
     spade: Vec<Vec<Handle<Image>>>,
     /// The metatile atlas on the CPU side, for the Warp Whistle's wave, and its picture.
@@ -75,6 +79,9 @@ struct MapArt {
 
 #[derive(Component)]
 struct MapObjectSprite(usize);
+
+#[derive(Component)]
+struct MapPuff;
 
 #[derive(Component)]
 struct MapTile(usize);
@@ -221,6 +228,28 @@ fn build_world(
             a.sprites.cells(s, s).into_iter().map(|c| images.add(sprite_image(c))).collect()
         })
         .unwrap_or_default();
+    let puff = match sma4_assets::Rgba::read_png(&sma4_assets::map_puff_path(dir)) {
+        Ok(sheet) => {
+            // Row by row (`MAP_PUFF_OBJECT`, `MAP_PUFF_ITEM`).
+            let s = sma4_assets::MAP_PUFF_SIZE;
+            (0..sheet.height / s)
+                .flat_map(|row| {
+                    let o = (row * s * sheet.width * 4) as usize;
+                    let r = sma4_assets::Rgba {
+                        width: sheet.width,
+                        height: s,
+                        pixels: sheet.pixels[o..o + (s * sheet.width * 4) as usize].to_vec(),
+                    };
+                    r.cells(s, s)
+                })
+                .map(|c| images.add(sprite_image(c)))
+                .collect()
+        }
+        Err(e) => {
+            warn!("{e}; re-run sma4-extract for the map's puff");
+            Vec::new()
+        }
+    };
     let spade = match sma4_assets::Rgba::read_png(&sma4_assets::map_spade_path(dir, world)) {
         Ok(sheet) => (0..sheet.height / 16)
             .map(|look| {
@@ -284,6 +313,7 @@ fn build_world(
             }
         }
         cam.spawn((WorldEntity, MapMario, Sprite::default(), Transform::default(), Visibility::Hidden));
+        cam.spawn((WorldEntity, MapPuff, Sprite::default(), Transform::default(), Visibility::Hidden));
         cam.spawn((WorldEntity, Iris, Sprite::from_image(iris.clone()), at(0, 0, 240, 160, Z_IRIS), Visibility::Hidden));
         for i in 0..8 {
             cam.spawn((WorldEntity, MapStar(i), Sprite::default(), Transform::default(), Visibility::Hidden));
@@ -305,7 +335,7 @@ fn build_world(
             .with_origin(origin)
             .with_objects(objects_asset.as_ref().map(|a| a.objects.as_slice()).unwrap_or(&[]));
     let atlas = asset.atlas;
-    commands.insert_resource(MapArt { tiles, mario, spin, origin, iris, stars, objects, spade, atlas, wave, panel, items });
+    commands.insert_resource(MapArt { tiles, mario, spin, origin, iris, stars, objects, puff, spade, atlas, wave, panel, items });
     Some(map)
 }
 
@@ -336,6 +366,10 @@ fn sync_map(
     mut objects: Query<
         (&MapObjectSprite, &mut Sprite, &mut Transform, &mut Visibility),
         (Without<MapTile>, Without<MapMario>, Without<Iris>, Without<MapStar>),
+    >,
+    mut puff: Query<
+        (&mut Sprite, &mut Transform, &mut Visibility),
+        (With<MapPuff>, Without<MapTile>, Without<MapMario>, Without<Iris>, Without<MapStar>, Without<MapObjectSprite>),
     >,
 ) {
     let (Some(art), Some(map)) = (art, &game.0.world_map) else { return };
@@ -390,11 +424,13 @@ fn sync_map(
         }
         // A world start: the stars bring him in (0x0800EA10).
         *v = vis(shown && !map.mario_hidden() && !game.0.warp.is_some_and(|w| w.mario_hidden || w.black()));
-        let form = match game.0.player.form {
-            Form::Small => 0,
-            // TODO(re): Fire Mario's own map sprite (not extracted yet).
-            Form::Big | Form::Fire => 1,
-            Form::Raccoon => 2,
+        // The map form (0x03003CB6): the cloud and the P-Wing, else the level form.
+        let form = if map.cloud {
+            sma4_core::inventory::MAP_FORM_CLOUD as usize
+        } else if map.p_wing {
+            sma4_core::inventory::MAP_FORM_P_WING as usize
+        } else {
+            game.0.player.form.id() as usize
         };
         let phase = (game.0.frame >> 3 & 1) as usize;
         if let Some(image) = art.mario.get(form * 2 + phase) {
@@ -441,6 +477,20 @@ fn sync_map(
         let size = sma4_assets::MAP_OBJECT_SIZE as i32;
         *t = at(d.x + art.origin.0, d.y - 0x10 + art.origin.1, size, size, Z_OBJECTS);
         *v = Visibility::Inherited;
+    }
+    // The puff of an item used (0x08005E10, over Mario or the rock), 32x32 from 8 px left
+    // of and above a cell's lower OBJ.
+    let n = sma4_assets::MAP_PUFF_FRAMES;
+    let drawn = game.0.item_puff.map(|(cell, y, x)| (sma4_assets::MAP_PUFF_ITEM * n + cell, y, x)).filter(|_| shown);
+    for (mut sprite, mut t, mut v) in &mut puff {
+        let image = drawn.and_then(|(cell, y, x)| Some((art.puff.get(cell as usize)?, y, x)));
+        *v = vis(image.is_some());
+        if let Some((image, y, x)) = image {
+            sprite.image = image.clone();
+            let size = sma4_assets::MAP_PUFF_SIZE as i32;
+            let (px, py) = (x as i32 + art.origin.0, y as i32 - 0x10 + art.origin.1);
+            *t = at(px - 8, py - 8, size, size, Z_PUFF);
+        }
     }
     let radius = match map.phase {
         MapPhase::Entering(r) if shown => Some(r as i32),

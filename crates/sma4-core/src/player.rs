@@ -31,6 +31,17 @@ const WALK_MAX: i32 = 0x18;
 /// Grow / shrink animation length (+0x3B = 0x2F) and transformation puff (+0x3E = 0x17).
 pub const MORPH_FRAMES: u8 = 0x2F;
 pub const PUFF_FRAMES: u8 = 0x17;
+/// The Tanooki's statue (0x080952F0, request 0x20): +0x52 = 0xC0, -1 a frame.
+pub const STATUE_FRAMES: u8 = 0xC0;
+/// A statue in the air falls 7 more a frame (0x08097FE0).
+const STATUE_FALL: i32 = 7;
+/// The frog's hop on land (0x080964C4): +0x67 = 0x1F when a direction is held and the last
+/// hop is over; the pose is 0x08172C78[+0x67 >> 3] (the frog's walk poses), 1 in the air.
+const FROG_HOP: u8 = 0x1F;
+/// The frog swimming (0x08096588): speed bytes 0x08172C7E (across) / 0x08172C80 (up,
+/// down), doubled with A held; the pose step 0x0813DD67[(frame >> 3, >> 2 with A) & 7].
+const FROG_SWIM: i32 = 0x10;
+const FROG_SWIM_STEPS: [u8; 8] = [2, 2, 2, 1, 0, 1, 2, 2];
 /// Fire Flower flash (+0x3F) and the star (+0x3D, halved: 0xE0 counts on odd frames).
 pub const FIRE_FLASH: u8 = 0x1F;
 pub const STAR_TIME: u8 = 0xE0;
@@ -85,12 +96,6 @@ const SLIDE_MAX: i32 = 0x40;
 const LEFT_END: i32 = 4;
 /// The x move's limit (0x080A35A0: player +0x8A >> 2, +0x8A = 0x100).
 const MOVE_MAX: i32 = 0x40;
-/// Acceleration table 0x08172C96 (1/256 of a speed unit per frame): friction (small 0xFF60,
-/// other forms 0xFF20), acceleration 0xE0, skid 0x200.
-const FRICTION_SMALL: i32 = -0xA0;
-const FRICTION: i32 = -0xE0;
-const ACCEL: i32 = 0xE0;
-const SKID: i32 = 0x200;
 /// Jump speed -0x38 - 0x0813DD3C[|speed| >> 4].
 const JUMP_BASE: i32 = -0x38;
 const JUMP_BONUS: [i32; 8] = [0, 2, 4, 8, 0x10, 0x18, 0x18, 0x18];
@@ -135,7 +140,8 @@ pub const HITBOX_W: i32 = 12;
 const FRAME_W: i32 = 16;
 const FRAME_H: i32 = 32;
 
-/// Power-up form (player byte +0x37 in the ROM: 0 small, 1 big, 3 raccoon).
+/// Power-up form (player byte +0x37 in the ROM: 0 small, 1 big, 2 fire, 3 raccoon, 4 frog,
+/// 5 tanooki, 6 hammer).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Form {
     #[default]
@@ -144,7 +150,31 @@ pub enum Form {
     /// Fire Mario (+0x37 = 2): throws fireballs with B.
     Fire,
     Raccoon,
+    /// Frog suit (4): hops on land (0x080964C4), swims freely (0x08096588).
+    Frog,
+    /// Tanooki suit (5): the raccoon's tail and flight, and Down + B turns to stone
+    /// (0x08097FE0).
+    Tanooki,
+    /// Hammer suit (6): throws hammers with B (0x0808C068, projectile type 2).
+    Hammer,
 }
+
+/// Forms by ROM number.
+pub const FORMS: [Form; 7] =
+    [Form::Small, Form::Big, Form::Fire, Form::Raccoon, Form::Frog, Form::Tanooki, Form::Hammer];
+
+/// Horizontal speed steps by form (0x08172C96[form * 8 + i], 1/256 of a speed unit per
+/// frame): friction, acceleration, skid.
+/// The frog's are steeper; the Tanooki and Hammer suits use the small form's friction.
+const SPEED_STEPS: [(i32, i32, i32); 7] = [
+    (-0xA0, 0xE0, 0x200),
+    (-0xE0, 0xE0, 0x200),
+    (-0xE0, 0xE0, 0x200),
+    (-0xE0, 0xE0, 0x200),
+    (-0x100, 0x200, 0x200),
+    (-0xA0, 0xE0, 0x200),
+    (-0xA0, 0xE0, 0x200),
+];
 
 impl Form {
     /// Box height: the ROM's head probes sit 16 px (small) / 6 px (others) below the top of
@@ -152,17 +182,17 @@ impl Form {
     pub const fn height(self) -> i32 {
         match self {
             Form::Small => 16,
-            Form::Big | Form::Fire | Form::Raccoon => 26,
+            _ => 26,
         }
     }
 
-    /// Hits the player can take: a hit turns raccoon or fire into big and big into small
-    /// (0x0804A5F4), and loses a life when small.
+    /// Hits the player can take: a hit turns raccoon, fire or a suit into big and big into
+    /// small (0x0804A5F4), and loses a life when small.
     pub const fn hit_points(self) -> u8 {
         match self {
             Form::Small => 1,
             Form::Big => 2,
-            Form::Fire | Form::Raccoon => 3,
+            _ => 3,
         }
     }
 
@@ -173,7 +203,25 @@ impl Form {
             Form::Big => 1,
             Form::Fire => 2,
             Form::Raccoon => 3,
+            Form::Frog => 4,
+            Form::Tanooki => 5,
+            Form::Hammer => 6,
         }
+    }
+
+    /// The form with ROM number `id` (0-6).
+    pub fn from_id(id: u8) -> Option<Form> {
+        FORMS.get(id as usize).copied()
+    }
+
+    /// A tail form (0x08173040[form] bit 0: raccoon and Tanooki): flutter, flight, whip.
+    pub const fn has_tail(self) -> bool {
+        matches!(self, Form::Raccoon | Form::Tanooki)
+    }
+
+    /// The big forms' poses (not small).
+    pub const fn big(self) -> bool {
+        !matches!(self, Form::Small)
     }
 }
 
@@ -222,6 +270,12 @@ pub enum Pose {
     HoldTurn,
     /// Kicking a shell (+0x41, 0x08097ACC: pose 0x42 small, 0x2D the others).
     Kick,
+    /// The Tanooki's statue (0x08097FE0: pose 0x1E, its own palette).
+    Statue,
+    /// The frog swimming (0x08096588): 0 up, 1 across, 2 down; step 0-2.
+    FrogSwim(u8, u8),
+    /// The frog paddling in place: 0x1F / 0x20.
+    FrogIdle(u8),
 }
 
 impl Pose {
@@ -251,6 +305,9 @@ impl Pose {
             Pose::HoldTurn => a::PLAYER_HOLD_TURN,
             Pose::Kick => a::PLAYER_KICK,
             Pose::ThrowAir(s) => a::PLAYER_THROW_AIR + s as usize,
+            Pose::Statue => a::PLAYER_STATUE,
+            Pose::FrogSwim(d, s) => a::PLAYER_FROG_UP + 3 * d as usize + s as usize,
+            Pose::FrogIdle(s) => a::PLAYER_FROG_IDLE + s as usize,
             // Drawn from their own sheets; the standing cell as a fallback.
             Pose::Morph(_) | Pose::Puff(_) => a::PLAYER_WALK + STAND_STEP as usize,
         }
@@ -293,8 +350,10 @@ pub struct Player {
     /// Tanooki statue timer +0x52 (Down + B as a Tanooki, 0x08097FE0). The port has no
     /// Tanooki suit yet, so nothing sets it; the wand reacts to it (`wand`).
     pub statue: u8,
+    /// The P-Wing is on (map form 0x03003CB6 = 8), set at the level's start.
+    pub p_wing: bool,
     /// Speed dithering accumulator (0x03003CED).
-    dither: u8,
+    pub(crate) dither: u8,
     /// Enemies stomped since last on the ground (+0x5A), for the score chain; cleared on
     /// landing (0x080A3A5C).
     pub stomp_chain: u16,
@@ -384,6 +443,10 @@ pub struct Player {
     stroke_step: u8,
     /// The swimming pose 0x08097724 picked this frame.
     swim_pose: Option<Pose>,
+    /// The frog's pose its handler (0x080964C4) picked this frame.
+    frog_pose: Option<Pose>,
+    /// Held at the water's surface this frame (0x0809588C: +0x103 bit 2).
+    surface_hold_active: bool,
     /// Position (1/256 px) and ground flag at the start of this step and of the last one.
     /// The ROM moves the player by last frame's speed before its update; the port moves by
     /// the new speed after it, so its position runs a frame ahead. The water code
@@ -451,7 +514,7 @@ impl Player {
     }
 
     fn is_raccoon(&self) -> bool {
-        self.form == Form::Raccoon
+        self.form.has_tail()
     }
 
     /// Changes form, keeping the feet where they are.
@@ -459,9 +522,12 @@ impl Player {
         self.set_crouch(false);
         self.y += (self.form.height() - form.height()) * SUB;
         self.form = form;
-        if form != Form::Raccoon {
+        if !form.has_tail() {
             self.flight = 0;
             self.whip = 0;
+        }
+        if form != Form::Tanooki {
+            self.statue = 0;
         }
     }
 
@@ -535,9 +601,13 @@ impl Player {
         }
     }
 
-    /// 0x0808C068: Fire Mario throws on a new B press (the game checks the slots).
+    /// 0x0808C068: Fire Mario (a fireball) or the Hammer Suit (a hammer) throws on a new B
+    /// press, not crouching (+0x48); the game checks the slots.
     pub fn wants_fireball(&self, pressed: Buttons) -> bool {
-        self.form == Form::Fire && pressed.contains(Buttons::B) && !self.transforming()
+        matches!(self.form, Form::Fire | Form::Hammer)
+            && pressed.contains(Buttons::B)
+            && !self.transforming()
+            && !self.crouch
     }
 
     /// Busy with a transformation: frozen, and hits are ignored (0x0804A5F4 returns early
@@ -550,6 +620,9 @@ impl Player {
     pub fn hurt(&mut self) -> bool {
         match self.form {
             Form::Raccoon | Form::Fire => self.set_form(Form::Big),
+            // 0x0804A5F4: a suit is lost with sound 0x4F (and an effect, 0x0804A420, not
+            // ported); big again, no animation.
+            Form::Frog | Form::Tanooki | Form::Hammer => self.set_form(Form::Big),
             Form::Big => {
                 // 0x0804A5F4: big shrinks with the same animation, played backwards.
                 self.set_form(Form::Small);
@@ -611,8 +684,17 @@ impl Player {
         self.seen.2 &= !self.took_off;
         let grounded = self.on_ground;
         self.crouch_check(held, map);
+        // The Tanooki's handler (0x08096778 / 0x08096798) first runs the statue
+        // (0x08097FE0): while it holds, nothing else moves him.
+        if self.form == Form::Tanooki && self.statue_step(held, pressed) {
+            self.frog_pose = None;
+            self.update_p_meter(frame);
+            self.move_x(map);
+            return self.move_y(map);
+        }
         let mut pressed = pressed;
         let (vx, vy) = (self.vx, self.vy);
+        let mut jumped = false;
         self.splash = self.water(held, &mut pressed, map, frame);
         if (vx, vy) != (self.vx, self.vy) {
             self.x = self.seen.0 + self.vx;
@@ -623,8 +705,10 @@ impl Player {
             self.slide = 0;
             // 0x0809588C steps the walk cycle (0x08097800) before the swimming handlers.
             self.animate_walk(held);
-            self.swim_horizontal(held);
-            self.swim_vertical(pressed, frame);
+            if self.form != Form::Frog {
+                self.swim_horizontal(held);
+                self.swim_vertical(pressed, frame);
+            }
             self.land_late();
             if self.on_ground {
                 self.set_uphill();
@@ -635,9 +719,20 @@ impl Player {
             }
         } else {
             self.horizontal(held, map);
+            let standing = self.on_ground;
             self.vertical(held, pressed);
+            // The jump sets the ROM's air flag (+0x35) before the form's handler reads it.
+            jumped = standing && !self.on_ground;
             self.land_late();
             self.slide(held);
+        }
+        self.frog_pose = None;
+        if self.form == Form::Frog && !self.carrying {
+            if self.in_water {
+                self.frog_swim(held, frame);
+            } else {
+                self.frog_hop(held, self.seen.2 && !jumped);
+            }
         }
         self.took_off = grounded && !self.on_ground;
         if self.took_off {
@@ -651,6 +746,11 @@ impl Player {
             self.raccoon(pressed);
         }
         self.update_p_meter(frame);
+        // The P-Wing (map form 8, 0x08094E4C each frame): a full meter and endless flight.
+        if self.p_wing {
+            self.p_meter = P_FULL;
+            self.flight = u16::MAX;
+        }
         // The ROM's next water check comes before its move: falling in stops the fall (and
         // in the air the motion across), at the surface the rise is held (`surface_hold`),
         // and the move goes by that; the speeds themselves change next step (`water`).
@@ -691,6 +791,7 @@ impl Player {
     /// the foot probe at frame (8, 0x20) is in open air (tested while falling), otherwise
     /// at the surface: the rise is held to -0xC, A does nothing and Up + A jumps out.
     fn water(&mut self, held: Buttons, pressed: &mut Buttons, map: &Level, frame: u32) -> Option<WaterChange> {
+        self.surface_hold_active = false;
         let (fx, fy) = self.frame_at(self.seen.0, self.seen.1);
         let ground = self.seen.2;
         let dy = if self.small_box() { 0x14 } else { 0x0A };
@@ -727,6 +828,7 @@ impl Player {
             rise += 1;
         }
         self.vy = rise * UNIT;
+        self.surface_hold_active = true;
         pressed.remove(Buttons::A);
         if held.contains(Buttons::UP | Buttons::A) {
             self.vy = if self.small_box() { LEAP_SMALL } else { LEAP } * UNIT;
@@ -868,6 +970,101 @@ impl Player {
     }
 
     /// Adds `delta` (1/256 speed units) to the speed byte through the dithering accumulator.
+    /// 0x08097FE0: Down held and B pressed (not carrying, not already stone) turns the
+    /// Tanooki to stone behind a puff (+0x3E = 0x17, sound 0x4B; the request 0x20 sets
+    /// +0x52 = 0xC0). Each frame of it: -1, back with a puff at 1 or when Down is let go;
+    /// the speed across is 0 (unless sliding), in the air the fall gains 7. True while it
+    /// holds (the other handlers do not run).
+    fn statue_step(&mut self, held: Buttons, pressed: Buttons) -> bool {
+        if self.statue == 0 {
+            if !self.carrying && held.contains(Buttons::DOWN) && pressed.contains(Buttons::B) {
+                self.set_crouch(false);
+                self.statue = STATUE_FRAMES;
+                self.puff = PUFF_FRAMES;
+            }
+            return false;
+        }
+        if self.statue == 1 || !held.contains(Buttons::DOWN) {
+            self.statue = 0;
+            self.puff = PUFF_FRAMES;
+        } else {
+            self.statue -= 1;
+        }
+        if self.slide == 0 {
+            self.vx = 0;
+        }
+        if !self.seen.2 {
+            self.vy = (self.vy / UNIT + STATUE_FALL).min(MAX_FALL) * UNIT;
+        }
+        true
+    }
+
+    /// The frog on land (0x080964C4, after the speed updates): on the ground with no hop
+    /// running the speed across is 0, and a direction held starts the next hop (+0x67 =
+    /// 0x1F, sound 0x42); in the air +0x67 = 0.
+    fn frog_hop(&mut self, held: Buttons, ground: bool) {
+        let step = if ground {
+            if self.throw == 0 {
+                self.vx = 0;
+                if !(held & (Buttons::LEFT | Buttons::RIGHT)).is_empty() {
+                    self.throw = FROG_HOP;
+                }
+            }
+            self.throw >> 3
+        } else {
+            self.throw = 0;
+            1
+        };
+        self.frog_pose = Some(Pose::Walk(step));
+    }
+
+    /// The frog in the water (0x08096588), instead of the swimming handlers: Up / Down set
+    /// the speed byte to -0x10 / 0x10 (no rising more than 0x14 px above the screen; Up is
+    /// ignored at the surface), else it eases to 0 by 1 a frame; Left / Right set 0x10 the
+    /// held way, else it eases to 0. A held doubles them. The pose: the way he swims (across
+    /// over up / down) by step 0x0813DD67[(frame >> 3, >> 2 with A) & 7]; idle, 0x15 on the
+    /// floor or paddling 0x1F / 0x20 by frame bit 3.
+    fn frog_swim(&mut self, held: Buttons, frame: u32) {
+        let fast = held.contains(Buttons::A);
+        let double = |v: i32| if fast { v * 2 } else { v };
+        let mut dir = None;
+        let mut vy = self.vy / UNIT;
+        let surface = self.surface_hold_active;
+        let up = held.contains(Buttons::UP) && !surface;
+        if held.contains(Buttons::DOWN) || up {
+            let down = held.contains(Buttons::DOWN);
+            dir = Some(if down { 2 } else { 0 });
+            let screen_y = self.frame_at(self.seen.0, self.seen.1).1 - self.camera_y;
+            vy = if down { FROG_SWIM } else if screen_y < -SCREEN_TOP_REACH { 0 } else { -FROG_SWIM };
+            vy = double(vy);
+            self.on_ground = false;
+        } else {
+            vy -= vy.signum();
+        }
+        self.vy = vy * UNIT;
+        let speed = self.vx / UNIT;
+        let lr = held & (Buttons::LEFT | Buttons::RIGHT);
+        if lr.is_empty() {
+            if speed == 0 && self.seen.2 && dir.is_none() {
+                self.frog_pose = Some(Pose::Walk(0));
+                return;
+            }
+            self.vx = (speed - speed.signum()) * UNIT;
+        } else {
+            let left = lr.contains(Buttons::LEFT);
+            self.facing_left = left;
+            self.vx = double(if left { -FROG_SWIM } else { FROG_SWIM }) * UNIT;
+            dir = Some(1);
+        }
+        self.frog_pose = Some(match dir {
+            Some(d) => {
+                let step = (frame >> if fast { 2 } else { 3 }) & 7;
+                Pose::FrogSwim(d, FROG_SWIM_STEPS[step as usize])
+            }
+            None => Pose::FrogIdle((frame & 8 != 0) as u8),
+        });
+    }
+
     fn accelerate(&mut self, delta: i32) {
         let step = (self.dither as i32 + delta).div_euclid(256);
         self.vx += step * UNIT;
@@ -911,8 +1108,7 @@ impl Player {
                 let t = if ground { SWIM_FLOOR } else { SWIM_AIR };
                 (t[0], t[1], t[2])
             }
-            _ if self.form == Form::Small => (FRICTION_SMALL, ACCEL, SKID),
-            _ => (FRICTION, ACCEL, SKID),
+            _ => SPEED_STEPS[self.form.id() as usize],
         };
         if dir == 0 {
             if ground && speed != 0 {
@@ -1108,7 +1304,7 @@ impl Player {
                     return Pose::Hold(self.walk_step);
                 }
                 return match self.form {
-                    Form::Raccoon => Pose::HoldWag((self.wag >> 2).min(2)),
+                    Form::Raccoon | Form::Tanooki => Pose::HoldWag((self.wag >> 2).min(2)),
                     Form::Small => Pose::Hold(1),
                     _ => Pose::Hold(0),
                 };
@@ -1122,7 +1318,10 @@ impl Player {
             let step = self.morph >> 2;
             return Pose::Morph(if self.form == Form::Small { 11 - step } else { step });
         }
-        if self.throw != 0 && self.form == Form::Fire {
+        if self.statue != 0 {
+            return Pose::Statue;
+        }
+        if self.throw != 0 && matches!(self.form, Form::Fire | Form::Hammer) {
             // 0x08098648: 0x0813DE9E[(+0x67 >> 2) (+3 in the air)].
             let step = (self.throw >> 2).min(2);
             return if self.on_ground { Pose::Throw(step) } else { Pose::ThrowAir(step) };
@@ -1130,7 +1329,7 @@ impl Player {
         // In water: the swimming pose the handler picked (before the collision, so it stays
         // on the frame he lands), or 0x08097800's walking pose when it did not run.
         if self.in_water {
-            return self.swim_pose.unwrap_or(Pose::Walk(self.walk_step));
+            return self.frog_pose.or(self.swim_pose).unwrap_or(Pose::Walk(self.walk_step));
         }
         if self.whip != 0 && self.is_raccoon() {
             let step = (self.whip >> 2).min(4);
@@ -1145,11 +1344,15 @@ impl Player {
         if self.crouch {
             return if self.on_ground { Pose::Crouch } else { Pose::CrouchAir((self.wag >> 2).min(2)) };
         }
+        let speed = (self.vx / UNIT).abs();
+        // The frog's hop poses replace the others; at P-speed 0x08097ACC shows 0x17.
+        if let Some(p) = self.frog_pose {
+            return if self.on_ground && speed >= P_MAX - 1 { Pose::Run(0) } else { p };
+        }
         if self.on_ground {
             if self.skidding {
                 return Pose::Skid;
             }
-            let speed = (self.vx / UNIT).abs();
             return if speed >= P_MAX - 1 { Pose::Run(self.walk_step) } else { Pose::Walk(self.walk_step) };
         }
         let falling = self.vy >= 0;
@@ -1162,7 +1365,7 @@ impl Player {
                 (false, true) => Pose::Glide(wag),
             };
         }
-        if falling && matches!(self.form, Form::Big | Form::Fire) { Pose::Fall } else { Pose::Jump }
+        if falling && matches!(self.form, Form::Big | Form::Fire | Form::Hammer) { Pose::Fall } else { Pose::Jump }
     }
 
     /// After the goal card is touched (0x080A8000 while +0x43 is set; the goal object sets it
@@ -1261,7 +1464,8 @@ impl Player {
     /// Micro-Goombas on.
     fn crouch_check(&mut self, held: Buttons, map: &Level) {
         let pad = held & (Buttons::DOWN | Buttons::UP | Buttons::LEFT | Buttons::RIGHT);
-        let crouch = if self.form == Form::Small || self.slide != 0 || self.stuck != 0 {
+        // 0x0809588C: the small form and the frog never crouch.
+        let crouch = if matches!(self.form, Form::Small | Form::Frog) || self.slide != 0 || self.stuck != 0 {
             false
         } else if self.seen.2 {
             !(map.has_slopes() && self.push != 0 && self.vx != 0) && (pad == Buttons::DOWN || self.held_down(map))

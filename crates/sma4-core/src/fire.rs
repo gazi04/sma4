@@ -15,6 +15,15 @@
 //!   down.
 //! * Enemies (0x0808B648 -> 0x0808B2F0) are checked by the game (`Enemy::fireball_hit`).
 //! * Puff (type 3..0x10, 0x0808BC0C): 13 frames, tiles 0x08170A03[type >> 2].
+//!
+//! The Hammer Suit throws hammers into the same slots (type 2, 0x0808BECC): 3 px further
+//! left, speed -0x30 up and 0x10 the facing way plus the player's speed if he moves that
+//! way (x moves by it as raw 1/256 px x 16, the fireball's unit); each frame y and x move,
+//! and every 8th frame the fall gains 0x10, without a limit. No walls or floors stop it
+//! (0x0808B028 is skipped); a high-layer brick (tile code 0x0F at (x + 4, y + 8), 0x080785B0)
+//! would break and burst it, which the port does not model. An enemy it touches is knocked
+//! out like by a fireball, fire-proof or not, and the hammer flies on, touching nothing
+//! for 2 frames (+0x10, 0x0808B2F0).
 
 use sma4_assets::TileKind;
 
@@ -29,6 +38,11 @@ const FALL_STEP: i32 = 0x10;
 const MAX_FALL: i32 = 0x40;
 /// Bounce speeds 0x081709E6: flat, steep (into a slope), shallow (down a slope).
 const BOUNCE: [i32; 3] = [-0x30, -0x50, -0x20];
+/// The hammer (0x0808BECC, form 6): 3 px further left, speed -0x30 up, 0x10 across.
+const HAMMER_DX: i32 = 3;
+const HAMMER_UP: i32 = -0x30;
+const HAMMER_SPEED: i32 = 0x10;
+const HAMMER_COOLDOWN: u8 = 2;
 /// Spawn offsets into the player's 16x32 frame (0x0808BECC).
 const THROW_DX: [i32; 2] = [1, 7];
 const THROW_DY: i32 = 5;
@@ -55,6 +69,9 @@ pub struct PlayerFireball {
     floor_hits: u8,
     /// Type 3.. once it has burst (0x0808AA64), up to 0x10.
     pub puff: u8,
+    /// A hammer (type 2) rather than a fireball, and its hit cooldown (+0x10).
+    pub hammer: bool,
+    pub cooldown: u8,
     /// Where it was at the start of the last two steps (1/256 px): `seen[1]` is what the
     /// ROM's projectiles (0x0808FBD0, before the fireballs move) see this frame, since the
     /// port's fireball moves in the frame it is thrown and so leads the ROM's by one.
@@ -84,8 +101,34 @@ impl PlayerFireball {
             counter: 0,
             floor_hits: 0,
             puff: 0,
+            hammer: false,
+            cooldown: 0,
             seen: [None; 2],
         }
+    }
+
+    /// 0x0808BECC for the Hammer Suit (form 6).
+    pub fn hammer(player: &Player) -> Self {
+        let mut h = Self::thrown(player);
+        let right = !player.facing_left;
+        h.x -= HAMMER_DX * SUB;
+        h.vy = HAMMER_UP;
+        let own = player.vx / crate::player::UNIT;
+        let along = if (own >= 0) == right { own } else { 0 };
+        h.vx = if right { HAMMER_SPEED } else { -HAMMER_SPEED } + along;
+        h.hammer = true;
+        h
+    }
+
+    /// The hammer's spin step (0x0808B6A0: (+0x0F >> 2) & 3), a cell of
+    /// `sma4_assets::player_hammer_path` (add 4 flying left).
+    pub fn hammer_cell(&self) -> usize {
+        ((self.counter >> 2) & 3) as usize
+    }
+
+    /// An enemy may be hit this frame (the hammer's cooldown is over).
+    pub fn can_hit(&self) -> bool {
+        self.live() && self.cooldown == 0
     }
 
     pub fn px(&self) -> (i32, i32) {
@@ -121,6 +164,9 @@ impl PlayerFireball {
             self.puff += 1;
             return if self.puff == PUFF_END { FireStep::Gone } else { FireStep::Flying };
         }
+        if self.hammer {
+            return self.step_hammer(camera);
+        }
         self.y += self.vy * 16;
         self.counter = self.counter.wrapping_add(1);
         self.x += self.vx * 16;
@@ -140,6 +186,31 @@ impl PlayerFireball {
             return if sy >= 0 { FireStep::Gone } else { FireStep::Flying };
         }
         self.collide(level)
+    }
+
+    /// 0x0808B9F4 for type 2.
+    fn step_hammer(&mut self, camera: (i32, i32)) -> FireStep {
+        self.y += self.vy * 16;
+        self.counter = self.counter.wrapping_add(1);
+        self.x += self.vx * 16;
+        if self.counter & 7 == 0 {
+            self.vy += FALL_STEP;
+        }
+        let (x, y) = self.px();
+        if !(-0x10..0x100).contains(&(x - camera.0)) {
+            return FireStep::Gone;
+        }
+        let sy = y - camera.1;
+        if !(-0x20..0xC0).contains(&sy) {
+            return if sy >= 0 { FireStep::Gone } else { FireStep::Flying };
+        }
+        self.cooldown = self.cooldown.saturating_sub(1);
+        FireStep::Flying
+    }
+
+    /// The hammer touched an enemy (0x0808B2F0): no hits for 2 frames.
+    pub fn hammer_hit(&mut self) {
+        self.cooldown = HAMMER_COOLDOWN;
     }
 
     /// 0x0808B028.

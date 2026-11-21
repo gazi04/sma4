@@ -27,10 +27,7 @@ const FRAME_H: i32 = 32;
 
 /// Points the ROM tests for coins this frame, in level pixels.
 fn probes(p: &Player, frame: u32) -> [(i32, i32); 4] {
-    let base: usize = match p.form {
-        Form::Small => 0x16,
-        Form::Big | Form::Fire | Form::Raccoon => 6,
-    };
+    let base: usize = if p.form == Form::Small { 0x16 } else { 6 };
     // Right-hand probes when moving right; standing still alternates sides every frame.
     let right = if p.vx == 0 { frame & 1 == 0 } else { p.vx > 0 };
     let base = base + if right { 8 } else { 0 };

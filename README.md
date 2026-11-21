@@ -42,6 +42,32 @@ Supported ROM: Europe AX4P rev 0 (SHA1 `b7f3d6dc014e2f0ddc996137bdefbb8167a77e66
 
 Controls: arrows = move, X = jump (A), Z = run (B), Enter = Start, Backspace = Select, A/S = L/R.
 
+The item panel works as in the ROM (checked in mGBA): L on the map slides the status bar
+away and raises the panel with your items (nine to a row); the pad moves the cursor (the
+chosen item in colour), B or L closes it, A uses the item and closes it. Every item works
+as in the ROM, and one that can't be used now is refused:
+- A mushroom, fire flower, leaf, Frog, Tanooki or Hammer Suit changes Mario's form, on the
+  map and into the next level, with a puff of smoke over him that holds the map for a
+  moment.
+- The cloud carries Mario past one level he hasn't cleared; the P-Wing makes him raccoon
+  Mario with a P-meter that stays full for the next level. Both are gone once that level
+  is over.
+- The Starman makes the next level start with a star (refused if one is already waiting).
+- The anchor is taken only while an airship waits on the map.
+- The hammer breaks a rock next to Mario (with a puff) and opens the path behind it;
+  without a rock it is refused.
+- The Warp Whistle calls the whirlwind: it flies across the map and takes Mario away, the
+  map waves and World 9, the Warp Zone, comes in, waving, until the whirlwind drops Mario
+  there (timings recorded in mGBA).
+
+The new forms play as in the ROM (checked frame by frame in mGBA): the Frog Suit hops on
+land and swims freely in water (Up / Down / Left / Right, faster with A held); the Tanooki
+Suit has the raccoon's tail and flight, and Down + B turns him to stone (no harm can come to
+him) until Down is let go; the Hammer Suit throws hammers in an arc that fly through walls
+and knock out any enemy they touch, even fire-proof ones. Losing a suit to a hit makes Mario
+big. Not ported: the sounds, the palette flash, a hammer breaking bricks. Debug: `--items
+1,2,3,9,c` starts with items (hex ids; in scripts `Q` is the L button), `--form 0-6`.
+
 World 1-5 works as in the ROM. Its pools are water: Mario swims in them. A strokes up
 (speed -0x20 off the bottom, 0x20 more upward in the water, held within +/-0x20), the
 water pulls him down slowly (+1 a frame rising, every other frame sinking) and pushes him

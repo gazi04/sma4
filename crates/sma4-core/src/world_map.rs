@@ -165,6 +165,13 @@ pub struct WorldMap {
     pub meeting: Option<(usize, u8)>,
     /// Where the way back to the checkpoint started.
     return_from: (u8, u16),
+    /// Mario rides the cloud (map form 0x03003CB6 = 7): he may leave a spot not cleared
+    /// yet in any direction, once (0x0801112C).
+    pub cloud: bool,
+    /// The P-Wing is on (map form 8): the next level's P-meter stays full.
+    pub p_wing: bool,
+    /// This world's anchor has been used (0x03002D4C bit).
+    pub anchored: bool,
 }
 
 impl WorldMap {
@@ -208,6 +215,9 @@ impl WorldMap {
             frame: 0,
             meeting: None,
             return_from: start,
+            cloud: false,
+            p_wing: false,
+            anchored: false,
         };
         map.rebuild();
         map
@@ -274,6 +284,9 @@ impl WorldMap {
 
     /// Back on the map.
     pub fn show(&mut self, arrival: Arrival) {
+        // 0x0800B648: the map form is the level form again (no cloud, no P-Wing).
+        self.cloud = false;
+        self.p_wing = false;
         self.walk = 0;
         self.target = None;
         self.meeting = None;
@@ -408,6 +421,22 @@ impl WorldMap {
         }
         self.cleared[c as usize] |= 0x80 >> (r - 1).min(7);
         self.rebuild();
+    }
+
+    /// 0x08006D20: a rock (tile 0x51 / 0x52) in a cell next to Mario's, looking down, up,
+    /// left, then right (0x08010D18 directions 3..0); its (column, row).
+    pub fn rock_next(&self) -> Option<(i32, i32)> {
+        let (c, r) = self.cell(self.y as i32, self.x as i32);
+        (0..4).rev().map(|d| (c + NEIGHBOUR[d].0, r + NEIGHBOUR[d].1)).find(|&(c, r)| matches!(self.tile(c, r), 0x51 | 0x52))
+    }
+
+    /// The hammer (0x08006610): the rock next to Mario gets its completion bit and opens
+    /// into a path (0x0813AD3F: 0x45 / 0x46, as `rebuild` does). Its map spot (y, x), where
+    /// the puff shows.
+    pub fn break_rock(&mut self) -> Option<(u8, u16)> {
+        let (c, r) = self.rock_next()?;
+        self.clear_cell(c as usize, r as usize);
+        Some(((r * 16 + 0x10) as u8, (c * 16) as u16))
     }
 
     /// The level-table entry for Mario's position (0x08009A3C).
@@ -559,9 +588,16 @@ impl WorldMap {
                 } else {
                     let last = self.last_dir;
                     if self.try_move(held) {
-                        self.walk = 0;
+                        if self.cloud {
+                            // 0x0801112C: the cloud carries him on, and is used up.
+                            self.cloud = false;
+                        } else {
+                            self.walk = 0;
+                            self.last_dir = last;
+                        }
+                    } else {
+                        self.last_dir = last;
                     }
-                    self.last_dir = last;
                 }
             }
             if self.walk == 0 {

@@ -167,6 +167,13 @@ pub struct Game {
     pub pending_world: Option<u8>,
     /// A Starman used on the map: the next level starts with it (player +0x5C).
     pub pending_star: bool,
+    /// The puff of an item used on the map (0x08005E10): a cell of
+    /// `sma4_assets::map_puff_path` and the map spot (y, x) it covers.
+    pub item_puff: Option<(u32, u8, u16)>,
+    /// The anchors used, a bit per world (0x03002D4C).
+    pub anchors: u16,
+    /// Where the item's puff goes (map +0x63 / +0x64).
+    puff_spot: (u8, u16),
     /// Autoscroll scripts from the ROM (`sma4_assets::AutoscrollScripts`); without them a
     /// level's autoscroll never starts.
     pub autoscroll_scripts: Option<sma4_assets::AutoscrollScripts>,
@@ -538,8 +545,14 @@ impl Game {
 
     /// The player takes a hit: big shrinks to small, small dies.
     pub fn hurt(&mut self) {
-        // 0x0804A5F4 ignores hits while the star (+0x3D) runs.
-        if self.invulnerable > 0 || self.dying.is_some() || self.player.transforming() || self.player.star != 0 {
+        // 0x0804A5F4 ignores hits while the star (+0x3D) or the Tanooki's statue (+0x52)
+        // runs.
+        if self.invulnerable > 0
+            || self.dying.is_some()
+            || self.player.transforming()
+            || self.player.star != 0
+            || self.player.statue != 0
+        {
             return;
         }
         if self.player.hurt() {
@@ -1308,6 +1321,12 @@ impl Game {
         self.enter_level(level, spawn, enemies);
         self.player.set_form(form);
         self.player.start(self.level.start_kind, &self.level);
+        // A Starman used on the map (0x08006454: player +0x5C).
+        if std::mem::take(&mut self.pending_star) {
+            self.player.starman();
+        }
+        // The P-Wing (map form 8): a full P-meter all level (0x08094E4C).
+        self.player.p_wing = self.world_map.as_ref().is_some_and(|m| m.p_wing);
         self.status.popups.clear();
         self.set_time_limit(time_limit);
         self.level_generation = self.level_generation.wrapping_add(1);
@@ -1363,6 +1382,7 @@ impl Game {
     /// The item panel and the Warp Whistle on the map; true while they hold the map.
     fn step_map_items(&mut self) -> bool {
         let pressed = self.input.pressed;
+        self.item_puff = None;
         if let Some(w) = &mut self.warp {
             let ev = w.step(self.frame);
             if ev.switch_world {
@@ -1374,25 +1394,19 @@ impl Game {
             }
             return true;
         }
-        if let Some(panel) = &mut self.item_panel {
+        if self.item_panel.is_some() {
+            let checks = self.item_checks();
+            let Some(panel) = &mut self.item_panel else { return true };
+            panel.checks = checks;
             let step = panel.step(pressed, &mut self.inventory);
             if step.done {
                 self.item_panel = None;
-                match step.used {
-                    Some(inventory::Used::Form(item)) => self.player.set_form(match item {
-                        inventory::MUSHROOM => Form::Big,
-                        inventory::FIRE_FLOWER => Form::Fire,
-                        _ => Form::Raccoon,
-                    }),
-                    Some(inventory::Used::Starman) => self.pending_star = true,
-                    Some(inventory::Used::WarpWhistle) => {
-                        if let Some(map) = &self.world_map {
-                            self.warp = Some(warp::Warp::start(map.sprite_pos().0, map.y));
-                        }
-                    }
-                    None => {}
-                }
             }
+            if let Some(used) = step.used {
+                self.use_item(used);
+            }
+            let (y, x) = self.puff_spot;
+            self.item_puff = step.puff.map(|cell| (cell, y, x));
             return true;
         }
         // 0x0800D5B4: L on the idle map opens the panel.
@@ -1402,6 +1416,51 @@ impl Game {
             return true;
         }
         false
+    }
+
+    /// What the item checks (0x081324F4) see.
+    fn item_checks(&self) -> inventory::Checks {
+        let Some(map) = &self.world_map else { return inventory::Checks::default() };
+        let world = self.status.world.saturating_sub(1) as u16;
+        inventory::Checks {
+            star_pending: self.pending_star,
+            // 0x08006CC8: Worlds 1-8, this world's anchor unused, an airship on the map.
+            anchor: world < 8
+                && self.anchors >> world & 1 == 0
+                && map.objects.slots.iter().any(|o| o.kind == castle::MAP_AIRSHIP),
+            rock: map.rock_next().is_some(),
+        }
+    }
+
+    /// An item's effect once the panel is up again (0x0813249C).
+    fn use_item(&mut self, used: inventory::Used) {
+        let Some(map) = &mut self.world_map else { return };
+        match used {
+            // 0x080062BC: the map form, and the level form but for the cloud (the P-Wing's
+            // is the raccoon's); the puff over Mario.
+            inventory::Used::Form(f) => {
+                map.cloud = f == inventory::MAP_FORM_CLOUD;
+                map.p_wing = f == inventory::MAP_FORM_P_WING;
+                let form = if map.p_wing { Some(Form::Raccoon) } else { Form::from_id(f) };
+                if let Some(form) = form {
+                    self.player.set_form(form);
+                }
+                self.puff_spot = (map.y, map.x);
+            }
+            inventory::Used::Starman => self.pending_star = true,
+            // 0x080064C4: this world's bit.
+            inventory::Used::Anchor => {
+                self.anchors |= 1 << self.status.world.saturating_sub(1);
+                map.anchored = true;
+            }
+            // 0x08006610: the rock opens into a path, the puff over it.
+            inventory::Used::Hammer => {
+                if let Some(spot) = map.break_rock() {
+                    self.puff_spot = spot;
+                }
+            }
+            inventory::Used::WarpWhistle => self.warp = Some(warp::Warp::start(map.sprite_pos().0, map.y)),
+        }
     }
 
     /// World 9 has been loaded after the Warp Whistle: Mario's spot there (0x08007950).
@@ -1625,7 +1684,11 @@ impl Game {
         }
         // 0x0808C068 -> 0x0808BFEC: a free slot (a bursting fireball still holds its own).
         if self.player.wants_fireball(self.input.pressed) && self.player_fireballs.len() < fire::FIREBALL_SLOTS {
-            self.player_fireballs.push(fire::PlayerFireball::thrown(&self.player));
+            self.player_fireballs.push(if self.player.form == Form::Hammer {
+                fire::PlayerFireball::hammer(&self.player)
+            } else {
+                fire::PlayerFireball::thrown(&self.player)
+            });
             self.player.throw = player::THROW_TIME;
         }
         // Doors (0x0809588C).
@@ -1897,12 +1960,16 @@ impl Game {
         let level = &self.level;
         self.player_fireballs.retain_mut(|f| f.step(level, camera) != fire::FireStep::Gone);
         for f in &mut self.player_fireballs {
-            if !f.live() {
+            if !f.can_hit() {
                 continue;
             }
             let mut hit = false;
             for e in &mut self.enemies {
-                match e.fireball_hit(f.px(), f.vx.signum()) {
+                // A hammer hits one at a time (its cooldown, 0x0808B2F0).
+                if f.hammer && hit {
+                    break;
+                }
+                match e.fireball_hit(f.px(), f.vx.signum(), f.hammer) {
                     Some(true) => {
                         hit = true;
                         let (x, y) = e.px();
@@ -1914,7 +1981,11 @@ impl Game {
                 }
             }
             if hit {
-                f.hit();
+                if f.hammer {
+                    f.hammer_hit();
+                } else {
+                    f.hit();
+                }
             }
         }
         // 0x0808FBD0 counts the Micro-Goombas riding the player (0x03007820 + 7) for the
@@ -2410,8 +2481,26 @@ mod tests {
         };
         press(&mut g, Buttons::L, 30);
         assert_eq!(g.item_panel.as_ref().map(|p| p.state), Some(inventory::State::Menu));
-        press(&mut g, Buttons::A, 30);
-        assert!(g.item_panel.is_none());
+        // Recorded in mGBA (A at frame 0): the panel down in 13 frames, the bar up in 6;
+        // the form changes at 19, then the puff over Mario (palette 1) from 20 to 39 by
+        // 0x03003CB1 (tiles 0x16 x5, 0x18, 0x1A, 0x1C x4, 0x1E x3); the map goes on at 40.
+        g.step(Buttons::empty());
+        g.step(Buttons::A);
+        let mut cells = vec![];
+        for f in 1..=39 {
+            g.step(Buttons::empty());
+            assert_eq!(g.player.form == Form::Big, f >= 19, "frame {f}");
+            assert_eq!(g.item_panel.is_none(), f >= 39, "frame {f}");
+            if let Some((cell, y, x)) = g.item_puff {
+                let map = g.world_map.as_ref().unwrap();
+                assert_eq!((y, x), (map.y, map.x));
+                cells.push((f, cell));
+            }
+        }
+        let want: Vec<(u32, u32)> = (20..=39).map(|f| (f, [0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4][f as usize - 20])).collect();
+        assert_eq!(cells, want);
+        g.step(Buttons::empty());
+        assert_eq!(g.item_puff, None);
         assert_eq!((g.player.form, g.inventory.as_slice()), (Form::Big, &[inventory::WARP_WHISTLE][..]));
         press(&mut g, Buttons::L, 30);
         press(&mut g, Buttons::A, 30);

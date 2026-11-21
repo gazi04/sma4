@@ -69,7 +69,7 @@ pub(crate) const Z_BEHIND_TILES: f32 = -2.0;
 
 fn spawn_player(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMut<Assets<Image>>) {
     let mut load = |path: std::path::PathBuf| load_cells(&path, PLAYER_W, PLAYER_H, &mut images);
-    let forms = (0..4u8)
+    let forms = (0..sma4_assets::PLAYER_FORMS)
         .map(|form| {
             (0..sma4_assets::PLAYER_STAR_PALETTES)
                 .map(|k| {

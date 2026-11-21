@@ -335,8 +335,11 @@ fn spawn_level(
     match form {
         1 => game.0.player.set_form(sma4_core::Form::Big),
         2 => game.0.player.set_form(sma4_core::Form::Fire),
-        3 => game.0.player.set_form(sma4_core::Form::Raccoon),
-        _ => {}
+        f => {
+            if let Some(form) = sma4_core::Form::from_id(f) {
+                game.0.player.set_form(form);
+            }
+        }
     }
     // A debug start mid-level: the camera as if it had followed the player there.
     if debug_spawn {

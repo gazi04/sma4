@@ -788,11 +788,12 @@ pub struct MapNode {
 
 /// Map tile animation frames (VBlank 0x080016DC: frame counter bits 3-4).
 pub const MAP_ANIM_FRAMES: u32 = 4;
-/// Map sprite cells of Mario in `world{n}_mario.png`: 16x32 each, (form 0 small / 1 big /
-/// 2 raccoon) x (two animation phases); the lower OBJ fills the bottom 16 rows.
+/// Map sprite cells of Mario in `world{n}_mario.png`: 16x32 each, (map form 0x03003CB6:
+/// 0-6 the forms, 7 the cloud, 8 the P-Wing, 9) x (two animation phases); the lower OBJ
+/// fills the bottom 16 rows.
 pub const MAP_MARIO_W: u32 = 16;
 pub const MAP_MARIO_H: u32 = 32;
-pub const MAP_MARIO_FORMS: u32 = 3;
+pub const MAP_MARIO_FORMS: u32 = 10;
 /// Mario spinning on the map after a game over (0x0800C45C while map state +0x17 is set):
 /// the lower OBJ becomes 0x0813A55F[(+0x21 & 6) >> 1] (facing left, front, facing right, back),
 /// 16x16 cells in `world{n}_mario_spin.png`, in that table's order.
@@ -1121,6 +1122,15 @@ pub fn fireball_path(dir: &Path) -> PathBuf {
     dir.join("objects").join("fireball.png")
 }
 pub const FIREBALL_FRAMES: u32 = 4;
+/// The Hammer Suit's hammer (player projectile type 2, draw 0x0808B6A0): `PLAYER_HAMMER_CELL`
+/// square cells, the projectile's position at `PLAYER_HAMMER_ORIGIN`; spin steps 0-3
+/// ((+0x0F >> 2) & 3) flying right, then left.
+pub fn player_hammer_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("player_hammer.png")
+}
+pub const PLAYER_HAMMER_FRAMES: u32 = 4;
+pub const PLAYER_HAMMER_CELL: u32 = 32;
+pub const PLAYER_HAMMER_ORIGIN: (i32, i32) = (8, 8);
 
 /// Micro-Goomba (projectile type 6, draw 0x0808D7E0): `KOOPA_CELL_W` x `KOOPA_CELL_H`
 /// cells, the projectile's position (top-left of its 8x8 OBJ) at `KOOPA_ORIGIN`. Cells:
@@ -1199,6 +1209,18 @@ pub const MAP_OBJECT_SIZE: u32 = 16;
 pub fn map_object_cell(kind: u8, frame: u32) -> u32 {
     kind as u32 * MAP_OBJECT_FRAMES + frame
 }
+
+/// The map's puffs, drawn with their top-left 8 px left of and above a cell's 16x16 (as
+/// Mario's lower OBJ): `MAP_PUFF_FRAMES` 32x32 cells (tiles 0x16, 0x18, 0x1A, 0x1C, 0x1E),
+/// row `MAP_PUFF_OBJECT` in palette 3 (a map object beaten in battle, 0x0800F61C), row
+/// `MAP_PUFF_ITEM` in palette 1 (an item used on the map, 0x08005E10).
+pub fn map_puff_path(dir: &Path) -> PathBuf {
+    dir.join("map").join("puff.png")
+}
+pub const MAP_PUFF_FRAMES: u32 = 5;
+pub const MAP_PUFF_OBJECT: u32 = 0;
+pub const MAP_PUFF_ITEM: u32 = 1;
+pub const MAP_PUFF_SIZE: u32 = 32;
 
 const MAP_OBJECTS_MAGIC: &[u8; 8] = b"SMA4MO01";
 
@@ -1339,7 +1361,19 @@ pub const PLAYER_HOLD: usize = 53;
 pub const PLAYER_HOLD_WAG: usize = 57;
 pub const PLAYER_HOLD_TURN: usize = 60;
 pub const PLAYER_KICK: usize = 61;
-pub const PLAYER_FRAMES: u32 = 62;
+/// The Tanooki's statue (pose 0x1E with palette 0x08173050[7], 0x08097FE0 / 0x0809FB54);
+/// the other forms repeat their standing pose.
+pub const PLAYER_STATUE: usize = 62;
+/// The frog swimming (0x08096588): pose 0x0813DD64[dir] + 0x0813DD67[step] for up (0x12-
+/// 0x14), across (0x21-0x23) and down (0x24-0x26), then paddling in place (0x1F, 0x20).
+/// The other forms repeat their swim poses.
+pub const PLAYER_FROG_UP: usize = 63;
+pub const PLAYER_FROG_ACROSS: usize = 66;
+pub const PLAYER_FROG_DOWN: usize = 69;
+pub const PLAYER_FROG_IDLE: usize = 72;
+pub const PLAYER_FRAMES: u32 = 74;
+/// Player sheets: forms 0-6 (`player_path`).
+pub const PLAYER_FORMS: u8 = 7;
 /// Star flashing: the player is drawn in palette 7 = 0x08133210[k], k = 0 being the
 /// form's own palette (`player_path`), 1-3 in `player_star_path`.
 pub const PLAYER_STAR_PALETTES: u32 = 4;

@@ -1626,7 +1626,7 @@ impl Enemy {
     /// up. The enemy is knocked out (state 6, speed 0xCC up and 0x0C away; plants puff).
     /// A player fireball at `(x, y)`: None if it misses, Some(true) if it knocks the
     /// object out, Some(false) if it only bursts (a fire-proof object).
-    pub fn fireball_hit(&mut self, (x, y): (i32, i32), dir: i32) -> Option<bool> {
+    pub fn fireball_hit(&mut self, (x, y): (i32, i32), dir: i32, hammer: bool) -> Option<bool> {
         if !self.alive() || (self.is_plant() && !self.plant_visible()) {
             return None;
         }
@@ -1644,8 +1644,9 @@ impl Enemy {
         if vertical >= h + 0xE || across >= w + 8 {
             return None;
         }
-        // 0x0816A516[0x78] = 0x201: Bullet Bills are fire-proof too.
-        if matches!(self.kind, BUZZY | DRY_BONES | crate::ship::BULLET_BILL) {
+        // 0x0816A516[0x78] = 0x201: Bullet Bills are fire-proof too. Hammers (type 2) knock
+        // them out all the same (none has bit 0x400).
+        if !hammer && matches!(self.kind, BUZZY | DRY_BONES | crate::ship::BULLET_BILL) {
             return Some(false);
         }
         if self.is_plant() {
@@ -2834,8 +2835,12 @@ mod tests {
         let p = Player::spawn(0, 0);
         let mut e = Enemy::spawn(&enemy(BUZZY, 8), &p);
         let (x, y) = e.px();
-        assert_eq!(e.fireball_hit((x + 4, y + 4), 1), Some(false), "the fireball bursts");
+        assert_eq!(e.fireball_hit((x + 4, y + 4), 1, false), Some(false), "the fireball bursts");
         assert_eq!(e.state, EnemyState::Walking);
+        // A hammer (type 2) knocks it out all the same (0x0808B2F0).
+        let mut h = e.clone();
+        assert_eq!(h.fireball_hit((x + 4, y + 4), 1, true), Some(true));
+        assert_eq!(h.state, EnemyState::Dead);
         // Landing on it.
         let mut p = Player::spawn(x + 2, y - 12);
         p.vy = 16;
@@ -2843,7 +2848,7 @@ mod tests {
         assert!(matches!(e.state, EnemyState::Shell(_)));
         let mut g = Enemy::spawn(&enemy(WALKER, 8), &p);
         let (gx, gy) = g.px();
-        assert_eq!(g.fireball_hit((gx + 4, gy + 4), 1), Some(true), "a Goomba is knocked out");
+        assert_eq!(g.fireball_hit((gx + 4, gy + 4), 1, false), Some(true), "a Goomba is knocked out");
     }
 
     #[test]

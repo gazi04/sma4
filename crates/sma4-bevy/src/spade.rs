@@ -164,7 +164,7 @@ fn load_art(
         RenderAssetUsages::default(),
     ));
     let stand = sma4_assets::PLAYER_WALK + sma4_core::player::STAND_STEP as usize;
-    let mario = (0..4u8)
+    let mario = (0..sma4_assets::PLAYER_FORMS)
         .filter_map(|form| load_cells(&sma4_assets::player_path(dir, form), PLAYER_W, PLAYER_H, &mut images).get(stand).cloned())
         .collect();
 

@@ -99,6 +99,18 @@ const THROW_POSES: u32 = 0x0813_DE9E;
 const SWIM_POSES: u32 = 0x0813_DE43;
 const SWIM_IDLE_POSES: u32 = 0x0813_DE4F;
 const FIRE: u8 = 2;
+const FROG: u8 = 4;
+const TANOOKI: u8 = 5;
+const HAMMER: u8 = 6;
+/// 0x08097ACC: the frog's turn with a shell and kick.
+const HOLD_TURN_FROG: u8 = 0x5A;
+const KICK_FROG: u8 = 0x60;
+/// The Tanooki's statue (0x08097FE0).
+const STATUE_POSE: u8 = 0x1E;
+/// The frog swimming (0x08096588): pose 0x0813DD64[up, down, across] + 0x0813DD67[step]
+/// (0x0813DD67 runs 2 2 2 1 0 1 2 2); paddling 0x1F / 0x20.
+const FROG_SWIM_BASES: u32 = 0x0813_DD64;
+const FROG_SWIM_IDLE: [u8; 2] = [0x1F, 0x20];
 /// Player palette loader (0x0809FB54: OBJ palette 7 and 0x02000800 = 0x08173050[form 2,
 /// else the character]) and the star palette step (0x08009208: palette 7 = 0x08133210[+0x25
 /// & 3], 0 being the player's own at 0x02000800).
@@ -587,7 +599,63 @@ pub fn extract_piranhas(
         println!("  piranha {kind:#x}: {} frames", poses.len());
     }
     extract_fire_piranha(rom, m, out_dir)?;
-    extract_fireball(rom, m, out_dir)
+    extract_fireball(rom, m, out_dir)?;
+    extract_player_hammer(m, out_dir)
+}
+
+/// The Hammer Suit's hammer (player projectile type 2), drawn by the ROM's projectile draw
+/// 0x0808B6A0 (it needs the player's form 6): spin step (+0x0F >> 2) & 3 picks the y / x
+/// offsets 0x081709F6 / F7 and the flips 0x081709F2, tile 0x21C. Cells as
+/// `sma4_assets::player_hammer_path`.
+const FN_DRAW_PLAYER_PROJECTILE: u32 = 0x0808_B6A0;
+const PLAYER_HAMMER_SLOT: u32 = 40;
+const BEHIND: u32 = 0x0300_3D06;
+const OBJ_BASE_PTR: u32 = 0x0300_7848;
+const OAM_BUF: u32 = 0x0300_2DC8;
+const CAMERA_Y: u32 = 0x0300_3CE0;
+
+fn extract_player_hammer(m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    use sma4_assets::{PLAYER_HAMMER_CELL, PLAYER_HAMMER_FRAMES, PLAYER_HAMMER_ORIGIN, player_hammer_path};
+    const OBJS: u32 = 0x0203_8000;
+    const PROJECTILE: u32 = OBJS + 0xAE8;
+    const AT: u32 = 0x40;
+    m.w32(OBJ_BASE_PTR, OBJS)?;
+    m.w32(PLAYER_PTR, PLAYER_SCRATCH)?;
+    m.w8(PLAYER_SCRATCH + 0x37, HAMMER)?;
+    m.w8(PLAYER_SCRATCH + 0x105, 0)?;
+    m.w8(BEHIND, 0)?;
+    m.w16(CAMERA_Y, 0)?;
+    m.w8(OBJS + 0xBD0, 0)?;
+    m.w16(OBJS + 0xC96, (PLAYER_HAMMER_SLOT * 4) as u16)?;
+    let s = PLAYER_HAMMER_CELL;
+    let n = PLAYER_HAMMER_FRAMES;
+    let mut sheet = Rgba { width: s * n * 2, height: s, pixels: vec![0; (s * n * 2 * s * 4) as usize] };
+    for (d, vx) in [0x0010u16, 0xFFF0].into_iter().enumerate() {
+        for f in 0..n {
+            for slot in 0..128 {
+                m.w16(OAM_BUF + slot * 8, 0xA0)?;
+            }
+            m.w16(OAM_BUF + PLAYER_HAMMER_SLOT * 8 + 2, 0)?;
+            m.w32(PROJECTILE, AT << 8)?;
+            m.w32(PROJECTILE + 4, AT << 8)?;
+            m.w16(PROJECTILE + 0x0A, vx)?;
+            m.w16(PROJECTILE + 0x0C, 2)?;
+            m.w8(PROJECTILE + 0x0F, (f * 4) as u8)?;
+            m.call(FN_DRAW_PLAYER_PROJECTILE, &[PROJECTILE, AT])?;
+            let mut canvas = Rgba { width: 240, height: 160, pixels: vec![0; 240 * 160 * 4] };
+            crate::screens::draw_oam(m, &mut canvas, PLAYER_HAMMER_SLOT..PLAYER_HAMMER_SLOT + 1)?;
+            let (ox, oy) = PLAYER_HAMMER_ORIGIN;
+            let cell = d as u32 * n + f;
+            for y in 0..s {
+                let src = (((AT as i32 - oy + y as i32) * 240 + AT as i32 - ox) * 4) as usize;
+                let dst = ((y * sheet.width + cell * s) * 4) as usize;
+                sheet.pixels[dst..dst + (s * 4) as usize].copy_from_slice(&canvas.pixels[src..src + (s * 4) as usize]);
+            }
+        }
+    }
+    sheet.write_png(&player_hammer_path(out_dir)).map_err(|e| ExtractError(e.to_string()))?;
+    println!("  player hammer: {} frames", n * 2);
+    Ok(())
 }
 
 /// The red Piranha Plant hanging from a ceiling pipe (0xA3, World 1-5): the same draw
@@ -1194,10 +1262,12 @@ fn player_poses(rom: &Rom, form: u8) -> Result<Vec<u8>, ExtractError> {
     };
     let walk = table(WALK_POSES, f * 4, 4)?;
     let jump = rom.u8(JUMP_POSES + f)?;
-    let run = table(RUN_POSES, [4, 0, 0, 8][form as usize], 4)?;
+    let tail = form == RACCOON || form == TANOOKI;
+    // 0x08097ACC: the frog's P-run pose is 0x17.
+    let run = if form == FROG { vec![0x17; 4] } else { table(RUN_POSES, [4, 0, 0, 8, 0, 8, 0][form as usize], 4)? };
     let mut poses = walk.clone();
     poses.extend(run);
-    if form == RACCOON {
+    if tail {
         let air = table(RACCOON_AIR_POSES, 0, 12)?;
         poses.push(air[6]); // jump
         poses.push(air[9]); // falling
@@ -1207,7 +1277,7 @@ fn player_poses(rom: &Rom, form: u8) -> Result<Vec<u8>, ExtractError> {
         poses.extend(table(WHIP_POSES, 0, 10)?);
     } else {
         poses.push(jump);
-        poses.push(if form == 1 || form == FIRE {
+        poses.push(if form == 1 || form == FIRE || form == HAMMER {
             BIG_FALL_POSE
         } else {
             jump
@@ -1217,8 +1287,9 @@ fn player_poses(rom: &Rom, form: u8) -> Result<Vec<u8>, ExtractError> {
     }
     poses.push(DEATH_POSE);
     poses.push(rom.u8(SKID_POSES + (form != 0) as u32)?);
-    // Throwing (fire form; the others keep a walking step): on the ground, then in the air.
-    if form == FIRE {
+    // Throwing (fire and hammer forms; the others keep a walking step): on the ground, then
+    // in the air.
+    if form == FIRE || form == HAMMER {
         poses.extend(table(THROW_POSES, 0, 6)?);
     } else {
         poses.extend([walk[2]; 6]);
@@ -1228,13 +1299,14 @@ fn player_poses(rom: &Rom, form: u8) -> Result<Vec<u8>, ExtractError> {
     poses.extend(table(SWIM_IDLE_POSES, small * 4, 4)?);
     // 0x08097A94.
     poses.push(if form == 0 { SLIDE_POSE_SMALL } else { SLIDE_POSE });
+    // 0x0809588C: the small form and the frog never crouch.
     let crouch = match form {
-        0 => walk[2],
-        RACCOON => CROUCH_POSE_RACCOON,
+        0 | FROG => walk[2],
+        RACCOON | TANOOKI => CROUCH_POSE_RACCOON,
         _ => CROUCH_POSE,
     };
     poses.push(crouch);
-    if form == RACCOON {
+    if tail {
         poses.extend(table(RACCOON_CROUCH_AIR_POSES, 0, 3)?);
     } else {
         poses.extend([crouch; 3]);
@@ -1244,13 +1316,33 @@ fn player_poses(rom: &Rom, form: u8) -> Result<Vec<u8>, ExtractError> {
     // Carrying a shell (0x0809EEB4, 0x08097ACC).
     let hold = table(HOLD_POSES + rom.u8(HOLD_BASES + f)? as u32, 0, 4)?;
     poses.extend(&hold);
-    if form == RACCOON {
+    if tail {
         poses.extend(table(HOLD_WAG_POSES, 0, 3)?);
     } else {
         poses.extend([hold[0]; 3]);
     }
-    poses.push(if form == 0 { HOLD_TURN_SMALL } else { HOLD_TURN });
-    poses.push(if form == 0 { KICK_SMALL } else { KICK });
+    poses.push(match form {
+        0 => HOLD_TURN_SMALL,
+        FROG => HOLD_TURN_FROG,
+        _ => HOLD_TURN,
+    });
+    poses.push(match form {
+        0 => KICK_SMALL,
+        FROG => KICK_FROG,
+        _ => KICK,
+    });
+    poses.push(if form == TANOOKI { STATUE_POSE } else { walk[2] });
+    if form == FROG {
+        // Up, across, down (0x0813DD64 holds up, down, across).
+        for d in [0, 2, 1] {
+            let base = rom.u8(FROG_SWIM_BASES + d)?;
+            poses.extend((0..3).map(|s| base + s));
+        }
+        poses.extend(FROG_SWIM_IDLE);
+    } else {
+        let swim = poses[sma4_assets::PLAYER_SWIM..sma4_assets::PLAYER_SWIM + 11].to_vec();
+        poses.extend(swim);
+    }
     debug_assert_eq!(poses.len(), PLAYER_FRAMES as usize);
     Ok(poses)
 }
@@ -1268,10 +1360,17 @@ pub fn extract_player(
     m.w32(PLAYER_PTR, PLAYER_SCRATCH)?;
     m.w32(PLAYER_GFX_PTR, PLAYER_GFX_SCRATCH)?;
     m.w8(CHARACTER, 0)?;
-    for form in [0u8, 1, FIRE, RACCOON] {
+    for form in 0..sma4_assets::PLAYER_FORMS {
         let poses = player_poses(rom, form)?;
-        // The form's own palette (Fire Mario's differs), then the three star palettes.
+        // The statue's palette (0x0809FB54 with +0x52 set: 0x08173050[7]).
         m.w8(PLAYER_SCRATCH + 0x37, form)?;
+        m.w8(PLAYER_SCRATCH + 0x52, 1)?;
+        m.call(FN_PLAYER_PALETTE, &[])?;
+        let mut statue = palette.clone();
+        statue[(PLAYER_PALETTE * 16) as usize..][..16]
+            .copy_from_slice(&parse_palette(&m.read(OBJ_PAL_BUFFER + PLAYER_PALETTE * 0x20, 0x20)?));
+        // The form's own palette (fire, frog, Tanooki and hammer have theirs), then the
+        // three star palettes.
         m.w8(PLAYER_SCRATCH + 0x52, 0)?;
         m.call(FN_PLAYER_PALETTE, &[])?;
         let mut palettes = Vec::new();
@@ -1294,9 +1393,10 @@ pub fn extract_player(
                 m.call(FN_PLAYER_POSE_GFX, &[])?;
                 m.call(FN_PLAYER_DMA, &[])?;
                 let chars = m.read(OBJ_VRAM, 4 * TILES_PER_ROW as usize * 32)?;
+                let statue_cell = form == TANOOKI && i == sma4_assets::PLAYER_STATUE;
                 let sheet = Sheet {
                     chars: &chars,
-                    palette: palette.clone(),
+                    palette: if statue_cell { statue.clone() } else { palette.clone() },
                 };
                 for ty in 0..4 {
                     for tx in 0..4 {
