@@ -1065,6 +1065,11 @@ pub fn growth_item_path(dir: &Path) -> PathBuf {
     dir.join("objects").join("growth_item.png")
 }
 
+/// The 1-Up mushroom (object type 0x0B), 16x16.
+pub fn one_up_path(dir: &Path) -> PathBuf {
+    dir.join("objects").join("one_up.png")
+}
+
 /// Koopa Troopa sheets (green 0x6C, red 0x6D, green Paratroopa 0x6E): cells of
 /// `KOOPA_CELL_W` x `KOOPA_CELL_H`, the object's 16x16 box top-left at `KOOPA_ORIGIN`.
 pub fn koopa_path(dir: &Path, kind: u16) -> PathBuf {

@@ -38,6 +38,14 @@ pub const WALKER: u16 = 0x72;
 pub const KOOPA: u16 = 0x6C;
 /// Red Koopa Troopa: turns around at ledges.
 pub const RED_KOOPA: u16 = 0x6D;
+/// The white grab block (object 0x5C): pulled out of a block cell, carried and thrown like
+/// a shell (`Enemy::grab_block`).
+pub const GRAB_BLOCK: u16 = 0x5C;
+/// 0x0809A63C: +0x34 = 0x80, counted down like a carried shell's wake timer; at 0 it goes up
+/// in smoke (0x08044720 -> 0x08044460: state 8, +0x23 = 0x1F). (0x08044720 also sets +0x2C
+/// from it below 0x60, life >> 1 / >> 2 / >> 3; what its draw does with that is not
+/// decoded.)
+pub const GRAB_BLOCK_LIFE: u8 = 0x80;
 /// Green Koopa Paratroopa: hops; loses its wings when stomped.
 pub const PARATROOPA: u16 = 0x6E;
 /// Buzzy Beetle (World 1-5): the walker main 0x08053704 and a Koopa's shell (0x0816A3E8
@@ -330,6 +338,10 @@ pub struct Enemy {
     pub wall_hit: Option<(i32, i32)>,
     /// Enemies this shell knocked out since it was kicked (+0x0E), for the score chain.
     pub knockouts: u16,
+    /// A grab block that hit a wall: state 6, which for type 0x5C (0x0816A89D[0x5C] & 0xF =
+    /// 9 -> 0x08044AB4 -> 0x08052034) removes it and, on the screen, breaks it into four
+    /// pieces (0x080518A8: sound 0x5D, projectiles 0x13). The game spawns them.
+    pub shattered: bool,
     /// Piranha Plant: y of the pipe top it hides below (+0x35:+0x3A), in px.
     pub home_y: i32,
     /// Piranha Plant: how far it comes out (+0x3F), in px.
@@ -471,6 +483,7 @@ impl Enemy {
             flipped: false,
             wall_hit: None,
             knockouts: 0,
+            shattered: false,
             home_y: 0,
             reach: 0,
             chomp: 0,
@@ -528,6 +541,7 @@ impl Enemy {
             flipped: false,
             wall_hit: None,
             knockouts: 0,
+            shattered: false,
             home_y: y,
             reach: if matches!(kind, RED_PIRANHA | CEILING_PIRANHA) { RED_PLANT_REACH } else { PLANT_REACH },
             chomp: 0,
@@ -687,12 +701,14 @@ impl Enemy {
                     if wall {
                         self.wall_hit = Some(self.wall_probe());
                         self.vx = -self.vx;
+                        self.shatter_on_wall();
                     }
                     landed
                 } else {
                     if self.move_x(level) {
                         self.wall_hit = Some(self.wall_probe());
                         self.vx = -self.vx;
+                        self.shatter_on_wall();
                     }
                     self.fall(level)
                 };
@@ -1183,6 +1199,26 @@ impl Enemy {
     }
 
     /// Knocked out with no body left to fall (0x0804448C class 7 -> 0x08044460): state 8.
+    /// 0x08042FF0 -> 0x08042EB4: a grab block bumps the wall's cell (sound 0x60) and, instead
+    /// of turning around, breaks (state 6).
+    fn shatter_on_wall(&mut self) {
+        if self.kind == GRAB_BLOCK {
+            self.state = EnemyState::Dead;
+            self.shattered = true;
+            self.vx = 0;
+        }
+    }
+
+    /// 0x0809A63C: the block pulled out by the player, held at once (state 4, then
+    /// 0x08043434 places it each frame).
+    pub fn grab_block(player: &Player) -> Self {
+        let (fx, fy) = player.frame();
+        let mut b = Self::spawn_at(GRAB_BLOCK, fx, fy, player);
+        b.state = EnemyState::Carried(GRAB_BLOCK_LIFE);
+        b.hold(player);
+        b
+    }
+
     fn puff(&mut self) {
         self.state = EnemyState::Puff(PUFF_TIME);
         self.vx = 0;
@@ -1216,6 +1252,10 @@ impl Enemy {
     /// 0xC0, 100 points: `woke_stuck`). Otherwise it sits in the player's hands.
     fn carried(&mut self, level: &Level, player: &Player, t: u8, frame: u32) {
         let t = if t >= SHELL_SLOW_TICKS && frame & 3 != 0 { t } else { t - 1 };
+        if t == 0 && self.kind == GRAB_BLOCK {
+            self.puff();
+            return;
+        }
         if t == 0 {
             let (x, y) = self.px();
             let (cx, cy) = ((x + SIZE / 2).div_euclid(TILE_PX), (y + SIZE / 2).div_euclid(TILE_PX));
@@ -1456,7 +1496,7 @@ impl Enemy {
         self.slope_floor(level)
     }
 
-    fn overlaps_box(&self, x: i32, y: i32, w: i32, h: i32) -> bool {
+    pub(crate) fn overlaps_box(&self, x: i32, y: i32, w: i32, h: i32) -> bool {
         let (ex, ey) = self.px();
         if self.is_plant() {
             let (dx, bw, dy) = PLANT_BOX;

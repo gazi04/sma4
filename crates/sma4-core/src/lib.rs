@@ -44,6 +44,10 @@ pub mod water;
 const FIRE_POPUP: u8 = 5;
 const STAR_CHAIN_MAX: u16 = 8;
 
+/// A grab block breaking (0x080518A8).
+const SOUND_BLOCK_BREAK: u8 = 0x5D;
+/// The P-switch timer once pressed (0x08026C8C: 0x84 becomes 0x7F).
+const PSWITCH_TIME: u8 = 0x7F;
 pub use blocks::{Bump, CoinPop, HitFrom, HitOutcome, Item, ItemPhase};
 pub use coins::Sparkle;
 pub use enemies::{Contact, Enemy, EnemyState, Spawner};
@@ -226,6 +230,13 @@ pub struct Game {
     camera_limits: (Option<i32>, Option<i32>),
     /// Boom Boom's intro holds the player (+0x40 = 0xFF).
     boss_freeze: bool,
+    /// The P-switch's timer (0x03003CF8): 0x7F when pressed, -1 every fourth frame; coins
+    /// and bricks swap while it runs.
+    pub pswitch: u8,
+    /// Invisible 1-Up blocks hit during this visit (0x02001C20, cleared when a level is
+    /// entered from the map by 0x08017170): (level id, cell, used metatile). The object
+    /// stream loaders (0x08017FC0) put them back used when their area is loaded again.
+    hidden_used: Vec<(u16, (i32, i32), u16)>,
     /// The ball was touched: the clock tally (`goal::tally`) and the frames to the map.
     pub fortress_clear: Option<goal::ClockTally>,
     /// 0x03003D0F set by Boom Boom's burst or the opened chest: the clock (0x080044B8) holds.
@@ -330,6 +341,8 @@ impl Game {
         self.goal_spawn = enemies.iter().find(|e| e.kind == goal::GOAL).map(|e| goal::spawn_px(e.col, e.row));
         self.goal = None;
         self.goal_camera = None;
+        self.pswitch = 0;
+        self.hidden_used.clear();
         self.end_coins.clear();
         self.end_coin_chain = 0;
         self.pipe = None;
@@ -390,8 +403,15 @@ impl Game {
         let airship = self.world_map.as_ref().is_none_or(|m| m.objects.slots[0].kind != 0);
         self.throne = match &self.castle_data {
             Some(d) if enemies.iter().any(|e| e.kind == castle::THRONE) => Some(castle::Throne::new(d, world, airship)),
+        let hidden = std::mem::take(&mut self.hidden_used);
             _ => None,
         };
+        for &(id, (tx, ty), m) in &hidden {
+            if id == self.level.id {
+                self.level.set(tx, ty, m);
+            }
+        }
+        self.hidden_used = hidden;
         if let Some(t) = &self.throne {
             self.obj_sprites = t.sprites();
         }
@@ -828,7 +848,12 @@ impl Game {
                 self.debris.push(blocks::BrickDebris::new(tx, ty));
                 coin
             }
-            HitOutcome::Item | HitOutcome::Nothing => false,
+            // 0x080A0234: the puff on the cell above, where the P-switch now sits.
+            HitOutcome::Switch => {
+                self.puffs.push(fortress::Puff::new((tx * level::TILE_PX, (ty - 1) * level::TILE_PX)));
+                false
+            }
+            HitOutcome::Item | HitOutcome::Nothing | HitOutcome::Hidden => false,
         };
         if coin {
             self.status.add_coin();
@@ -858,7 +883,89 @@ impl Game {
             }
             alive
         });
+    /// 0x0809E40C's probes 2, 1, 0 (probe 3, the upper wall one, never grabs) on the grab
+    /// block's cell (code 0x32) with B pressed and nothing carried (0x0809A450 ->
+    /// 0x0809A63C): the cell takes tile change 2 and the block is held (`Enemy::grab_block`).
+    /// Probes (dy, dx) from 0x08172D77: small or crouching from index 0x26, big from 6, + 0x10
+    /// moving up, + 8 facing left (0x080A1D78, here by the speed, or the frame's parity
+    /// standing still).
+    fn try_grab_block(&mut self, pressed: Buttons) {
+        let p = &self.player;
+        if p.carrying || !pressed.contains(Buttons::B) || p.statue != 0 || p.transforming() {
+            return;
+        }
+        let small = p.form == Form::Small || p.crouch;
+        let up = p.vy < 0;
+        let left = p.vx < 0 || (p.vx == 0 && self.frame & 1 == 0);
+        // Probes 0, 1, 2 by (small, up, left).
+        let probes: [(i32, i32); 3] = match (small, up, left) {
+            (true, false, false) => [(32, 4), (32, 11), (27, 13)],
+            (true, false, true) => [(32, 4), (32, 11), (27, 2)],
+            (true, true, false) => [(16, 8), (16, 8), (27, 13)],
+            (true, true, true) => [(16, 8), (16, 8), (27, 2)],
+            (false, false, false) => [(32, 4), (32, 11), (27, 14)],
+            (false, false, true) => [(32, 4), (32, 11), (27, 1)],
+            (false, true, false) => [(6, 8), (6, 8), (27, 14)],
+            (false, true, true) => [(6, 8), (6, 8), (27, 1)],
+        };
+        let (fx, fy) = p.frame();
+        for &(dy, dx) in probes.iter().rev() {
+            let (tx, ty) = ((fx + dx).div_euclid(level::TILE_PX), (fy + dy).div_euclid(level::TILE_PX));
+            if self.level.metatile(tx, ty).is_some_and(|m| m & 0xFF == blocks::GRAB_BLOCK_TILE) {
+                let m = self.level.rules.final_metatile[blocks::GRAB_BLOCK_TILE_CHANGE - 1];
+                self.level.set(tx, ty, m);
+                self.enemies.push(enemies::Enemy::grab_block(&self.player));
+                self.player.carrying = true;
+                return;
+            }
+        }
+    }
+
+    /// A grab block that hit a wall goes (0x08052034); on the screen it breaks into four
+    /// pieces with sound 0x5D (0x080518A8; drawn as a brick's pieces, its own projectile 0x13
+    /// not being ported).
+    fn shatter_grab_blocks(&mut self) {
+        let camera = self.camera();
+        let mut pieces = Vec::new();
+        self.enemies.retain(|e| {
+            if !e.shattered {
+                return true;
+            }
+            let (x, y) = e.px();
+            // On the screen (+0x1B | +0x14 clear).
+            if (-0x10..0x100).contains(&(x - camera.0)) {
+                pieces.push((x, y));
+            }
+            false
+        });
+        for (x, y) in pieces {
+            self.debris.push(blocks::BrickDebris::new(x.div_euclid(level::TILE_PX), y.div_euclid(level::TILE_PX)));
+            self.sounds.push(SOUND_BLOCK_BREAK);
+        }
+    }
+
         for (x, y) in paid {
+    /// The P-switch (0x0809A450): the player's feet probe (probe 0, the frame's (8, 32))
+    /// on it flattens it (tile change 9, a puff, sound 0x67) and starts the swap: 0x84,
+    /// which 0x08026C8C turns into 0x7F the next frame; 0x08094AB4 then counts it down on
+    /// frames where 0x03003AE8 & 3 == 0 (the last step at once), about 508 frames.
+    /// TODO(re): the probe's extra test 0x08172BE3[...] == 1, the screen shake
+    /// (0x03007820 + 0x0B = 0x10) and the P-switch music.
+    fn step_pswitch(&mut self) {
+        if self.pswitch != 0 && (self.pswitch == 1 || self.frame & 3 == 0) {
+            self.pswitch -= 1;
+        }
+        let (fx, fy) = self.player.frame();
+        let (tx, ty) = ((fx + 8).div_euclid(level::TILE_PX), (fy + 32).div_euclid(level::TILE_PX));
+        if self.player.on_ground && self.level.seen(tx, ty) == Some(blocks::PSWITCH) {
+            let flat = self.level.rules.final_metatile[blocks::PSWITCH_PRESSED_TILE_CHANGE - 1];
+            self.level.set(tx, ty, flat);
+            self.puffs.push(fortress::Puff::new((tx * level::TILE_PX, ty * level::TILE_PX)));
+            self.pswitch = PSWITCH_TIME;
+        }
+        self.level.set_pswitch(self.pswitch != 0);
+    }
+
             self.status.add_coin();
             let kind = (goal::COIN_POPUP + self.end_coin_chain).min(status::POPUP_1UP as u16) as u8;
             self.status.popup(x, y, kind);
@@ -1732,6 +1839,9 @@ impl Game {
             self.p_blink = self.p_blink.wrapping_sub(1);
         }
         // Blocks react the same to a head hit and to the raccoon's tail (0x0809A748); the
+        if !frozen && !landing {
+            self.try_grab_block(pressed);
+        }
         // feet probe bumps note blocks the player stands on.
         let hits = head_hit
             .map(|t| (t, HitFrom::Below, true))
@@ -1814,6 +1924,9 @@ impl Game {
         let before = self.enemies.len();
         // Autoscroll (0x08092BF0, after the player and the objects): held while the player
         // is busy (transforming).
+                    if outcome == HitOutcome::Hidden {
+                        self.hidden_used.push((self.level.id, (tx, ty), bump.final_metatile));
+                    }
         if !self.player.transforming()
             && let (Some(a), Some(scripts)) = (&mut self.autoscroll, &self.autoscroll_scripts)
         {
@@ -1868,6 +1981,11 @@ impl Game {
         if self.progress != 0 && !self.advance_taken {
             self.advance_coins.extend(coins.iter().map(advance_coin::AdvanceCoin::spawn));
         }
+                // A 1-UP popup (the life comes with it, 0x08093A48).
+                blocks::ONE_UP => {
+                    self.status.popup(x, y, status::POPUP_1UP);
+                    continue;
+                }
         self.step_advance_coins();
         for (i, e) in self.enemies.iter_mut().enumerate().skip(before) {
             e.init_random(self.rng.byte(i));
@@ -1875,6 +1993,7 @@ impl Game {
         // Generators run before the objects (0x08090448).
         for i in 0..self.goomba_pipes.len() {
             let room = self.enemies.iter().filter(|e| e.from_pipe).count() < enemies::PIPE_GOOMBA_SLOTS;
+        self.step_pswitch();
             if let Some(e) = self.goomba_pipes[i].step(&self.player, room) {
                 self.enemies.push(e);
             }
@@ -2092,6 +2211,7 @@ impl Game {
         if self.step_ship(hidden) {
             hurt = true;
         }
+        self.shatter_grab_blocks();
         self.step_wand();
         if hurt {
             self.hurt();
@@ -2329,6 +2449,152 @@ mod tests {
             let mut e = enemies::Enemy::spawn_at(kind, x, 8 * TILE_PX, &p);
             e.vx = 0;
             e
+    /// A P-switch on the ground at column 6, a coin at 10 and a brick at 12 on the row above
+    /// the ground.
+    fn pswitch_level() -> Level {
+        let (w, h) = (24, 10);
+        let mut m = vec![SKY; w * h];
+        for x in 0..w {
+            m[(h - 1) * w + x] = 0x53;
+        }
+        m[(h - 2) * w + 6] = blocks::PSWITCH;
+        m[(h - 2) * w + 10] = coins::COIN;
+        m[(h - 2) * w + 12] = 0x67;
+        let mut rules = BlockRules::default();
+        rules.final_metatile[blocks::PSWITCH_PRESSED_TILE_CHANGE - 1] = 0xD7;
+        Level::new(w, h, m, TEST_SOLIDITY, rules)
+    }
+
+    /// Checked in mGBA (World 1-2's P-switch): landing on it flattens it with a puff and
+    /// swaps coins and bricks for 0x7F steps of 4 frames.
+    #[test]
+    fn standing_on_the_p_switch_swaps_coins_and_bricks_for_a_while() {
+        let mut g = Game::new();
+        g.enter_level(pswitch_level(), (6 * TILE_PX + 2, 5 * TILE_PX), &[]);
+        g.screen = Screen::Level;
+        let mut pressed = None;
+        for f in 0..60 {
+            g.step(Buttons::empty());
+            if g.pswitch != 0 {
+                pressed = Some(f);
+                break;
+            }
+        }
+        assert!(pressed.is_some(), "pressed on landing");
+        assert_eq!(g.level.metatile(6, 8), Some(0xD7), "flattened");
+        assert_eq!(g.level.at(6, 8), TileKind::Empty);
+        assert!(!g.puffs.is_empty(), "a puff");
+        assert_eq!(g.level.at(10, 8), TileKind::Solid, "the coin is a brick");
+        assert_eq!(g.level.seen(12, 8), Some(coins::COIN), "the brick is a coin");
+        let mut frames = 0;
+        while g.pswitch != 0 {
+            g.step(Buttons::empty());
+            frames += 1;
+            assert!(frames < 1000);
+        }
+        // mGBA: about 503 frames from the press (0x7F steps of 4, by the frame counter).
+        assert!((500..=508).contains(&frames), "{frames} frames");
+        assert_eq!(g.level.at(10, 8), TileKind::Empty, "back to a coin");
+        assert_eq!(g.level.seen(12, 8), Some(0x67));
+    }
+
+    /// Recorded in mGBA (World 1-2's hidden 1-Up): touching it, a 1-UP popup; the life
+    /// comes a few frames later.
+    #[test]
+    fn touching_a_1_up_gives_a_life() {
+        let mut g = Game::new();
+        g.enter_level(note_level(), (4 * TILE_PX, 7 * TILE_PX), &[]);
+        g.screen = Screen::Level;
+        let (x, y) = g.player.px();
+        g.items.push(Item { kind: blocks::ONE_UP, x: x * player::SUB, y: y * player::SUB, vx: 0, vy: 0, phase: ItemPhase::Walking, grace: 0 });
+        let lives = g.status.lives;
+        g.step(Buttons::empty());
+        assert!(g.items.is_empty());
+        assert_eq!(g.status.popups[0].kind, status::POPUP_1UP);
+        assert_eq!(g.player.form, player::Form::Small, "no power-up");
+        for _ in 0..60 {
+            g.step(Buttons::empty());
+        }
+        assert_eq!(g.status.lives, lives + 1);
+    }
+
+    /// Ground on row 9, a grab block (metatile 0x32) at (5, 8), a wall at (14, 8); tile
+    /// change 2 empties the cell.
+    fn grab_level() -> Level {
+        let (w, h) = (24, 10);
+        let mut m = vec![SKY; w * h];
+        m[(h - 1) * w..].fill(0x53);
+        m[(h - 2) * w + 5] = blocks::GRAB_BLOCK_TILE;
+        m[(h - 2) * w + 14] = 0x53;
+        let mut rules = BlockRules::default();
+        rules.final_metatile[blocks::GRAB_BLOCK_TILE_CHANGE - 1] = SKY;
+        Level::new(w, h, m, TEST_SOLIDITY, rules)
+    }
+
+    /// Small Mario standing against the block's left side presses B until the probe looks
+    /// right (standing still, 0x080A1D78 alternates the side by frame); true once grabbed.
+    fn grab(g: &mut Game) -> bool {
+        for _ in 0..8 {
+            g.player.set_frame_sub((5 * TILE_PX - 13) * player::SUB, (9 * TILE_PX - 32) * player::SUB);
+            g.player.on_ground = true;
+            g.player.vx = 0;
+            g.step(Buttons::empty());
+            if g.frame & 1 == 1 {
+                g.step(Buttons::empty());
+            }
+            g.step(Buttons::B);
+            if g.player.carrying {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 0x0809A450 / 0x0809A63C: B pressed with the lower wall probe on the grab block's cell
+    /// pulls it out (tile change 2) and Mario holds it; held, it goes up in smoke once its
+    /// life (0x80) runs out and he holds nothing.
+    #[test]
+    fn b_pulls_out_a_grab_block_that_puffs_away_when_held_too_long() {
+        let mut g = Game::new();
+        g.enter_level(grab_level(), (4 * TILE_PX, 9 * TILE_PX - 16), &[]);
+        g.screen = Screen::Level;
+        assert!(grab(&mut g), "grabbed");
+        assert_eq!(g.level.metatile(5, 8), Some(SKY), "the cell is empty");
+        let b = g.enemies.iter().find(|e| e.kind == enemies::GRAB_BLOCK).expect("the block");
+        assert_eq!(b.state, EnemyState::Carried(enemies::GRAB_BLOCK_LIFE));
+        let mut frames = 0;
+        while g.player.carrying {
+            g.step(Buttons::B);
+            frames += 1;
+            assert!(frames < 2000);
+        }
+        assert!(g.enemies.iter().any(|e| e.kind == enemies::GRAB_BLOCK && matches!(e.state, EnemyState::Puff(_))));
+        assert!(frames > enemies::GRAB_BLOCK_LIFE as u32, "{frames} frames");
+    }
+
+    /// 0x080436A0 throws it like a shell; at the wall (0x08042FF0 -> 0x08042EB4) it does not
+    /// turn but breaks (state 6 -> 0x08052034): gone, four pieces, sound 0x5D.
+    #[test]
+    fn a_thrown_grab_block_breaks_on_a_wall() {
+        let mut g = Game::new();
+        g.enter_level(grab_level(), (4 * TILE_PX, 9 * TILE_PX - 16), &[]);
+        g.screen = Screen::Level;
+        assert!(grab(&mut g));
+        g.player.facing_left = false;
+        g.step(Buttons::B);
+        g.step(Buttons::empty());
+        assert!(g.enemies.iter().any(|e| e.kind == enemies::GRAB_BLOCK && e.state == EnemyState::Kicked), "thrown");
+        let mut broke = false;
+        for _ in 0..120 {
+            g.step(Buttons::empty());
+            broke |= g.sounds.contains(&SOUND_BLOCK_BREAK);
+            if g.enemies.iter().all(|e| e.kind != enemies::GRAB_BLOCK) {
+                break;
+            }
+        }
+        assert!(broke && g.enemies.is_empty() && !g.debris.is_empty());
+    }
+
         };
         // Tail box covers x + 17..+29 (facing left) and x - 12..x (facing right).
         let fx = p.centre().0 - 8;

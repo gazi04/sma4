@@ -28,11 +28,25 @@ pub const FIRE_FLOWER: u16 = 0x19;
 /// Starman (hit result 4, init 0x0804E4E0, main 0x0804E984): rises out of the block, then
 /// bounces along away from the player.
 pub const STAR: u16 = 0x0C;
+/// 1-Up mushroom (hit result 7, init 0x0804E480, main 0x0804E800): moves like the growth
+/// item; touched, a 1-UP.
+pub const ONE_UP: u16 = 0x0B;
+/// The P-switch a P-switch brick puts on top of itself (tile change 0x12 -> 0x0813AA00[0x11])
+/// and the flattened one it becomes when stood on (tile change 9).
+pub const PSWITCH: u16 = 0xF2;
+/// The grab block's cell (probe code 0x32, 0x0809A450) and the tile change pulling it
+/// out leaves (2, 0x080A1D28).
+pub const GRAB_BLOCK_TILE: u16 = 0x32;
+pub const GRAB_BLOCK_TILE_CHANGE: usize = 2;
+const PSWITCH_TILE_CHANGE: usize = 0x12;
+pub const PSWITCH_PRESSED_TILE_CHANGE: usize = 9;
 /// Starman speeds (1/16 px per frame): across 0x10 away from the player (0x0804E0F4); out
 /// of a block hit from below it jumps at 0xC8 (-0x38), and every landing 0xC0 (-0x40).
+/// The ROM moves by the speed before its gravity, the port after: both are stored 3 lower
+/// (checked in mGBA: the landing frame snaps without moving, the next moves 4 px up).
 const STAR_SPEED: i32 = 0x10 * 16;
-const STAR_LAUNCH: i32 = -0x38 * 16;
-const STAR_BOUNCE: i32 = -0x40 * 16;
+const STAR_LAUNCH: i32 = -0x38 * 16 - ITEM_GRAVITY;
+const STAR_BOUNCE: i32 = -0x40 * 16 - ITEM_GRAVITY;
 /// Flower and star can't be taken for 0x10 frames (+0x24).
 const ITEM_GRACE: u8 = 0x10;
 
@@ -46,6 +60,19 @@ const LEAF_SWAY_ACCEL: [i32; 2] = [2, -2];
 const LEAF_SWAY_MAX: [i32; 2] = [32, -32];
 const LEAF_SWAY_FALL: [i32; 3] = [16, -4, 14];
 const LEAF_GRACE: u8 = 0x10;
+/// Out of a note block stood on (0x03003CFB = 0, 0x0804E5A0): 0x0C (1/256 px) lower, speed
+/// 0x0816E3A4[0] = 4 and +0x23 = 0x0816E3A8[0] = 8, so it pops down for 7 frames; from
+/// below +0x23 = 0xFF and the speed reaching 0 ends the pop.
+const LEAF_DROP: i32 = 4;
+const LEAF_DROP_SUB: i32 = 0x0C;
+const LEAF_POP_SUB: i32 = -0x0D;
+const LEAF_DROP_TIME: u8 = 8;
+const LEAF_POP_TIME: u8 = 0xFF;
+/// Out of a note block stood on (0x03003CFB = 0, 0x0804E480 / 0x0804E548 / 0x0804E4E0) the
+/// mushroom, the flower and the star skip the rise: speed y 0x10 (down) from the cell
+/// itself, falling through their own block. The ROM moves before its gravity, the port
+/// after, so the port starts 3 lower.
+const DROP_VY: i32 = 0x10 * 16 - ITEM_GRAVITY;
 
 // Item timings from 0x0804E118: emerge timer starts at 0x3D, rising begins below 0x2D and
 // moves 1 px every 3 frames (sub-counter reloads with 2).
@@ -82,8 +109,12 @@ pub enum ItemPhase {
     /// Inside the block; `timer` counts down from `EMERGE_FRAMES`.
     Emerging { timer: u8, sub: u8 },
     Walking,
-    /// Leaf popping up out of the block.
-    Popping,
+    /// Leaf popping up out of the block (down, out of a note block stood on); `timer` is
+    /// +0x23.
+    Popping { timer: u8 },
+    /// Mushroom dropping out of a note block stood on: no speed across until it lands
+    /// (0x0804EA38), then it walks `dir`.
+    Dropping { dir: i32 },
     /// Leaf swaying down; `dir` is the current swing (0 right, 1 left).
     Swaying { dir: u8 },
 }
@@ -155,6 +186,12 @@ pub enum HitOutcome {
     /// A brick broke (0x080A0024: sound 0x5D, 10 points, debris); no bump. `coin`: a coin
     /// sitting on it was knocked out too.
     Broken { coin: bool },
+    /// An invisible 1-Up block (behaviour 9, 0x080A0214): it stays used for the rest of
+    /// the visit (0x02001C20).
+    Hidden,
+    /// A P-switch brick (behaviour 10, 0x080A0234): a puff and the P-switch on the cell
+    /// above.
+    Switch,
 }
 
 /// Where a block was hit from: the bump direction 0x03003CFB the bump object keeps in
@@ -175,7 +212,8 @@ const SKIPPED_TILE: u16 = 0x66;
 /// Reacts to the player's head (or feet, for `HitFrom::Above`) hitting tile `(tx, ty)`.
 /// Returns `None` if the tile does not react (a plain ceiling or floor).
 pub fn hit_block(level: &mut Level, player: &Player, tx: i32, ty: i32, from: HitFrom) -> Option<(Option<Bump>, HitOutcome)> {
-    let m = level.metatile(tx, ty)?;
+    // 0x08099FB8 / 0x08046194: the tile as seen (a P-switch swaps coins and bricks).
+    let m = level.seen(tx, ty)?;
     if m >= 0x100 || m == SKIPPED_TILE {
         return None; // high-layer specials use a different path (0x080A12BC), not ported
     }
@@ -227,7 +265,16 @@ pub fn hit_block(level: &mut Level, player: &Player, tx: i32, ty: i32, from: Hit
             level.coin_hi = hi;
             (1, HitOutcome::Coin)
         }
-        // TODO(re): other behaviours (stars, vines, 1-ups, P-switch...).
+        // 0x080A0214: the invisible 1-Up block notes itself (0x080A406C), result 7.
+        9 => (7, HitOutcome::Hidden),
+        // 0x080A0234: a puff (projectile 0x16, +0x14 = 0x20) on the cell above and tile
+        // change 0x12 there: the P-switch. Result 1.
+        10 => {
+            let k = PSWITCH_TILE_CHANGE - 1;
+            level.set(tx, ty - 1, level.rules.final_metatile[k]);
+            (1, HitOutcome::Switch)
+        }
+        // TODO(re): other behaviours (vines, ...).
         _ => return None,
     };
     let result = low | hi;
@@ -312,10 +359,10 @@ impl Bump {
         let mut spawned = None;
         if self.timer == BUMP_FRAMES {
             let kind = level.rules.item_types[(self.result & 0xF) as usize];
-            if matches!(kind, GROWTH_ITEM | LEAF | FIRE_FLOWER | STAR) {
-                spawned = Some(Item::spawn(kind, self.tx, self.ty, player));
+            if matches!(kind, GROWTH_ITEM | ONE_UP | LEAF | FIRE_FLOWER | STAR) {
+                spawned = Some(Item::spawn(kind, self.tx, self.ty, player, self.from));
             }
-            // TODO(re): other item types (1-up, vine...).
+            // TODO(re): other item types (vine...).
         }
         if self.timer == 1 {
             level.set(self.tx, self.ty, self.final_metatile);
@@ -353,41 +400,49 @@ impl Bump {
 }
 
 impl Item {
-    fn spawn(kind: u16, tx: i32, ty: i32, player: &Player) -> Self {
-        let (x, y) = (tx * TILE_PX, ty * TILE_PX);
+    fn spawn(kind: u16, tx: i32, ty: i32, player: &Player, from: HitFrom) -> Self {
+        let x = tx * TILE_PX;
+        // 0x08084FBC: 1 px above the cell, unless stood on (+0x1D = 0).
+        let above = from == HitFrom::Above;
+        let y = ty * TILE_PX * SUB - if above { 0 } else { SUB };
         // 0x0804E08C: moves right when the player is at or left of the item.
         let dir = if player.px().0 <= x { 1 } else { -1 };
         if kind == LEAF {
-            return Self {
-                kind,
-                x: x * SUB,
-                y: y * SUB,
-                vx: 0,
-                vy: LEAF_POP * 16,
-                phase: ItemPhase::Popping,
-                grace: LEAF_GRACE,
-            };
+            let (vy, timer, y) = if above { (LEAF_DROP, LEAF_DROP_TIME, y + LEAF_DROP_SUB) } else { (LEAF_POP, LEAF_POP_TIME, y + LEAF_POP_SUB) };
+            return Self { kind, x: x * SUB, y, vx: 0, vy: vy * 16, phase: ItemPhase::Popping { timer }, grace: LEAF_GRACE };
         }
-        let (vx, vy, grace) = match kind {
-            FIRE_FLOWER => (0, 0, ITEM_GRACE),
-            STAR => (dir * STAR_SPEED, STAR_LAUNCH, ITEM_GRACE),
-            _ => (dir * ITEM_SPEED, 0, 0),
+        // +0x24 = 0x10 for all three (0x0804E480 / 0x0804E548 / 0x0804E4E0), counted down
+        // every frame, the rise included.
+        let grace = ITEM_GRACE;
+        if above {
+            let (vx, phase) = match kind {
+                GROWTH_ITEM | ONE_UP => (0, ItemPhase::Dropping { dir }),
+                STAR => (dir * STAR_SPEED, ItemPhase::Walking),
+                _ => (0, ItemPhase::Walking),
+            };
+            return Self { kind, x: x * SUB, y, vx, vy: DROP_VY, phase, grace };
+        }
+        let (vx, vy) = match kind {
+            FIRE_FLOWER => (0, 0),
+            STAR => (dir * STAR_SPEED, STAR_LAUNCH),
+            _ => (dir * ITEM_SPEED, 0),
         };
-        // TODO(re): stood on (note blocks), the flower and the star skip the rise
-        // (0x0804E548 / 0x0804E4E0 with 0x03003CFB = 0); here they always rise.
-        Self { kind, x: x * SUB, y: y * SUB, vx, vy, phase: ItemPhase::Emerging { timer: EMERGE_FRAMES, sub: 0 }, grace }
+        Self { kind, x: x * SUB, y, vx, vy, phase: ItemPhase::Emerging { timer: EMERGE_FRAMES, sub: 0 }, grace }
     }
 
     /// Leaf (0x0804EBE4), speeds in 1/16 px per frame.
     fn leaf(&mut self) {
-        self.grace = self.grace.saturating_sub(1);
         let (mut vx, mut vy) = (self.vx / 16, self.vy / 16);
-        if self.phase == ItemPhase::Popping {
-            self.y += vy * 16;
-            vy += 1;
-            if vy != 0 {
-                self.vy = vy * 16;
-                return;
+        if let ItemPhase::Popping { timer } = &mut self.phase {
+            // +0x23 counts down before the main; while it runs the leaf pops.
+            *timer = timer.saturating_sub(1);
+            if *timer != 0 {
+                self.y += vy * 16;
+                vy += 1;
+                if vy != 0 {
+                    self.vy = vy * 16;
+                    return;
+                }
             }
             self.phase = ItemPhase::Swaying { dir: 0 };
         }
@@ -406,6 +461,7 @@ impl Item {
 
     /// One frame. Returns false when the item left the level.
     pub fn step(&mut self, level: &Level) -> bool {
+        self.grace = self.grace.saturating_sub(1);
         match &mut self.phase {
             ItemPhase::Emerging { timer, sub } => {
                 if *timer < RISE_BELOW {
@@ -419,23 +475,36 @@ impl Item {
                 *timer -= 1;
                 if *timer == 0 {
                     self.phase = ItemPhase::Walking;
+                    // 0x0804E984: the star jumps on the frame its rise ends.
+                    if self.kind == STAR {
+                        return self.walking(level);
+                    }
                 }
                 true
             }
-            ItemPhase::Walking => {
-                self.grace = self.grace.saturating_sub(1);
-                let landed = self.walk(level);
-                // 0x0804E984: the star bounces off the ground.
-                if landed && self.kind == STAR {
-                    self.vy = STAR_BOUNCE;
+            ItemPhase::Dropping { dir } => {
+                let dir = *dir;
+                if self.walk(level) {
+                    self.vx = dir * ITEM_SPEED;
+                    self.phase = ItemPhase::Walking;
                 }
                 self.px().1 < level.pixel_height() + TILE_PX
             }
-            ItemPhase::Popping | ItemPhase::Swaying { .. } => {
+            ItemPhase::Walking => self.walking(level),
+            ItemPhase::Popping { .. } | ItemPhase::Swaying { .. } => {
                 self.leaf();
                 self.px().1 < level.pixel_height() + TILE_PX
             }
         }
+    }
+
+    fn walking(&mut self, level: &Level) -> bool {
+        let landed = self.walk(level);
+        // 0x0804E984: the star bounces off the ground.
+        if landed && self.kind == STAR {
+            self.vy = STAR_BOUNCE;
+        }
+        self.px().1 < level.pixel_height() + TILE_PX
     }
 
     /// Returns true if it is standing on the ground.
@@ -446,7 +515,7 @@ impl Item {
         let rows = (py + 2).div_euclid(TILE_PX)..=(py + ITEM_SIZE - 2).div_euclid(TILE_PX);
         let front = if self.vx > 0 { px + ITEM_SIZE - 1 } else { px };
         let tx = front.div_euclid(TILE_PX);
-        if rows.into_iter().any(|ty| level.at(tx, ty) == TileKind::Solid) {
+        if self.vx != 0 && rows.into_iter().any(|ty| level.at(tx, ty) == TileKind::Solid) {
             self.x = if self.vx > 0 { (tx * TILE_PX - ITEM_SIZE) * SUB } else { (tx + 1) * TILE_PX * SUB };
             self.vx = -self.vx;
         }
@@ -725,6 +794,142 @@ mod tests {
         assert_eq!(item.map(|i| i.kind), Some(GROWTH_ITEM), "small player: mushroom");
         while !bump.step(&mut lvl, &mut player, false).1 {}
         assert_eq!(lvl.metatile(5, 4), Some(NOTE));
+    }
+
+    const NOTE_STAR: u16 = 0x31;
+
+    /// A level with `block` at (5, `row`) over the ground row 7, and the star note block's
+    /// rules (behaviour 3, result 4 -> 0x0C).
+    fn note_level(block: u16, row: usize) -> Level {
+        let mut lvl = level(SKY);
+        lvl.rules.bump_behaviour[NOTE_STAR as usize] = 3;
+        lvl.rules.land_behaviour[NOTE_STAR as usize] = 3;
+        lvl.rules.result_hi[NOTE_STAR as usize] = 0x40;
+        lvl.rules.item_types[4] = STAR;
+        lvl.set(5, row as i32, block);
+        lvl
+    }
+
+    /// The player's x on the block's (as in the recordings): items go right.
+    fn on_block(row: i32, from: HitFrom) -> Player {
+        let mut p = Player::spawn(5 * TILE_PX, row * TILE_PX - 32);
+        if from == HitFrom::Below {
+            p.y += 3 * TILE_PX * SUB;
+        }
+        p.x += (5 * TILE_PX - p.px().0) * SUB;
+        p
+    }
+
+    /// Runs the bump to its spawn and the item `n` frames (stepped on its spawn frame, as
+    /// the game does); returns the item's (x, y) in 1/256 px relative to the cell after
+    /// each frame.
+    fn item_path(lvl: &mut Level, row: i32, from: HitFrom, n: usize) -> (Item, Vec<(i32, i32)>) {
+        let mut player = on_block(row, from);
+        let (mut bump, outcome) = hit(lvl, &player, 5, row, from);
+        assert_eq!(outcome, HitOutcome::Item);
+        let mut item = bump.step(lvl, &mut player, false).0.expect("an item");
+        let mut path = Vec::new();
+        let mut bumping = true;
+        for _ in 0..n {
+            if bumping {
+                bumping = !bump.step(lvl, &mut player, false).1;
+            }
+            item.step(lvl);
+            path.push((item.x - 5 * TILE_PX * SUB, item.y - row * TILE_PX * SUB));
+        }
+        (item, path)
+    }
+
+    /// Recorded in mGBA (World 1-2, small Mario standing on the star note block at column
+    /// 119, row 18): no rise, it falls through its own block at 0x10 + 3 a frame, 1 px a
+    /// frame across, lands 64 px down and bounces at 0xC0.
+    #[test]
+    fn a_star_note_block_stood_on_drops_the_star_through_it() {
+        let mut lvl = note_level(NOTE_STAR, 3);
+        let (item, path) = item_path(&mut lvl, 3, HitFrom::Above, 28);
+        assert_eq!(item.kind, STAR);
+        let ys: Vec<i32> = path.iter().map(|p| p.1 >> 8).collect();
+        let rom = [1, 2, 3, 5, 6, 8, 10, 13, 15, 18, 21, 24, 27, 31, 34, 38, 42, 46, 48, 44, 40, 36, 33, 29, 26, 23, 21, 18];
+        assert_eq!(ys, rom);
+        let xs: Vec<i32> = path.iter().map(|p| p.0 >> 8).collect();
+        assert_eq!(xs, (1..=28).collect::<Vec<_>>());
+        assert_eq!(lvl.metatile(5, 3), Some(NOTE), "stays a note block");
+    }
+
+    /// Recorded in mGBA (1-2's leaf note block at column 96, row 17, small Mario): the
+    /// mushroom falls straight down and walks off once it lands (80 px down).
+    #[test]
+    fn a_mushroom_stood_on_drops_straight_down_then_walks() {
+        let mut lvl = note_level(NOTE_LEAF, 2);
+        let (_, path) = item_path(&mut lvl, 2, HitFrom::Above, 30);
+        let rom_y = [1, 2, 3, 5, 6, 8, 10, 13, 15, 18, 21, 24, 27, 31, 34, 38, 42, 46, 50, 54, 58, 62, 64, 64, 64];
+        assert_eq!(path[..25].iter().map(|p| p.1 >> 8).collect::<Vec<_>>(), rom_y);
+        // Still above the cell until it lands (frame 23), then 1 px a frame.
+        assert!(path[..23].iter().all(|p| p.0 == 0), "{path:x?}");
+        assert_eq!(path[23].0 >> 8, 1);
+        assert_eq!(path[29].0 >> 8, 7);
+    }
+
+    /// Recorded in mGBA (the same block, big Mario): 0x0C lower, pops down at 4 + 1 a frame
+    /// for 7 frames (+0x23 = 8), then sways.
+    #[test]
+    fn a_leaf_stood_on_pops_down_for_seven_frames_then_sways() {
+        let mut lvl = note_level(NOTE_LEAF, 2);
+        let mut player = on_block(2, HitFrom::Above);
+        player.grow();
+        let (mut bump, _) = hit(&mut lvl, &player, 5, 2, HitFrom::Above);
+        let mut item = bump.step(&mut lvl, &mut player, false).0.unwrap();
+        assert_eq!(item.kind, LEAF);
+        let mut path = Vec::new();
+        for _ in 0..8 {
+            item.step(&lvl);
+            path.push((item.x - 5 * TILE_PX * SUB, item.y - 2 * TILE_PX * SUB));
+        }
+        let rom_y = [0x4C, 0x9C, 0xFC, 0x16C, 0x1EC, 0x27C, 0x31C, 0x41C];
+        assert_eq!(path.iter().map(|p| p.1).collect::<Vec<_>>(), rom_y);
+        assert_eq!(path[6].0, 0);
+        assert_eq!(path[7].0, 0x20, "swaying: 2/16 px across");
+    }
+
+    /// Recorded in mGBA (the star note block hit from below from the pipe under it): 1 px
+    /// above the cell, risen 15 px after 60 frames, and on the frame the rise ends it jumps
+    /// at -0x38 (then gravity).
+    #[test]
+    fn a_star_hit_from_below_jumps_on_the_frame_its_rise_ends() {
+        let mut lvl = note_level(NOTE_STAR, 4);
+        let (_, path) = item_path(&mut lvl, 4, HitFrom::Below, 64);
+        assert_eq!(path[59], (0, -16 * SUB), "risen out of the block");
+        let rom = [(0x100, -0x1000 - 0x380), (0x200, -0x1000 - 0x6D0), (0x300, -0x1000 - 0x9F0), (0x400, -0x1000 - 0xCE0)];
+        assert_eq!(path[60..], rom);
+    }
+
+    /// World 1-2's invisible 1-Up block (behaviour 9) and P-switch brick (behaviour 10).
+    #[test]
+    fn the_invisible_block_gives_a_1_up_and_the_p_switch_brick_puts_up_the_switch() {
+        const HIDDEN: u16 = 0x45;
+        const SWITCH_BRICK: u16 = 0x70;
+        let mut lvl = level(HIDDEN);
+        lvl.rules.bump_behaviour[HIDDEN as usize] = 9;
+        lvl.rules.result_hi[HIDDEN as usize] = 0x20;
+        lvl.rules.item_types[7] = ONE_UP;
+        let mut player = Player::spawn(4 * TILE_PX, 6 * TILE_PX - 16);
+        let (mut bump, outcome) = hit(&mut lvl, &player, 5, 4, HitFrom::Below);
+        assert_eq!(outcome, HitOutcome::Hidden);
+        assert_eq!(bump.result, 0x27);
+        assert_eq!(bump.step(&mut lvl, &mut player, false).0.map(|i| i.kind), Some(ONE_UP));
+        while !bump.step(&mut lvl, &mut player, false).1 {}
+        assert_eq!(lvl.metatile(5, 4), Some(USED));
+
+        let mut lvl = level(SWITCH_BRICK);
+        lvl.rules.bump_behaviour[SWITCH_BRICK as usize] = 10;
+        lvl.rules.result_hi[SWITCH_BRICK as usize] = 0x20;
+        lvl.rules.final_metatile[PSWITCH_TILE_CHANGE - 1] = PSWITCH;
+        let (mut bump, outcome) = hit(&mut lvl, &player, 5, 4, HitFrom::Below);
+        assert_eq!(outcome, HitOutcome::Switch);
+        assert_eq!(lvl.metatile(5, 3), Some(PSWITCH), "the switch on top");
+        assert!(bump.step(&mut lvl, &mut player, false).0.is_none());
+        while !bump.step(&mut lvl, &mut player, false).1 {}
+        assert_eq!(lvl.metatile(5, 4), Some(USED));
     }
 
     #[test]

@@ -1178,16 +1178,33 @@ pub fn extract_course_clear(
 /// 0x080475D4 as two 8x16 OBJs, tile 0x88 and its mirror, palette 1. It never changes frame.
 const GROWTH_ITEM: u16 = 0x0D;
 const FN_DRAW_ITEM: u32 = 0x0804_75D4;
+/// The 1-Up mushroom, object type 0x0B (init 0x0804E480, main 0x0804E800): drawn by
+/// 0x0804E900 (0x080475D4 with the type's own palette).
+const ONE_UP: u16 = 0x0B;
+const FN_DRAW_ONE_UP: u32 = 0x0804_E900;
 
 pub fn extract_growth_item(
     rom: &Rom,
     m: &mut Machine,
     out_dir: &std::path::Path,
 ) -> Result<(), ExtractError> {
+    extract_item(rom, m, GROWTH_ITEM, FN_DRAW_ITEM, &growth_item_path(out_dir))?;
+    extract_item(rom, m, ONE_UP, FN_DRAW_ONE_UP, &sma4_assets::one_up_path(out_dir))?;
+    println!("  growth item, 1-Up");
+    Ok(())
+}
+
+fn extract_item(
+    rom: &Rom,
+    m: &mut Machine,
+    kind: u16,
+    draw: u32,
+    path: &std::path::Path,
+) -> Result<(), ExtractError> {
     let pose = Pose {
-        kind: GROWTH_ITEM,
+        kind,
         state: 2,
-        draw: FN_DRAW_ITEM,
+        draw,
         bytes: &[],
         globals: &[],
     };

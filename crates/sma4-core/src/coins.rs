@@ -45,7 +45,7 @@ pub fn collect(level: &mut Level, p: &Player, frame: u32) -> Vec<(i32, i32)> {
     let mut got = Vec::new();
     for (x, y) in probes(p, frame) {
         let (tx, ty) = (x.div_euclid(TILE_PX), y.div_euclid(TILE_PX));
-        if level.metatile(tx, ty) == Some(COIN) {
+        if level.seen(tx, ty) == Some(COIN) {
             level.set(tx, ty, blank);
             got.push((tx, ty));
         }

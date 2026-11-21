@@ -52,7 +52,14 @@ pub struct Level {
     /// The crushing ceiling's split screen (`crate::crusher`): pixel rows above `.0` show
     /// (and collide as) the level `.1` px higher up.
     pub shift: Option<(i32, i32)>,
+    /// A P-switch runs (0x03003CF8 != 0): the player's and objects' tile reads swap coins and
+    /// bricks (`seen`).
+    pswitch: bool,
 }
+
+/// 0x08045E0C while the P-switch runs: tile ids 0x08169F38 read as 0x08169F3C (coins as
+/// bricks, bricks as coins); the VBlank tile animation (0x080016DC) swaps their pictures.
+const PSWITCH_SWAP: [(u16, u16); 4] = [(0x40, 0x67), (0x67, 0x40), (0x66, 0x40), (0x05, 0x40)];
 
 impl Level {
     pub fn new(width: usize, height: usize, metatiles: Vec<u16>, solidity: Solidity, rules: BlockRules) -> Self {
@@ -88,6 +95,7 @@ impl Level {
             coin_timer: 0,
             coin_hi: 0,
             shift: None,
+            pswitch: false,
         }
     }
 
@@ -180,6 +188,44 @@ impl Level {
         self.index(tx, ty).map(|i| self.metatiles[i])
     }
 
+    /// The metatile as the player, the objects and the screen see it: with a P-switch
+    /// running, coins and bricks swapped (0x08045E0C).
+    pub fn seen(&self, tx: i32, ty: i32) -> Option<u16> {
+        self.metatile(tx, ty).map(|m| self.swapped(m))
+    }
+
+    fn swapped(&self, m: u16) -> u16 {
+        if !self.pswitch {
+            return m;
+        }
+        PSWITCH_SWAP.iter().find(|s| s.0 == m).map_or(m, |s| s.1)
+    }
+
+    pub fn pswitch(&self) -> bool {
+        self.pswitch
+    }
+
+    /// Starts or ends the P-switch's swap; the swapped cells are redrawn.
+    pub fn set_pswitch(&mut self, on: bool) {
+        if on == self.pswitch {
+            return;
+        }
+        self.pswitch = on;
+        for (i, &m) in self.metatiles.iter().enumerate() {
+            if PSWITCH_SWAP.iter().any(|s| s.0 == m) {
+                self.changed.push((i % self.width, i / self.width));
+            }
+        }
+    }
+
+    /// Changes a cell's metatile for collision only, the picture left as it is (the page
+    /// buffer written without a BG update).
+    pub fn set_quiet(&mut self, tx: i32, ty: i32, m: u16) {
+        if let Some(i) = self.index(tx, ty) {
+            self.metatiles[i] = m;
+        }
+    }
+
     pub fn set(&mut self, tx: i32, ty: i32, m: u16) {
         if let Some(i) = self.index(tx, ty) {
             self.metatiles[i] = m;
@@ -195,7 +241,7 @@ impl Level {
         if self.solid_cells.contains(&(tx, ty)) {
             return TileKind::Solid;
         }
-        match self.metatile(tx, ty) {
+        match self.seen(tx, ty) {
             Some(m) => self.solidity.kind(m),
             None => TileKind::Empty,
         }

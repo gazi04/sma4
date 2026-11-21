@@ -122,10 +122,11 @@ const Z_COIN: f32 = 6.0;
 #[derive(Resource, Default)]
 struct MetatileImages(HashMap<u16, Handle<Image>>);
 
-/// Item images: the mushroom, the Super Leaf, the Fire Flower and the Starman.
+/// Item images: the mushroom, the 1-Up, the Super Leaf, the Fire Flower and the Starman.
 #[derive(Resource)]
 struct ItemArt {
     mushroom: Option<Handle<Image>>,
+    one_up: Option<Handle<Image>>,
     leaf: Option<Handle<Image>>,
     flower: Option<Handle<Image>>,
     star: Option<Handle<Image>>,
@@ -509,7 +510,7 @@ fn sync_tiles(
         for mut tiles in maps.iter_mut().filter(|t| t.0.len() == w * h) {
             for ty in 0..h {
                 for tx in 0..w {
-                    tiles.0[(h - 1 - ty) * w + tx] = tile(level.metatile(tx as i32, ty as i32).unwrap_or(SKY));
+                    tiles.0[(h - 1 - ty) * w + tx] = tile(level.seen(tx as i32, ty as i32).unwrap_or(SKY));
                 }
             }
         }
@@ -519,7 +520,8 @@ fn sync_tiles(
         return;
     }
     for (tx, ty) in std::mem::take(&mut level.changed) {
-        let m = level.metatile(tx as i32, ty as i32).unwrap_or(SKY);
+        // As seen: a running P-switch shows coins as bricks and bricks as coins.
+        let m = level.seen(tx as i32, ty as i32).unwrap_or(SKY);
         for mut tiles in maps.iter_mut().filter(|t| t.0.len() == w * h) {
             // Tile data is stored bottom row first.
             tiles.0[(h - 1 - ty) * w + tx] = tile(m);
@@ -608,8 +610,20 @@ fn sync_items(mut commands: Commands, game: Res<GameRes>, art: Res<ItemArt>, old
         let leaf = item.kind == sma4_core::blocks::LEAF;
         let image = match item.kind {
             sma4_core::blocks::LEAF => &art.leaf,
+    // Grab blocks (object 0x5C) look like the cell they came out of (metatile 0x32).
+    for e in game.0.enemies.iter().filter(|e| e.kind == sma4_core::enemies::GRAB_BLOCK) {
+        if matches!(e.state, sma4_core::enemies::EnemyState::Puff(_)) {
+            continue;
+        }
+        let image = metatile_image(&mut cache, &level.0, &mut images, sma4_core::blocks::GRAB_BLOCK_TILE);
+        let (x, y) = e.px();
+        commands.spawn((BumpSprite, Sprite::from_image(image), Transform::from_xyz((x + 8) as f32, -((y + 8) as f32), Z_GRAB_BLOCK)));
+    }
             sma4_core::blocks::FIRE_FLOWER => &art.flower,
             sma4_core::blocks::STAR => &art.star,
+/// A carried or thrown grab block: with the enemies (0x08043060 draws it as an object).
+const Z_GRAB_BLOCK: f32 = 8.0;
+
             _ => &art.mushroom,
         };
         let Some(image) = image else { continue };
@@ -620,6 +634,8 @@ fn sync_items(mut commands: Commands, game: Res<GameRes>, art: Res<ItemArt>, old
         sprite.flip_x = leaf && item.vx > 0;
         commands.spawn((
             ItemSprite,
+            // Without its art (an older extraction) the 1-Up shows as a mushroom.
+            sma4_core::blocks::ONE_UP if art.one_up.is_some() => &art.one_up,
             sprite,
             Transform::from_xyz((x + 8) as f32, -((y + 8) as f32), z),
         ));
@@ -890,20 +906,22 @@ fn sync_background(
     }
 }
 
-/// The growth item (mushroom), extracted from the ROM (`objects/growth_item.png`).
+/// The growth item (mushroom) and the 1-Up, extracted from the ROM (`objects/growth_item.png`,
+/// `objects/one_up.png`).
 fn load_item_art(mut commands: Commands, dir: Res<crate::AssetDir>, mut images: ResMut<Assets<Image>>) {
     let mut load = |path: std::path::PathBuf| crate::player::load_cells(&path, 16, 16, &mut images).into_iter().next();
     let mushroom = load(sma4_assets::growth_item_path(&dir.0));
     let leaf = load(sma4_assets::leaf_path(&dir.0));
     let flower = load(sma4_assets::fire_flower_path(&dir.0));
     let star = load(sma4_assets::star_path(&dir.0));
-    commands.insert_resource(ItemArt { mushroom, leaf, flower, star });
+    commands.insert_resource(ItemArt { mushroom, one_up, leaf, flower, star });
 }
 
 /// TODO(re): use the start position from the level header (byte 4, bits 7-5).
 /// For now: column `tx`, standing on the lowest surface (normally the ground).
 /// Where a level starts (0x08014F20): the header's start y (top of the 32 px frame, so a
 /// small player's box is 16 px lower); x near the left edge, like `--spawn-col 2`.
+    let one_up = load(sma4_assets::one_up_path(&dir.0));
 // TODO(re): the start x is set outside the level loader; SMB3 starts at x 0x18.
 fn start_point(level: &LevelAsset) -> (i32, i32) {
     (2 * sma4_core::level::TILE_PX + 2, level.start_y as i32 + 32 - 16)
