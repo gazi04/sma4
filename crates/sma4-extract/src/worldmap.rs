@@ -30,9 +30,17 @@ const FN_MAP_INIT: u32 = 0x0800_BE48;
 /// Saved map position the init copies into the map state (+0 y, +2 screen, +4 x).
 const SAVED_Y: u32 = 0x0300_37A9;
 const SAVED_X: u32 = 0x0300_37AD;
-/// Where a world starts: the START tile (Y 0x40, X 0x20).
-// TODO(re): the new-game routine that stores this was not traced; SMB3 uses the same spot.
-const START: (u8, u16) = (0x40, 0x20);
+/// Where a world starts (0x08039C30 fills the per-world saved spots 0x03002CA7 / C87 / C97
+/// and view 0x03002CB7, which the world start 0x0802FC00 loads): y 0x0813A000[world], x
+/// 0x20 on screen 0, the view's x 8 (World 2: 0).
+const START_Y: u32 = 0x0813_A000;
+const START_X: u16 = 0x20;
+fn start(rom: &Rom, world: u8) -> Result<(u8, u16), ExtractError> {
+    Ok((rom.u8(START_Y + world as u32)?, START_X))
+}
+fn start_scroll(world: u8) -> u8 {
+    if world == 1 { 0 } else { 8 }
+}
 /// Map tile RAM per screen: 0x08136134[screen] + 0x100, 16 columns, rows from y 0x10.
 const SCREEN_PTRS: u32 = 0x0813_6134;
 /// 0x08009428 copies 12 rows of 16 tiles per screen (0x08135AAC[world]).
@@ -64,6 +72,15 @@ const ANIM_BYTES: usize = 0x1000;
 const FN_DRAW_MARIO: u32 = 0x0800_C45C;
 const MAP_FORM: u32 = 0x0300_3CB6;
 const FN_MAP_FORM_PALETTE: u32 = 0x0800_B4F0;
+/// World 9 (map world 8) and its pipes' numbers (0x0800C0B4: OAM entries 73-79).
+const WARP_ZONE: u8 = 8;
+const FN_WARP_ZONE_NUMBERS: u32 = 0x0800_C0B4;
+const WARP_ZONE_NUMBERS: std::ops::Range<u32> = 73..80;
+const WARP_ZONE_SIGNS: u32 = 0x0813_5D08;
+const FN_BG_SCRIPT: u32 = 0x0800_A078;
+const SIGN_ROWS: u32 = 4;
+const SAVED_SCROLL_X: u32 = 0x0300_3858;
+const WORLD1_SCROLL_X: u8 = 8;
 const FRAME_COUNTER: u32 = 0x0300_3AE8;
 const MAP_SUB_STATE: u32 = 0x0300_385D;
 const IDLE: u8 = 0x0E;
@@ -88,8 +105,17 @@ fn setup(m: &mut Machine, world: u8) -> Result<(), ExtractError> {
     setup_streak(m, world, 0)
 }
 
+/// The map init for `world` started at its start spot (`start`).
+fn setup_at(rom: &Rom, m: &mut Machine, world: u8) -> Result<(), ExtractError> {
+    setup_streak_at(m, world, 0, start(rom, world)?)
+}
+
 /// The map init with the spade streak 0x03002CD8 = `streak` (bits 2-5: the count).
 fn setup_streak(m: &mut Machine, world: u8, streak: u8) -> Result<(), ExtractError> {
+    setup_streak_at(m, world, streak, (0x40, 0x20))
+}
+
+fn setup_streak_at(m: &mut Machine, world: u8, streak: u8, at: (u8, u16)) -> Result<(), ExtractError> {
     m.clear_ram()?;
     m.w8(SPADE_STREAK, streak)?;
     for (ptr, val) in [
@@ -102,8 +128,15 @@ fn setup_streak(m: &mut Machine, world: u8, streak: u8) -> Result<(), ExtractErr
     }
     m.w8(LANGUAGE, 0)?;
     m.w8(WORLD, world)?;
-    m.w8(SAVED_Y, START.0)?;
-    m.w8(SAVED_X, START.1 as u8)?;
+    // The view's x the map init 0x0800B648 starts from (0x03003858): a world's start view
+    // (`start_scroll`); World 9 keeps that of the world the whistle took Mario from, World
+    // 1's 8 (mGBA). World 1 itself is extracted at 0 as the port has always drawn it (the
+    // ROM's view there is 8 px further right).
+    if world != 0 {
+        m.w8(SAVED_SCROLL_X, if world == WARP_ZONE { WORLD1_SCROLL_X } else { start_scroll(world) })?;
+    }
+    m.w8(SAVED_Y, at.0)?;
+    m.w8(SAVED_X, at.1 as u8)?;
     for i in 0..128 {
         m.w16(OAM_BUF + i * 8, 0xA0)?;
     }
@@ -190,7 +223,7 @@ pub fn extract_world_map(
     world: u8,
     out_dir: &std::path::Path,
 ) -> Result<(), ExtractError> {
-    setup(m, world)?;
+    if world == WARP_ZONE { setup(m, world)? } else { setup_at(rom, m, world)? };
     let nodes = nodes(rom, world)?;
     let screens = nodes
         .iter()
@@ -239,7 +272,7 @@ pub fn extract_world_map(
     // Line the grid up with the ROM's BG1 view (frame 0 of the animation is in VRAM).
     let (bg1, bg1_chars, scroll) = layer(m, 1)?;
     let view = render_view(&bg1, layer_width(m, 1)?, &bg1_chars, &pal, scroll);
-    let origin = (-16..=16)
+    let origin = (-32..=16)
         .flat_map(|oy| (-16..=16).map(move |ox| (ox, oy)))
         .max_by_key(|&o| {
             let ours = render_grid(&grid, cols, &frame0, o);
@@ -264,6 +297,30 @@ pub fn extract_world_map(
         world + 1,
         240 * 160
     );
+
+    // World 9: the "WORLD 9 WARP ZONE!" sign (BG3, priority 1) and the pipes' world numbers
+    // (0x0800C0B4 each frame: OAM 73-79 from 0x0813A577, 8x8 tiles 0xD1-0xDD, palette 1,
+    // priority 3), as one picture of the screen.
+    if world == WARP_ZONE {
+        // The map init writes the sign (0x0800A078(0x08135D08[language])) before the "WORLD
+        // n" panel covers BG3 (sub-state 0); once the panel has closed the sign is back.
+        let sign = rom.u8(WARP_ZONE_SIGNS + m.read(LANGUAGE, 1)?[0] as u32)?;
+        m.call(FN_BG_SCRIPT, &[sign as u32])?;
+        // BG3 unscrolled; the panel below the sign (rows 4 on) is cleared once it has closed
+        // (mGBA: BG3 then holds the sign alone).
+        let (bg3, bg3_chars, _) = layer(m, 3)?;
+        let mut overlay = render_view(&bg3, layer_width(m, 3)?, &bg3_chars, &pal, (0, 0));
+        overlay.pixels[(SIGN_ROWS * 8 * 240 * 4) as usize..].fill(0);
+        m.w8(MAP_STATE + 0x69, 0)?;
+        for s in 0..128 {
+            m.w16(OAM_BUF + s * 8, 0xA0)?;
+        }
+        m.call(FN_WARP_ZONE_NUMBERS, &[])?;
+        draw_oam(m, &mut overlay, WARP_ZONE_NUMBERS)?;
+        overlay
+            .write_png(&sma4_assets::map_overlay_path(out_dir, world))
+            .map_err(|e| ExtractError(e.to_string()))?;
+    }
 
     // Mario's map sprite per form and animation phase.
     let mut mario = Rgba {
@@ -401,7 +458,7 @@ pub fn extract_world_map(
         cols,
         rows: ROWS,
         grid,
-        start: START,
+        start: if world == WARP_ZONE { (0x40, 0x20) } else { start(rom, world)? },
         thresholds,
         nodes,
         origin,

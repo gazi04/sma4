@@ -32,6 +32,9 @@ const Z_TILES: f32 = 41.2;
 const Z_OBJECTS: f32 = 41.4;
 const Z_MARIO: f32 = 41.5;
 const Z_STARS: f32 = 41.6;
+/// World 9's sign (BG3, priority 1) and pipe numbers (OBJ priority 3): over the tiles,
+/// under the map objects and Mario.
+const Z_OVERLAY: f32 = 41.3;
 /// The puff of an item used on the map: OBJ priority 0.
 const Z_PUFF: f32 = 41.7;
 const Z_IRIS: f32 = 41.8;
@@ -82,6 +85,10 @@ struct MapObjectSprite(usize);
 
 #[derive(Component)]
 struct MapPuff;
+
+/// A world's overlay picture (World 9: the "WARP ZONE" sign and the pipes' numbers).
+#[derive(Component)]
+struct MapOverlay;
 
 #[derive(Component)]
 struct MapTile(usize);
@@ -322,6 +329,11 @@ fn build_world(
             cam.spawn((WorldEntity, MapObjectSprite(i), Sprite::default(), Transform::default(), Visibility::Hidden));
         }
         cam.spawn((WorldEntity, WaveView, Sprite::from_image(wave.clone()), at(0, 0, 240, 160, Z_TILES + 0.05), Visibility::Hidden));
+        // World 9's sign and pipe numbers (`sma4_assets::map_overlay_path`), over the tiles.
+        if let Ok(o) = sma4_assets::Rgba::read_png(&sma4_assets::map_overlay_path(dir, world)) {
+            let sprite = Sprite::from_image(images.add(sprite_image(o)));
+            cam.spawn((WorldEntity, MapOverlay, sprite, at(0, 0, 240, 160, Z_OVERLAY), Visibility::Hidden));
+        }
         cam.spawn((WorldEntity, Whirlwind, Sprite::default(), Transform::default(), Visibility::Hidden));
         cam.spawn((WorldEntity, PanelPart::Panel, Sprite::default(), Transform::default(), Visibility::Hidden));
         for i in 0..sma4_core::inventory::SLOTS {
@@ -333,6 +345,7 @@ fn build_world(
         WorldMap::new(asset.grid, (asset.cols, asset.rows), asset.start, asset.thresholds, asset.nodes, asset.anim_ticks)
             .with_game_over_keep(asset.game_over_keep)
             .with_origin(origin)
+            .with_world(world)
             .with_objects(objects_asset.as_ref().map(|a| a.objects.as_slice()).unwrap_or(&[]));
     let atlas = asset.atlas;
     commands.insert_resource(MapArt { tiles, mario, spin, origin, iris, stars, objects, puff, spade, atlas, wave, panel, items });
@@ -370,6 +383,18 @@ fn sync_map(
     mut puff: Query<
         (&mut Sprite, &mut Transform, &mut Visibility),
         (With<MapPuff>, Without<MapTile>, Without<MapMario>, Without<Iris>, Without<MapStar>, Without<MapObjectSprite>),
+    >,
+    mut overlay: Query<
+        &mut Visibility,
+        (
+            With<MapOverlay>,
+            Without<MapPuff>,
+            Without<MapTile>,
+            Without<MapMario>,
+            Without<Iris>,
+            Without<MapStar>,
+            Without<MapObjectSprite>,
+        ),
     >,
 ) {
     let (Some(art), Some(map)) = (art, &game.0.world_map) else { return };
@@ -491,6 +516,10 @@ fn sync_map(
             let (px, py) = (x as i32 + art.origin.0, y as i32 - 0x10 + art.origin.1);
             *t = at(px - 8, py - 8, size, size, Z_PUFF);
         }
+    }
+    // The "WORLD n" panel covers BG3 while it shows (map sub-state 0).
+    for mut v in &mut overlay {
+        *v = vis(shown && !matches!(map.phase, MapPhase::Intro(_)));
     }
     let radius = match map.phase {
         MapPhase::Entering(r) if shown => Some(r as i32),

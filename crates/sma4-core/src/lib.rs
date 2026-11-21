@@ -1463,10 +1463,17 @@ impl Game {
         }
     }
 
-    /// World 9 has been loaded after the Warp Whistle: Mario's spot there (0x08007950).
+    /// The world in `pending_world` has been loaded: after the Warp Whistle, Mario's spot in
+    /// World 9 (0x08007950); through a World 9 pipe, the world starts as a new one (map
+    /// sub-state 0: the "WORLD n" panel and the stars, Mario at its start; mGBA).
     pub fn enter_world(&mut self, mut map: world_map::WorldMap) {
-        map.show(world_map::Arrival::Walk);
-        (map.y, map.x) = warp::LANDING;
+        map.anchored = self.anchors >> map.world & 1 != 0;
+        if self.warp.is_some() {
+            map.show(world_map::Arrival::Walk);
+            (map.y, map.x) = warp::LANDING;
+        } else {
+            map.show(world_map::Arrival::World);
+        }
         self.world_map = Some(map);
     }
 
@@ -1486,6 +1493,13 @@ impl Game {
                     map.rand = self.rng.bytes();
                     map.frame = self.frame;
                     if let Some(node) = map.step(held, self.input.pressed) {
+                        // World 9's pipes (0x08009A3C: 0x03003CB7 = the spot's tileset
+                        // nibble) lead to Worlds 2-8 once the iris has closed.
+                        if map.world == warp::WARP_ZONE {
+                            self.pending_world = Some(node.tileset);
+                            self.status.world = node.tileset + 1;
+                            return;
+                        }
                         self.battle = map.meeting.map(|(_, item)| item);
                         if node.tileset == toad_house::TILESET && node.enemies & 0x8000 != 0 {
                             // 0x08009A3C: a bit-15 enemy word is the chest choice.
@@ -2520,6 +2534,32 @@ mod tests {
         }
         let map = g.world_map.as_ref().unwrap();
         assert_eq!((map.y, map.x), warp::LANDING);
+    }
+
+    #[test]
+    fn a_world_9_pipe_leads_to_its_world_once_the_iris_has_closed() {
+        // mGBA: A on pipe "2" closes the iris (map sub-state 0x17), then World 2 (0x03002A69 =
+        // the spot's tileset nibble, 1) starts with its "WORLD 2" panel.
+        let mut g = Game::new();
+        let mut map = world_map::tests::world1().with_world(warp::WARP_ZONE);
+        map.nodes = vec![sma4_assets::MapNode { y: 0x20, x: 0x40, tileset: 1, level: 0x813, enemies: 0x813 }];
+        (map.y, map.x) = (0x20, 0x40);
+        g.world_map = Some(map);
+        g.screen = Screen::Map;
+        g.step(Buttons::empty());
+        g.step(Buttons::A);
+        let mut frames = 0;
+        while g.pending_world.is_none() {
+            g.step(Buttons::empty());
+            frames += 1;
+            assert!(frames < 100);
+        }
+        assert_eq!((g.pending_world, g.status.world, g.pending_level.is_none()), (Some(1), 2, true));
+        g.pending_world = None;
+        g.enter_world(world_map::tests::world1().with_world(1));
+        let map = g.world_map.as_ref().unwrap();
+        assert!(matches!(map.phase, world_map::MapPhase::Intro(_)), "the world's panel and stars");
+        assert_eq!((map.y, map.x), (0x40, 0x20), "at the world's start");
     }
 
     #[test]

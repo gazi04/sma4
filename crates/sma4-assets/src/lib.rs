@@ -1210,6 +1210,13 @@ pub fn map_object_cell(kind: u8, frame: u32) -> u32 {
     kind as u32 * MAP_OBJECT_FRAMES + frame
 }
 
+/// What a world's map draws over its tiles besides the objects, as a 240x160 picture of the
+/// screen (World 9: the "WORLD 9 WARP ZONE!" sign on BG3 and the pipes' numbers); missing
+/// for the other worlds.
+pub fn map_overlay_path(dir: &Path, world: u8) -> PathBuf {
+    dir.join("map").join(format!("world{}_overlay.png", world + 1))
+}
+
 /// The map's puffs, drawn with their top-left 8 px left of and above a cell's 16x16 (as
 /// Mario's lower OBJ): `MAP_PUFF_FRAMES` 32x32 cells (tiles 0x16, 0x18, 0x1A, 0x1C, 0x1E),
 /// row `MAP_PUFF_OBJECT` in palette 3 (a map object beaten in battle, 0x0800F61C), row

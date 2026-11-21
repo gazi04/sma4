@@ -170,6 +170,8 @@ pub struct WorldMap {
     pub cloud: bool,
     /// The P-Wing is on (map form 8): the next level's P-meter stays full.
     pub p_wing: bool,
+    /// The world (0x03002A69, 0-8).
+    pub world: u8,
     /// This world's anchor has been used (0x03002D4C bit).
     pub anchored: bool,
 }
@@ -217,6 +219,7 @@ impl WorldMap {
             return_from: start,
             cloud: false,
             p_wing: false,
+            world: 0,
             anchored: false,
         };
         map.rebuild();
@@ -227,6 +230,12 @@ impl WorldMap {
     /// 0x10 above his map y.
     pub fn with_origin(mut self, origin: (i32, i32)) -> Self {
         self.sprite_origin = (origin.0, origin.1 - 0x10);
+        self
+    }
+
+    /// The world number (0x03002A69: 0 = World 1).
+    pub fn with_world(mut self, world: u8) -> Self {
+        self.world = world;
         self
     }
 

@@ -275,9 +275,13 @@ fn run(args: &Args) -> Result<(), String> {
     if let Some(letter) = letter {
         ending::extract(&rom, &mut m, &args.out, letter).map_err(|e| e.0)?;
     }
-    // World 2's map, where the game goes after World 1's castle.
+    // Worlds 2-8's maps: World 2 is where the game goes after World 1's castle, and World
+    // 9's pipes lead to all of them (their levels are not extracted).
     if args.levels.is_empty() {
-        worldmap::extract_world_map(&rom, &mut m, 1, &args.out).map_err(|e| e.0)?;
+        for world in 1..WARP_ZONE {
+            worldmap::extract_world_map(&rom, &mut m, world, &args.out).map_err(|e| e.0)?;
+            worldmap::extract_map_objects(&rom, &mut m, world, &args.out).map_err(|e| e.0)?;
+        }
     }
 
     let sheets = extract_gfx(&rom, args)?;

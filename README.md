@@ -68,6 +68,12 @@ and knock out any enemy they touch, even fire-proof ones. Losing a suit to a hit
 big. Not ported: the sounds, the palette flash, a hammer breaking bricks. Debug: `--items
 1,2,3,9,c` starts with items (hex ids; in scripts `Q` is the L button), `--form 0-6`.
 
+World 9 shows its "WORLD 9 WARP ZONE!" sign and the world numbers over its pipes, and each
+pipe leads to its world's map (Worlds 2-8), which starts with its "WORLD n" panel and Mario
+at its start, as in the ROM (checked in mGBA). Those worlds' levels are not ported:
+entering one leaves you on the map. Worlds 2-8's maps and map objects are extracted from
+your ROM (re-run `sma4-extract`).
+
 World 1-5 works as in the ROM. Its pools are water: Mario swims in them. A strokes up
 (speed -0x20 off the bottom, 0x20 more upward in the water, held within +/-0x20), the
 water pulls him down slowly (+1 a frame rising, every other frame sinking) and pushes him
