@@ -10,6 +10,7 @@ mod level;
 mod oam;
 mod objects;
 mod screens;
+mod sound;
 mod spade;
 mod title;
 mod worldmap;
@@ -122,6 +123,7 @@ fn run(args: &Args) -> Result<(), String> {
     println!("output: {}", args.out.display());
 
     let mut m = emu::Machine::new(rom.bytes()).map_err(|e| e.to_string())?;
+    sound::extract_sounds(&rom, &args.out).map_err(|e| e.0)?;
     // By default: every course level World 1's map can enter (1-1 first).
     let levels = if args.levels.is_empty() {
         worldmap::course_levels(&rom, &mut m, 0).map_err(|e| e.0)?

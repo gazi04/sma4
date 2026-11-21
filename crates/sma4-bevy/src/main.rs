@@ -5,6 +5,7 @@
 //! The game reads only extracted assets (default `assets/extracted/`, created once by
 //! `sma4-extract` from the user's own ROM); it never opens the ROM itself.
 
+mod audio;
 mod castle;
 mod enemies;
 mod fortress;
@@ -296,6 +297,7 @@ fn spawn_camera(mut commands: Commands) {
         Camera2d,
         Msaa::Off,
         // Always show (at least) the GBA's 240x160, whatever size the window ends up.
+                audio::AudioPlugin,
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::AutoMin { min_width: SCREEN_W as f32, min_height: SCREEN_H as f32 },
             ..OrthographicProjection::default_2d()

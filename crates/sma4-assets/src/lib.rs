@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 pub mod castle;
 pub use castle::*;
 pub mod ending;
+pub mod sound;
 pub use ending::*;
 
 pub const METATILE: u32 = 16;
