@@ -170,6 +170,17 @@ impl Status {
         self.popups.push(ScorePopup { x: x + 4 + dx, y: y + 4 + dy, kind, timer: POPUP_FRAMES });
     }
 
+    /// 0x0808C850 (a stomped cannonball, 0x0808C8E0): kind 5 + the player's stomp chain
+    /// (+0x5A, capped at 0xD) in the first free slot, at the ball's x and 6 px above its y
+    /// (screen y above 0xBF, so off the screen, becomes 5), with none of 0x08093560's
+    /// offsets. `camera_y` is the objects' camera y (0x03003CE0).
+    pub fn ball_popup(&mut self, x: i32, y: i32, chain: u16, camera_y: i32) {
+        let sy = y - camera_y - 6;
+        let sy = if (sy as u16) > 0xBF { 5 } else { sy as i16 as i32 };
+        let kind = (chain + 5).min(POPUP_1UP as u16) as u8;
+        self.popups.push(ScorePopup { x, y: camera_y + sy, kind, timer: POPUP_FRAMES });
+    }
+
     /// 0x08093654: popup for the `chain`-th enemy in a row (100, 200, ... 8000, then 1-UPs).
     pub fn chain_popup(&mut self, x: i32, y: i32, chain: u16) {
         self.popup(x, y, (chain + 5).min(POPUP_1UP as u16) as u8);
@@ -324,6 +335,18 @@ impl Status {
 
 #[cfg(test)]
 mod tests {
+    /// 0x0808C850: 6 px above the ball, no offsets; a ball above the screen puts it at
+    /// screen y 5; the chain caps at a 1-UP.
+    #[test]
+    fn a_stomped_cannonballs_popup_sits_6_px_above_it() {
+        let mut s = Status::default();
+        s.ball_popup(0x120, 0xA0, 0, 0x70);
+        s.ball_popup(0x120, 0x60, 3, 0x70);
+        s.ball_popup(0x120, 0xA0, 20, 0x70);
+        let got: Vec<_> = s.popups.iter().map(|p| (p.x, p.y, p.kind)).collect();
+        assert_eq!(got, [(0x120, 0x9A, 5), (0x120, 0x75, 8), (0x120, 0x9A, POPUP_1UP)]);
+    }
+
     use super::*;
 
     fn hud() -> HudAsset {

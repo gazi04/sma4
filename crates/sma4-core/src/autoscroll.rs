@@ -45,6 +45,8 @@ pub struct Autoscroll {
     sub_index: u8,
     /// +0xBBE.
     timer: u8,
+    /// A speed step ran this frame (0x080925B4; scene 2 speeds its front clouds up then).
+    pub stepped: bool,
 }
 
 impl Autoscroll {
@@ -64,6 +66,7 @@ impl Autoscroll {
             repeat: 0,
             sub_index: 0,
             timer: 0,
+            stepped: false,
         })
     }
 
@@ -74,6 +77,7 @@ impl Autoscroll {
 
     /// One frame (0x08092BF0 -> 0x080926F4).
     pub fn step(&mut self, scripts: &AutoscrollScripts) {
+        self.stepped = false;
         self.timer = self.timer.saturating_sub(1);
         self.x += self.vx * 16;
         // 0x080925B4.
@@ -96,6 +100,7 @@ impl Autoscroll {
         self.vx += scripts.steps[(cmd >> 2 & 3) as usize] as i32;
         self.vy += scripts.steps[(cmd & 3) as usize] as i32;
         self.timer = STEP_FRAMES;
+        self.stepped = true;
     }
 
     /// 0x080923F0: the next command, sub-script entry or repeat; true once the script has

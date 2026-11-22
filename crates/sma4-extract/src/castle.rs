@@ -111,8 +111,57 @@ pub fn extract_intro(m: &mut Machine, out_dir: &std::path::Path, level: u16) -> 
     m.w8(CHARACTER, 0)?;
     m.call(FN_MARIO_START, &[])?;
     write_bank(m, out_dir, level)?;
-    println!("  airship intro: sprites, MARIO START!");
+    extract_intro_clouds(m, out_dir)?;
+    println!("  airship intro: sprites, MARIO START!, clouds");
     Ok(())
+}
+
+/// The intro's scene mode 8 (0x08025E88): LZ77 0x0823A2EC (512x256, palette 0) unpacked to
+/// 0x0201C000 for BG3 (priority 0, BG3CNT shadow 0x03002DAA), alpha-blended over the rest
+/// (BLDCNT 0x1768, BLDALPHA 0x080A: 10/16 of it, 8/16 behind).
+const FN_SCENE_MODE_8: u32 = 0x0802_5E88;
+const SCENE_MAP: u32 = 0x0201_C000;
+const V_BG3_CNT: u32 = 0x0300_2DAA;
+
+fn extract_intro_clouds(m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    m.call(FN_SCENE_MODE_8, &[])?;
+    let cnt = u16::from_le_bytes(m.read(V_BG3_CNT, 2)?.try_into().unwrap());
+    let map = m.read(SCENE_MAP, 0x1000)?;
+    let chars = m.read(0x0600_0000 + ((cnt as u32 >> 2) & 3) * 0x4000, 0x8000)?;
+    let sheet = Sheet { chars: &chars, palette: parse_palette(&m.read(BG_PAL_BUFFER, 0x200)?) };
+    let mut px = render_map(&sheet, &map);
+    blend_front(&mut px, FRONT_EVA);
+    Rgba { width: 512, height: 256, pixels: px }.write_png(&sma4_assets::intro_clouds_path(out_dir)).map_err(err)
+}
+
+/// A 512x256 BG map (two 32x32 screen blocks) drawn with `sheet`.
+fn render_map(sheet: &Sheet, map: &[u8]) -> Vec<u8> {
+    let w = 512u32;
+    let mut px = vec![0u8; (w * 256 * 4) as usize];
+    for i in 0..(map.len() / 2).min(0x800) {
+        let e = u16::from_le_bytes([map[i * 2], map[i * 2 + 1]]);
+        let (block, cell) = (i as u32 / 0x400, i as u32 % 0x400);
+        let (tx, ty) = (block * 32 + cell % 32, cell / 32);
+        sheet.tile_flip(&mut px, w, (e & 0x3FF) as u32, tx * 8, ty * 8, e & 0x400 != 0, e & 0x800 != 0, (e >> 12) as u32);
+    }
+    px
+}
+
+/// A layer alpha-blended in front with weight `eva` / 16 (BLDALPHA's EVA). Ordinary alpha
+/// blending cannot add up to more than one: the alpha is the brightest channel's share, so
+/// that colour comes out exact over black and what is behind weighs 1 - alpha instead of
+/// EVB / 16.
+fn blend_front(px: &mut [u8], eva: u32) {
+    let top = px.chunks_exact(4).filter(|q| q[3] != 0).flat_map(|q| q[..3].to_vec()).max().unwrap_or(0) as u32;
+    let a = (top * eva / 16).clamp(1, 255);
+    for q in px.chunks_exact_mut(4) {
+        if q[3] != 0 {
+            for c in &mut q[..3] {
+                *c = (*c as u32 * eva * 255 / (16 * a)).min(255) as u8;
+            }
+            q[3] = a as u8;
+        }
+    }
 }
 
 /// Larry Koopa's init (0x08071C60) loads OBJ palette 15 (0x0821E3C0 through the colour
@@ -161,34 +210,52 @@ pub fn extract_cabin(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path, leve
 const SKY_BACK: u32 = 0x0822_9378;
 const SKY_FRONT: u32 = 0x0823_A558;
 
-pub fn extract_sky(rom: &Rom, m: &Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+/// The lightning's colour steps (0x08008C5C): the backdrop 0x08132D9C[step] and palette 0's
+/// colours 8-15 from 0x08132DA8[step] (0 left as it is), through the colour curve
+/// 0x08007B5C(colour, 0).
+const FLASH_BACKDROP: u32 = 0x0813_2D9C;
+const FLASH_COLOURS: u32 = 0x0813_2DA8;
+/// BLDALPHA 0x090A (the deck) and 0x080A (the intro): the front clouds weigh 10/16.
+const FRONT_EVA: u32 = 10;
+
+pub fn extract_sky(rom: &Rom, m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
     let palette = parse_palette(&m.read(BG_PAL_BUFFER, 0x200)?);
-    for (stream, chars_at, path) in [
-        (SKY_BACK, 0x0600_8000u32, sma4_assets::sky_path(out_dir, false)),
-        (SKY_FRONT, 0x0600_0000, sma4_assets::sky_path(out_dir, true)),
-    ] {
-        let map = sma4_rom::decompress::lz77(rom.slice(stream, 0x4000).map_err(err)?).map_err(err)?;
-        let chars = m.read(chars_at, 0x8000)?;
-        let sheet = Sheet { chars: &chars, palette: palette.clone() };
-        let (w, h) = (512u32, 256u32);
-        let mut px = vec![0u8; (w * h * 4) as usize];
-        for i in 0..(map.len() / 2).min(0x800) {
-            let e = u16::from_le_bytes([map[i * 2], map[i * 2 + 1]]);
-            let (block, cell) = (i as u32 / 0x400, i as u32 % 0x400);
-            let (tx, ty) = (block * 32 + cell % 32, cell / 32);
-            sheet.tile_flip(&mut px, w, (e & 0x3FF) as u32, tx * 8, ty * 8, e & 0x400 != 0, e & 0x800 != 0, (e >> 12) as u32);
-        }
-        // The back layer is opaque: its colour 0 is the backdrop (palette 0, colour 0).
-        if chars_at != 0x0600_0000 {
-            let bd = palette[0].to_rgba(255);
-            for p in px.chunks_exact_mut(4) {
-                if p[3] == 0 {
-                    p.copy_from_slice(&bd);
-                }
+    let mut curve = |c: u16| -> Result<sma4_rom::gfx::Bgr555, ExtractError> {
+        m.call(FN_COLOUR_CURVE, &[c as u32, 0])?;
+        Ok(parse_palette(&(m.r0()? as u16).to_le_bytes())[0])
+    };
+    let mut looks = vec![(palette.clone(), sma4_assets::sky_path(out_dir, false))];
+    for step in 0..sma4_assets::SKY_FLASH_STEPS as u32 {
+        let mut p = palette.clone();
+        p[0] = curve(rom.u16(FLASH_BACKDROP + step * 2)?)?;
+        let colours = rom.ptr(FLASH_COLOURS + step * 4)?;
+        for i in 0..8 {
+            let c = rom.u16(colours + i * 2)?;
+            if c != 0 {
+                p[8 + i as usize] = curve(c)?;
             }
         }
-        Rgba { width: w, height: h, pixels: px }.write_png(&path).map_err(err)?;
+        looks.push((p, sma4_assets::sky_flash_path(out_dir, step as u8)));
     }
+    let render = |stream: u32, chars_at: u32, palette: &[sma4_rom::gfx::Bgr555]| -> Result<Vec<u8>, ExtractError> {
+        let map = sma4_rom::decompress::lz77(rom.slice(stream, 0x4000).map_err(err)?).map_err(err)?;
+        let chars = m.read(chars_at, 0x8000)?;
+        Ok(render_map(&Sheet { chars: &chars, palette: palette.to_vec() }, &map))
+    };
+    // The back layer is opaque: its colour 0 is the backdrop (palette 0, colour 0).
+    for (p, path) in &looks {
+        let mut px = render(SKY_BACK, 0x0600_8000, p)?;
+        let bd = p[0].to_rgba(255);
+        for q in px.chunks_exact_mut(4) {
+            if q[3] == 0 {
+                q.copy_from_slice(&bd);
+            }
+        }
+        Rgba { width: 512, height: 256, pixels: px }.write_png(path).map_err(err)?;
+    }
+    let mut px = render(SKY_FRONT, 0x0600_0000, &palette)?;
+    blend_front(&mut px, FRONT_EVA);
+    Rgba { width: 512, height: 256, pixels: px }.write_png(&sma4_assets::sky_path(out_dir, true)).map_err(err)?;
     println!("  airship sky");
     Ok(())
 }

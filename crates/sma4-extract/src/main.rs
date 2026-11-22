@@ -206,7 +206,7 @@ fn run(args: &Args) -> Result<(), String> {
             castle::extract_intro(&mut m, &args.out, id).map_err(|e| e.0)?;
         }
         if id == AIRSHIP {
-            castle::extract_sky(&rom, &m, &args.out).map_err(|e| e.0)?;
+            castle::extract_sky(&rom, &mut m, &args.out).map_err(|e| e.0)?;
         }
         if id == AIRSHIP {
             castle::write_bank(&m, &args.out, id).map_err(|e| e.0)?;

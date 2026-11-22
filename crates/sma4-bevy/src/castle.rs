@@ -38,7 +38,7 @@ const Z_CURTAIN_OBJ: f32 = 61.0;
 #[derive(Resource, Default)]
 struct Art {
     /// The airship's sky: BG2 behind the level, BG3 in front.
-    sky: Option<(Handle<Image>, Handle<Image>)>,
+    sky: Option<SkyArt>,
     /// The curtain's iris (GBA screen sized) and the radius it was drawn for.
     iris: Handle<Image>,
     iris_drawn: Option<i32>,
@@ -51,6 +51,16 @@ struct Art {
 
 #[derive(Component)]
 struct CastleSprite;
+
+/// The airship's sky pictures (`sma4_assets::sky_path`, `sky_flash_path`).
+struct SkyArt {
+    back: Handle<Image>,
+    /// BG2 in each lightning step; empty with an older extraction.
+    flashes: Vec<Handle<Image>>,
+    front: Handle<Image>,
+    /// The intro's clouds (`sma4_assets::intro_clouds_path`).
+    intro: Option<Handle<Image>>,
+}
 
 fn load_one(path: &std::path::Path, images: &mut Assets<Image>) -> Option<Handle<Image>> {
     match Rgba::read_png(path) {
@@ -74,7 +84,15 @@ fn load_data(mut commands: Commands, dir: Res<crate::AssetDir>, mut game: ResMut
         .collect();
     let iris = images.add(sprite_image(Rgba { width: SCREEN_W, height: SCREEN_H, pixels: vec![0; (SCREEN_W * SCREEN_H * 4) as usize] }));
     let sky = load_one(&sma4_assets::sky_path(&dir.0, false), &mut images)
-        .zip(load_one(&sma4_assets::sky_path(&dir.0, true), &mut images));
+        .zip(load_one(&sma4_assets::sky_path(&dir.0, true), &mut images))
+        .map(|(back, front)| SkyArt {
+            back,
+            flashes: (0..sma4_assets::SKY_FLASH_STEPS)
+                .map_while(|k| load_one(&sma4_assets::sky_flash_path(&dir.0, k), &mut images))
+                .collect(),
+            front,
+            intro: load_one(&sma4_assets::intro_clouds_path(&dir.0), &mut images),
+        });
     commands.insert_resource(Art { message_box, text, iris, sky, ..default() });
 }
 
@@ -268,13 +286,20 @@ fn sync_curtain(
 #[derive(Component)]
 struct SkyPiece;
 
-/// The airship's room.
+/// The airship's room, and its intro.
 const AIRSHIP: u16 = 0x205;
+const AIRSHIP_INTRO: u16 = 0x202;
+/// The intro's clouds (BG3, priority 1 like the level's BG1, which wins): between the
+/// level's tiles and its background.
+const Z_INTRO_CLOUDS: f32 = -3.0;
 /// BG2 behind everything; BG3 (priority 0) over the level and the sprites.
 const Z_SKY_BACK: f32 = -10.0;
 const Z_SKY_FRONT: f32 = 20.0;
 
 /// The airship's two cloud layers (`sma4_assets::sky_path`), repeated to cover the view.
+/// BG2 is drawn in strips of screen lines that share a horizontal offset (`sma4_core::sky`:
+/// line 0 at camera x / 2, then the bands; above the GBA screen the first band, below it
+/// the last), in the lightning's colour step; BG3 at its own x.
 fn sync_sky(
     mut commands: Commands,
     game: Res<GameRes>,
@@ -287,23 +312,60 @@ fn sync_sky(
         commands.entity(e).despawn();
     }
     let g = &game.0;
+    let Some(sky_art) = &art.sky else { return };
+    let (cx, _) = g.camera();
+    let (w, h) = (512, 256);
+    if g.screen == sma4_core::Screen::Level
+        && level.0.level_id == AIRSHIP_INTRO
+        && let Some(intro) = &sky_art.intro
+    {
+        // VBlank 0x0800092C, scene mode 8 with 0x03003BBE set: x camera / 8, y 0x17.
+        let (x0, y0) = (-((cx >> 3).rem_euclid(w)) - w, -(sma4_assets::INTRO_CLOUDS_Y.rem_euclid(h)) - h);
+        commands.entity(*camera).with_children(|cam| {
+            for i in 0..4 {
+                for j in 0..4 {
+                    let t = screen_px(x0 + i * w, y0 + j * h, w as u32, h as u32, Z_INTRO_CLOUDS);
+                    cam.spawn((SkyPiece, Sprite::from_image(intro.clone()), t));
+                }
+            }
+        });
+        return;
+    }
     if g.screen != sma4_core::Screen::Level || level.0.level_id != AIRSHIP {
         return;
     }
-    let Some((back, front)) = &art.sky else { return };
-    let (cx, _) = g.camera();
-    let (w, h) = (512, 256);
+    let sky = g.sky.unwrap_or_default();
+    let back = sky.look.and_then(|k| sky_art.flashes.get(k as usize)).unwrap_or(&sky_art.back);
+    // Screen lines far above and below the GBA screen, for taller windows.
+    const BEYOND: i32 = 4 * 256;
+    let mut strips = sky.back_strips(cx);
+    if let Some(first) = strips.get(1).copied() {
+        strips.insert(0, (-BEYOND, 0, first.2));
+    }
+    if let Some(last) = strips.last_mut() {
+        last.1 = sma4_core::sky::SCREEN_LINES + BEYOND;
+    }
     let mut pieces = Vec::new();
-    for (image, hofs, vofs, z) in [
-        (back, cx >> 1, sma4_assets::SKY_BACK_Y, Z_SKY_BACK),
-        (front, g.frame as i32, sma4_assets::SKY_FRONT_Y, Z_SKY_FRONT),
-    ] {
-        // The layer's pixel at the screen's top-left is (hofs, vofs), modulo its size.
-        let (x0, y0) = (-(hofs.rem_euclid(w)) - w, -(vofs.rem_euclid(h)) - h);
-        for i in 0..4 {
-            for j in 0..4 {
-                pieces.push((Sprite::from_image(image.clone()), screen_px(x0 + i * w, y0 + j * h, w as u32, h as u32, z)));
+    for (from, to, hofs) in strips {
+        let mut y = from;
+        while y < to {
+            // The layer's row at this screen line, and how many lines until it wraps.
+            let row = (sma4_assets::SKY_BACK_Y + y).rem_euclid(h);
+            let n = (h - row).min(to - y);
+            let x0 = -(hofs.rem_euclid(w)) - w;
+            for i in 0..4 {
+                let rect = Rect::new(0.0, row as f32, w as f32, (row + n) as f32);
+                let sprite = Sprite { image: back.clone(), rect: Some(rect), ..default() };
+                pieces.push((sprite, screen_px(x0 + i * w, y, w as u32, n as u32, Z_SKY_BACK)));
             }
+            y += n;
+        }
+    }
+    let hofs = sky.front_x as i32;
+    let (x0, y0) = (-(hofs.rem_euclid(w)) - w, -(sma4_assets::SKY_FRONT_Y.rem_euclid(h)) - h);
+    for i in 0..4 {
+        for j in 0..4 {
+            pieces.push((Sprite::from_image(sky_art.front.clone()), screen_px(x0 + i * w, y0 + j * h, w as u32, h as u32, Z_SKY_FRONT)));
         }
     }
     commands.entity(*camera).with_children(|cam| {

@@ -108,11 +108,13 @@ fn step_game(
     mut pacing: ResMut<Pacing>,
     script: Option<ResMut<Script>>,
     mut game: ResMut<GameRes>,
+    mut sounds: ResMut<crate::audio::SoundQueue>,
 ) {
     if let Some(mut s) = script {
         // Script over: freeze so the screenshot shows the final frame.
         if let Some(held) = s.next() {
             game.0.step(held);
+            sounds.0.extend_from_slice(&game.0.sounds);
         }
         return;
     }
@@ -125,6 +127,7 @@ fn step_game(
     }
     for _ in 0..n {
         game.0.step(held);
+        sounds.0.extend_from_slice(&game.0.sounds);
     }
 }
 

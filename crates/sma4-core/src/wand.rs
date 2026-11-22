@@ -139,7 +139,7 @@ pub struct HitStar {
 /// 0x08169D7E: the hit star's x from the player's frame x, by facing (left, right).
 const HIT_STAR_DX: [i32; 2] = [16, -16];
 const HIT_STAR_DY: i32 = 0x10;
-const HIT_STAR_TIME: u8 = 10;
+pub const HIT_STAR_TIME: u8 = 10;
 const HIT_STAR_TILE: u16 = 0x8B;
 
 impl HitStar {

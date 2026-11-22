@@ -30,6 +30,7 @@ pub mod player;
 pub mod rng;
 pub mod screens;
 pub mod ship;
+pub mod sky;
 pub mod spade;
 pub mod title;
 pub mod world_map;
@@ -223,13 +224,6 @@ pub struct Game {
     /// Level effect 7 is on (list type 0x166, 0x03003CF7 = 7): a chest comes once the
     /// Bros and their projectiles are gone (0x0804D12C).
     chest_effect: bool,
-    /// A map object's battle: the item its chest holds (0x0300379D).
-    pub battle: Option<u8>,
-    pub crusher: Option<crusher::Crusher>,
-    /// Camera x limits set by objects (min: player +0xA0, max: +0x9E).
-    camera_limits: (Option<i32>, Option<i32>),
-    /// Boom Boom's intro holds the player (+0x40 = 0xFF).
-    boss_freeze: bool,
     /// The P-switch's timer (0x03003CF8): 0x7F when pressed, -1 every fourth frame; coins
     /// and bricks swap while it runs.
     pub pswitch: u8,
@@ -243,6 +237,19 @@ pub struct Game {
     clock_stopped: bool,
     /// The castle's tables and messages (`sma4_assets::CastleAsset`); without them the
     /// throne room is an empty room.
+    /// The airship's stormy sky (scene 2: its cloud bands, lightning and front clouds).
+    pub sky: Option<sky::Sky>,
+    /// Sound effects started this frame, as the ROM's sound ids (0x080E7D54's argument).
+    /// The port has no sound engine yet; a host can play them from these. Only the airship
+    /// reports them so far (shots, stomps, shell hits, thunder).
+    pub sounds: Vec<u8>,
+    /// A map object's battle: the item its chest holds (0x0300379D).
+    pub battle: Option<u8>,
+    pub crusher: Option<crusher::Crusher>,
+    /// Camera x limits set by objects (min: player +0xA0, max: +0x9E).
+    camera_limits: (Option<i32>, Option<i32>),
+    /// Boom Boom's intro holds the player (+0x40 = 0xFF).
+    boss_freeze: bool,
     pub castle_data: Option<std::sync::Arc<sma4_assets::CastleAsset>>,
     /// The King's throne room (list type 0x1A9).
     pub throne: Option<castle::Throne>,
@@ -324,6 +331,8 @@ impl Game {
         self.micro_goombas.clear();
         self.player_fireballs.clear();
         self.boomerangs.clear();
+        // The deck's scene 2 (0x080247C4 -> 0x08024650) starts its sky.
+        self.sky = (self.level.start_kind == airship::LANDING_KIND).then(sky::Sky::default);
         self.hammers.clear();
         self.debris.clear();
         self.goomba_pipes.clear();
@@ -1113,8 +1122,8 @@ impl Game {
         for (x, y) in &hits.stomped {
             self.player.vy = ship::BALL_BOUNCE;
             self.player.on_ground = false;
-            // TODO(re): 0x0808C8E0 -> 0x0808C850(5, 0x0809347C) taken as the stomp chain.
-            self.status.chain_popup(*x, *y, self.player.stomp_chain);
+            // 0x0808C8E0 -> 0x0808C850(5, 0x0809347C): the stomp chain's popup.
+            self.status.ball_popup(*x, *y, self.player.stomp_chain, camera_y);
             self.player.stomp_chain += 1;
         }
         self.ship.step_propellers(view.camera.0);
@@ -1148,16 +1157,31 @@ impl Game {
             self.player.on_ground = false;
         }
         if let Some(vx) = ev.push {
+            self.sounds.push(ship::SOUND_STOMP);
             self.player.vx = vx;
             // 0x080735DC: +0x70 = 8 (`Player::push_timer`).
             self.player.push_timer = larry::PUSH_TIME;
         }
         // 0x03003D0F = 0x81: the clock stops; objects in slots 4..0 become puffs.
         if ev.beaten {
+        let shells = self.ship.hit_shells(&mut self.enemies, &view);
+        for &((x, y), chain) in &shells.popups {
+            self.status.chain_popup(x, y, chain);
+        }
+        if let Some((x, y)) = shells.star {
+            self.hit_star = Some(wand::HitStar { x, y, timer: wand::HIT_STAR_TIME });
+        }
+        self.sounds.extend(shells.sounds);
+        self.player.carrying = self.enemies.iter().any(|e| matches!(e.state, EnemyState::Carried(_)));
             self.clock_stopped = true;
             self.enemies.iter_mut().for_each(enemies::Enemy::larry_beaten);
         }
         for f in &mut self.player_fireballs {
+        if self.ship.fired {
+            self.sounds.push(ship::SOUND_SHOT);
+        }
+        // 0x08028478 after the generators: the rotating cannon's barrel turns.
+        self.ship.turn_barrel(&mut self.level);
             if f.live() && l.fireball(f.px()) {
                 f.hit();
             }
@@ -1629,6 +1653,7 @@ impl Game {
             }
             Screen::GameOverMenu(menu) => {
                 let choice = menu.step(self.input.pressed);
+        self.sounds.clear();
                 // 0x080131EC: Mario flies back to the checkpoint.
                 if let (Some(k), Some(map)) = (menu.flight(), &mut self.world_map) {
                     map.fly(k);
@@ -1980,6 +2005,11 @@ impl Game {
         // 0x08076C94: none once one has been hit in this level (+0xE67).
         if self.progress != 0 && !self.advance_taken {
             self.advance_coins.extend(coins.iter().map(advance_coin::AdvanceCoin::spawn));
+            if a.stepped
+                && let Some(sky) = &mut self.sky
+            {
+                sky.autoscroll_step(self.status.world.saturating_sub(1));
+            }
         }
                 // A 1-UP popup (the life comes with it, 0x08093A48).
                 blocks::ONE_UP => {
@@ -2010,7 +2040,11 @@ impl Game {
         self.enemies.retain_mut(|e| {
             e.spits_twice = twice;
             let gone = if e.kind == ship::BULLET_BILL { e.leaves(camera.0, frame) } else { e.from_pipe && e.off_screen(camera) };
-            e.step(level, player, frame) && !gone
+            let alive = e.step(level, player, frame);
+            if e.kind == ship::BULLET_BILL {
+                e.y += carry_dy * player::SUB;
+            }
+            alive && !gone
         });
         self.step_carried(b_held);
         for e in &self.enemies {
@@ -2048,6 +2082,10 @@ impl Game {
                 b.slot = slot;
                 self.boomerangs.push(b);
             }
+        // 0x0805432C -> 0x080542D4: while the autoscroll runs (+0xCC4) and the scroll mode
+        // (0x03003CB2) is not 1, a Bullet Bill with no floor probe (+0x13 bit 2; it only
+        // moves across, 0x08049DE0, so never set) moves with its y step (0x03003876).
+        let carry_dy = if self.autoscroll.is_some() && self.level.camera.mode != 1 { self.scroll_step.1 } else { 0 };
             // 0x08068A84 -> 0x0808C8FC: the same.
             let taken: Vec<u8> = self
                 .boomerangs
@@ -2557,6 +2595,93 @@ mod tests {
     fn b_pulls_out_a_grab_block_that_puffs_away_when_held_too_long() {
         let mut g = Game::new();
         g.enter_level(grab_level(), (4 * TILE_PX, 9 * TILE_PX - 16), &[]);
+    #[test]
+    fn landing_on_a_note_block_bounces_the_player_and_a_bounces_it_higher() {
+        let low = bounce_height(false);
+        let high = bounce_height(true);
+        assert!(high < low - 32, "A during the bounce: {high} vs {low}");
+    }
+
+    /// A big player gets a Super Leaf; it pops up, sways down and makes the player a raccoon.
+    #[test]
+    fn big_player_gets_a_leaf_that_sways_down_and_makes_a_raccoon() {
+        let block = (4, 5);
+        let mut g = Game::new();
+        let ground = 9 * TILE_PX - 16;
+        g.enter_level(block_level(block), (block.0 as i32 * TILE_PX + 2, ground), &[]);
+        g.player.set_form(Form::Big);
+        for _ in 0..60 {
+            g.step(Buttons::empty());
+        }
+        for _ in 0..12 {
+            g.step(Buttons::A);
+        }
+        assert_eq!(g.items.len(), 1);
+        assert_eq!(g.items[0].kind, blocks::LEAF);
+        let start_y = block.1 as i32 * TILE_PX;
+        let mut highest = g.items[0].px().1;
+        let mut xs = Vec::new();
+        for _ in 0..120 {
+            g.step(Buttons::empty());
+            if let Some(i) = g.items.first() {
+                highest = highest.min(i.px().1);
+                xs.push(i.px().0);
+            }
+        }
+        assert!(start_y - highest >= 30, "pops up about 33 px, got {}", start_y - highest);
+        let (lo, hi) = (*xs.iter().min().unwrap(), *xs.iter().max().unwrap());
+        assert!(hi - lo >= 16, "sways from side to side");
+        // It falls onto the player standing under the block.
+        for _ in 0..200 {
+            if g.player.form == Form::Raccoon {
+                break;
+            }
+            let leaf_x = g.items.first().map_or(0, |i| i.px().0);
+            let dir = if leaf_x > g.player.px().0 { Buttons::RIGHT } else { Buttons::LEFT };
+            g.step(dir);
+        }
+        assert_eq!(g.player.form, Form::Raccoon);
+        assert!(g.items.is_empty());
+    }
+
+    /// The raccoon's tail bumps a question block beside it (0x0809A748).
+    #[test]
+    fn tail_whip_bumps_a_block_beside_the_player() {
+        // Block on the ground row level with the tail probe (24 px below the frame top), in
+        // front of the player: by whip frame 9 the spin has turned the player around, so
+        // the probe (x + 22 facing left) points the way the player started facing.
+        let block = (8, 8);
+        let mut g = Game::new();
+        let ground = 9 * TILE_PX - 26;
+        g.enter_level(block_level(block), (7 * TILE_PX + 4, ground), &[]);
+        g.player.set_form(Form::Raccoon);
+        g.player.facing_left = false;
+        for _ in 0..30 {
+            g.step(Buttons::empty());
+        }
+        g.step(Buttons::B);
+        for _ in 0..20 {
+            g.step(Buttons::B);
+        }
+        assert_eq!(g.level.metatile(8, 8), Some(0x5F), "block used up");
+        assert_eq!(g.items.len(), 1, "it released its item");
+    }
+
+    #[test]
+    fn tail_whip_knocks_out_goombas_and_flips_koopas() {
+        let mut g = Game::new();
+        let ground = 9 * TILE_PX - 26;
+        g.enter_level(block_level((20, 2)), (8 * TILE_PX, ground), &[]);
+        g.player.set_form(Form::Raccoon);
+        g.player.facing_left = true;
+        for _ in 0..30 {
+            g.step(Buttons::empty());
+        }
+        let p = g.player;
+        let place = |kind, x: i32| {
+            let mut e = enemies::Enemy::spawn_at(kind, x, 8 * TILE_PX, &p);
+            e.vx = 0;
+            e
         g.screen = Screen::Level;
         assert!(grab(&mut g), "grabbed");
         assert_eq!(g.level.metatile(5, 8), Some(SKY), "the cell is empty");

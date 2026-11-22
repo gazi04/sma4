@@ -646,7 +646,7 @@ impl Enemy {
             EnemyState::Collapsed { step, timer } => self.step_collapsed(level, player, step, timer.saturating_sub(1)),
             // 0x08053704 with +0x1C: out of the pipe, across only, the walk cycle +1 a frame.
             // 0x0805440C: straight across (0x08049DE0), drawn behind for +0x23 frames.
-            // TODO(re): 0x080542D4 also carries it with the autoscroll's y step.
+            // The autoscroll's y step carries it (0x080542D4, `Game::step`).
             EnemyState::Walking if self.kind == crate::ship::BULLET_BILL => {
                 self.emerging = self.emerging.saturating_sub(1);
                 self.x += self.vx;

@@ -23,8 +23,8 @@
 
 use sma4_assets::EnemySpawn;
 
-use crate::enemies::{Enemy, PIPE_GOOMBA_SLOTS};
-use crate::level::TILE_PX;
+use crate::enemies::{Enemy, EnemyState, KOOPA, PIPE_GOOMBA_SLOTS, RED_KOOPA};
+use crate::level::{Level, TILE_PX};
 use crate::obj::ObjSprite;
 use crate::player::{Player, SUB, UNIT};
 
@@ -60,6 +60,29 @@ const DIAGONAL_EVERY: u8 = 0x87;
 const ROTATING_CYCLE: u8 = 0x3D;
 const ROTATING_WAIT: u8 = 0x20;
 const ROTATING_TURN: u8 = 0x1D;
+/// A carried shell a ball knocks out: speed byte 0xD0 (0x0808E228).
+const BALL_KNOCKOUT: i32 = -0x30 * 16;
+/// Object type 0x5C, the grab block (`enemies::GRAB_BLOCK`).
+const CARRIED_OBJECT: u16 = crate::enemies::GRAB_BLOCK;
+/// Sounds (ROM ids): a shot (0x0808FC30), a ball stomped (0x0808E05C), a ball meeting a
+/// shell (0x0808E228: + the shell's chain, up to 7, when sliding).
+pub const SOUND_SHOT: u8 = 0x8A;
+pub const SOUND_STOMP: u8 = 0x7E;
+const SOUND_SHELL_HIT: u8 = 0x7F;
+
+/// What `Ship::hit_shells` did this frame.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShellHits {
+    /// Score popups: (where, chain).
+    pub popups: Vec<((i32, i32), u16)>,
+    /// The hit star's place (level px), the ball's.
+    pub star: Option<(i32, i32)>,
+    pub sounds: Vec<u8>,
+}
+/// Tile change 0x15 (0x08028174): the barrel's 2x2 metatiles at the generator's cell, the
+/// low bytes from 0x0813ABFE (rows top, bottom). A top-left of 0x96 turns to the first look,
+/// anything else to the second; the plane byte stays.
+const BARREL_LOOKS: [[u16; 4]; 2] = [[0x92, 0x93, 0x94, 0x95], [0x96, 0x97, 0x98, 0x99]];
 /// The blaster: the Bullet Bill's speed byte by side (0x08170C74), its +0x23 (drawn at
 /// priority 2 while it leaves the blaster), and the player's clearance (0x11 px).
 const BILL_SPEED: [i32; 2] = [0x18, -0x18];
@@ -202,6 +225,8 @@ pub struct Ship {
     pub propellers: Vec<Propeller>,
     /// Sound 0x8A (a shot) was started this frame.
     pub fired: bool,
+    /// A barrel turn waiting for `turn_barrel` (0x03003CF5 = 0x15): the generator's x, y.
+    pub turn: Option<(i32, i32)>,
 }
 
 impl Ship {
@@ -288,6 +313,57 @@ impl Ship {
         hits
     }
 
+    /// 0x0808E3A4 for each ball not stomped, after it moved: the objects from slot 14 down,
+    /// the first touched counts (0x0808E228). Only a Koopa shell (0x6C / 0x6D; type 0x5C
+    /// is not in the port) carried (state 4) or sliding (state 5) on the screen is tested,
+    /// box against the ball's (x + 2, y + 2, 12 x 12). Carried, the shell is knocked out
+    /// (state 6, speed 0xD0, sound 0x7F, 100 points); sliding, it scores its chain (+0x38,
+    /// sound 0x7F + chain) and goes on. Either way the ball stops and falls (+0x14 = 1).
+    /// Type 0x5C, the grab block, is tested too. Returns the score popups, the tail's hit star at the ball
+    /// (0x03007848 + 0xC03 = 10, a sliding shell only) and the sounds.
+    pub fn hit_shells(&mut self, enemies: &mut [Enemy], view: &View) -> ShellHits {
+        let mut out = ShellHits::default();
+        let (cx, cy) = view.camera;
+        let on_screen = |x: i32, y: i32| {
+            let (sx, sy) = (((x - cx) as i16 as i32 + 0x30) as u32, ((y - cy) as i16 as i32 + 0x30) as u32);
+            sx <= 0x14F && sy < 0x100
+        };
+        for slot in self.balls.iter_mut().rev() {
+            let Some(b) = slot else { continue };
+            let (bx, by) = (b.x >> 8, b.y >> 8);
+            if b.stomped || !on_screen(bx, by) {
+                continue;
+            }
+            for e in enemies.iter_mut().rev() {
+                let carried = matches!(e.state, EnemyState::Carried(_));
+                if !matches!(e.kind, KOOPA | RED_KOOPA | CARRIED_OBJECT) || !(carried || e.state == EnemyState::Kicked) {
+                    continue;
+                }
+                let (ex, ey) = e.px();
+                if !on_screen(ex, ey) || !e.overlaps_box(bx + 2, by + 2, 0xC, 0xC) {
+                    continue;
+                }
+                if carried {
+                    e.state = EnemyState::Dead;
+                    e.vy = BALL_KNOCKOUT;
+                    e.vx = 0;
+                    out.popups.push(((ex, ey), 0));
+                    out.sounds.push(SOUND_SHELL_HIT);
+                } else {
+                    out.popups.push(((ex, ey), e.knockouts));
+                    out.sounds.push(SOUND_SHELL_HIT + (e.knockouts + 1).min(7) as u8);
+                    e.knockouts += 1;
+                    out.star = Some((bx, by));
+                }
+                b.stomped = true;
+                b.vx = 0;
+                b.vy = 0;
+                break;
+            }
+        }
+        out
+    }
+
     /// 0x08090448: the generators, oldest first. `rand` is 0x03003879 (one byte per
     /// slot); Bullet Bills go into `enemies`.
     pub fn step_guns(&mut self, view: &View, rand: &[u8; 18], player: &Player, enemies: &mut Vec<Enemy>) {
@@ -319,9 +395,16 @@ impl Ship {
                         self.guns[i].count = g.count.wrapping_add(1);
                     }
                     let g = self.guns[i];
-                    // TODO(re): at +0x0A == 0x1D the barrel turns (0x03003CF5 = 0x15, a BG
-                    // tile change at the generator); not drawn.
-                    let _ = ROTATING_TURN;
+                    // 0x0808FF84: at +0x0A 0x1D the barrel turns (0x03003CF5 = 0x15 with the
+                    // generator's position in 0x03003CB8 / CBC); with a tile change already
+                    // pending it tries again next frame (+0x0A = 0x1E).
+                    if g.wait == ROTATING_TURN {
+                        if self.turn.is_none() {
+                            self.turn = Some((g.x, g.y));
+                        } else {
+                            self.guns[i].wait = ROTATING_TURN + 1;
+                        }
+                    }
                     if g.wait == 1 {
                         self.fire(&g, (g.count & 7) as usize, view);
                         self.fire(&g, (g.count.wrapping_add(4) & 7) as usize, view);
@@ -346,6 +429,21 @@ impl Ship {
                     self.smoke_at(&g, BILL_SMOKE_DIR + side, view);
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// The barrel turn `step_guns` asked for (0x08028478 runs tile change 0x15 later in the
+    /// same frame): its 2x2 cells change look.
+    pub fn turn_barrel(&mut self, level: &mut Level) {
+        let Some((x, y)) = self.turn.take() else { return };
+        let (tx, ty) = (x.div_euclid(TILE_PX), y.div_euclid(TILE_PX));
+        let Some(first) = level.metatile(tx, ty) else { return };
+        let look = &BARREL_LOOKS[(first & 0xFF != 0x96) as usize];
+        for (k, &low) in look.iter().enumerate() {
+            let (cx, cy) = (tx + (k & 1) as i32, ty + (k >> 1) as i32);
+            if let Some(m) = level.metatile(cx, cy) {
+                level.set(cx, cy, m & 0xFF00 | low);
             }
         }
     }
@@ -576,5 +674,69 @@ mod tests {
         // +0x0C = 1: directions 1 and 5.
         let balls: Vec<_> = ship.balls.iter().flatten().map(|b| (b.vx, b.vy)).collect();
         assert_eq!(balls, [(-0xB, 0xB), (0xB, -0xB)]);
+    }
+
+    /// 0x0808E228: a ball meeting a sliding shell stops and falls, the shell scores its
+    /// chain and slides on; a carried shell is knocked out for 100 points.
+    #[test]
+    fn a_cannonball_stops_on_a_sliding_shell_and_knocks_out_a_carried_one() {
+        let player = player_at(0x100, 0xA0);
+        let v = view((0x80, 0x70));
+        for carried in [false, true] {
+            let mut shell = Enemy::spawn_at(KOOPA, 0x120, 0xC0, &player);
+            shell.state = if carried { EnemyState::Carried(0x80) } else { EnemyState::Kicked };
+            shell.knockouts = 2;
+            let mut enemies = vec![shell];
+            let mut ship = Ship::default();
+            ship.balls[5] = Some(Cannonball { x: 0x11C00, y: 0xC000, vx: 0x10, vy: 0, stomped: false });
+            ship.balls[4] = Some(Cannonball { x: 0x16000, y: 0xC000, vx: 0x10, vy: 0, stomped: false });
+            let hits = ship.hit_shells(&mut enemies, &v);
+            assert_eq!(hits.popups, [((0x120, 0xC0), if carried { 0 } else { 2 })]);
+            assert_eq!(hits.sounds, [if carried { 0x7F } else { 0x82 }]);
+            assert_eq!(hits.star, (!carried).then_some((0x11C, 0xC0)));
+            let b = ship.balls[5].unwrap();
+            assert!(b.stomped && b.vx == 0 && b.vy == 0);
+            assert!(!ship.balls[4].unwrap().stomped, "the other ball misses");
+            assert_eq!(enemies[0].state, if carried { EnemyState::Dead } else { EnemyState::Kicked });
+            assert_eq!(enemies[0].knockouts, if carried { 2 } else { 3 });
+        }
+        // A carried grab block (0x5C) is knocked out the same way.
+        let mut block = Enemy::grab_block(&player);
+        (block.x, block.y) = (0x12000, 0xC000);
+        let mut enemies = vec![block];
+        let mut ship = Ship::default();
+        ship.balls[5] = Some(Cannonball { x: 0x11C00, y: 0xC000, vx: 0x10, vy: 0, stomped: false });
+        assert_eq!(ship.hit_shells(&mut enemies, &v).popups.len(), 1);
+        assert_eq!(enemies[0].state, EnemyState::Dead);
+    }
+
+    /// mGBA (World 1's airship, the rotating cannon at (0x38, 0xA)): 3 frames after each
+    /// cycle starts (+0x0A 0x1D) its 2x2 BG block swaps between metatiles 0x92-0x95 and
+    /// 0x96-0x99 (0x08028174), the plane byte kept.
+    #[test]
+    fn the_rotating_cannons_barrel_turns_three_frames_into_each_cycle() {
+        let mut level = Level::new(0x40, 0x10, vec![0; 0x400], crate::level::TEST_SOLIDITY, Default::default());
+        for (k, m) in [0x92, 0x93, 0x94, 0x95].into_iter().enumerate() {
+            level.set(0x38 + (k & 1) as i32, 0xA + (k >> 1) as i32, 0x100 | m);
+        }
+        let mut ship = Ship::default();
+        ship.add(&spawn(ROTATING, 0x38, 0xA));
+        let (player, mut enemies) = (player_at(0x300, 0xA0), Vec::new());
+        let v = view((0x300, 0x70));
+        let mut turns = vec![];
+        for f in 1..=2 * ROTATING_CYCLE as u32 {
+            ship.step_guns(&v, &[0; 18], &player, &mut enemies);
+            if ship.turn.is_some() {
+                turns.push(f);
+            }
+            ship.turn_barrel(&mut level);
+        }
+        assert_eq!(turns, [4, 4 + ROTATING_CYCLE as u32]);
+        assert_eq!(level.metatile(0x39, 0xB), Some(0x195), "turned twice: back");
+        ship.step_guns(&v, &[0; 18], &player, &mut enemies);
+        ship.turn = Some((0x380, 0xA0));
+        ship.turn_barrel(&mut level);
+        let block: Vec<_> = [(0x38, 0xA), (0x39, 0xA), (0x38, 0xB), (0x39, 0xB)].iter().map(|&(x, y)| level.metatile(x, y).unwrap()).collect();
+        assert_eq!(block, [0x196, 0x197, 0x198, 0x199]);
     }
 }

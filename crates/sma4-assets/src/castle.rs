@@ -195,11 +195,27 @@ pub const OBJ_SIZES: [[(u32, u32); 4]; 3] = [
 ];
 
 /// The airship's sky: BG2 (the dark clouds, `front` false) and BG3 (the white clouds in
-/// front), 512x256 each.
+/// front), 512x256 each. BG2 is in the level's own colours; `sky_flash_path` has it in
+/// each colour step of the lightning. BG3 is alpha-blended over everything (BLDCNT 0x1768,
+/// BLDALPHA 0x090A: 10/16 of it plus 9/16 of what is behind), so its picture holds an
+/// alpha and colours that, drawn with ordinary alpha blending, give its brightest colour
+/// exactly over black and let a little less (1 - alpha, about 1/2) of the rest through.
 pub fn sky_path(dir: &Path, front: bool) -> PathBuf {
     dir.join(CASTLE_DIR).join(if front { "sky_front.png" } else { "sky_back.png" })
 }
-/// BG2 scrolls with the camera x / 2 at y 0x3F (VBlank 0x0800092C for scene 2: 0x03003758,
-/// 0x03003DC6 + 0x3F); BG3 moves 1 px a frame on its own at y 0x17 (0x03003760 / 64).
+/// BG2 in lightning step `step` (0-5, `sma4_core::sky`); step 5 is the dark sky between
+/// flashes.
+pub fn sky_flash_path(dir: &Path, step: u8) -> PathBuf {
+    dir.join(CASTLE_DIR).join(format!("sky_back_{step}.png"))
+}
+pub const SKY_FLASH_STEPS: u8 = 6;
+/// The intro's clouds in front (level 0x202, scene mode 8: BG3, 512x256), blended as the
+/// deck's front clouds; at x camera / 8 (0x03003BBE set), y 0x17 (VBlank 0x0800092C).
+pub fn intro_clouds_path(dir: &Path) -> PathBuf {
+    dir.join(CASTLE_DIR).join("intro_clouds.png")
+}
+pub const INTRO_CLOUDS_Y: i32 = 0x17;
+/// BG2 at y 0x3F (VBlank 0x0800092C for scene 2: 0x03003DC6 + 0x3F; across, line by line,
+/// `sma4_core::sky::Sky::back_hofs`); BG3 at y 0x17, across by `Sky::front_x`.
 pub const SKY_BACK_Y: i32 = 0x3F;
 pub const SKY_FRONT_Y: i32 = 0x17;
