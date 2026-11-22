@@ -632,11 +632,50 @@ pub fn extract_map_objects(rom: &Rom, m: &mut Machine, world: u8, out_dir: &std:
         }
     }
     println!("  world map {} objects: {:?}", world + 1, objects.iter().map(|o| (o.kind, o.y, o.x)).collect::<Vec<_>>());
-    MapObjectsAsset { objects, sprites }.write(out_dir, world).map_err(|e| ExtractError(e.to_string()))?;
+    // The airship's routes (0x08030978): spot k of route r is y 0x0813AE90[r][k], screen
+    // 0x0813AEF0[r][k] & 0xF, x & 0xF0; a world's routes are world * 3 + 0..2 (0x0802FBB8).
+    let airship_routes = (0..sma4_assets::AIRSHIP_ROUTES as u32)
+        .map(|k| -> Result<_, ExtractError> {
+            let r = (world as u32 * 3 + k) * 4;
+            let (ys, xs) = (rom.ptr(AIRSHIP_Y + r)?, rom.ptr(AIRSHIP_X + r)?);
+            let mut route = [(0, 0); sma4_assets::AIRSHIP_SPOTS];
+            for (i, spot) in route.iter_mut().enumerate() {
+                let sx = rom.u8(xs + i as u32)? as u16;
+                *spot = (rom.u8(ys + i as u32)?, (sx & 0xF) << 8 | sx & 0xF0);
+            }
+            Ok(route)
+        })
+        .collect::<Result<_, _>>()?;
+    if world == 0 {
+        extract_anchor(m, out_dir)?;
+    }
+    MapObjectsAsset { objects, sprites, airship_routes }.write(out_dir, world).map_err(|e| ExtractError(e.to_string()))?;
     if world == 0 {
         extract_map_puff(rom, m, out_dir)?;
     }
     Ok(())
+}
+
+const AIRSHIP_Y: u32 = 0x0813_AE90;
+const AIRSHIP_X: u32 = 0x0813_AEF0;
+
+/// The anchor on an anchored airship (0x08031C74): one 8x8 OBJ, tile 0x8C, palette 0.
+fn extract_anchor(m: &mut Machine, out_dir: &std::path::Path) -> Result<(), ExtractError> {
+    for s in 0..128 {
+        m.w16(OAM_BUF + s * 8, 0xA0)?;
+    }
+    m.w16(OAM_BUF + OBJ_SLOT * 8, 0)?;
+    m.w16(OAM_BUF + OBJ_SLOT * 8 + 2, 0)?;
+    m.w16(OAM_BUF + OBJ_SLOT * 8 + 4, 0xA8C)?;
+    let mut canvas = Rgba { width: 240, height: 160, pixels: vec![0; 240 * 160 * 4] };
+    draw_oam(m, &mut canvas, OBJ_SLOT..OBJ_SLOT + 1)?;
+    let mut px = vec![0u8; 8 * 8 * 4];
+    for y in 0..8 {
+        px[y * 32..y * 32 + 32].copy_from_slice(&canvas.pixels[y * 240 * 4..y * 240 * 4 + 32]);
+    }
+    Rgba { width: 8, height: 8, pixels: px }
+        .write_png(&sma4_assets::map_anchor_path(out_dir))
+        .map_err(|e| ExtractError(e.to_string()))
 }
 
 /// The map's puffs: four 16x16 OBJs around a cell, the same tile in each, flipped none / h

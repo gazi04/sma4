@@ -1195,6 +1195,18 @@ pub struct MapObjectsAsset {
     /// `MAP_OBJECT_FRAMES` 16x16 cells per kind (0 .. `MAP_OBJECT_KINDS`), see
     /// `map_object_cell`.
     pub sprites: Rgba,
+    /// The world's three routes for its airship (map object kind 2) after a death in it
+    /// (0x08030978): `AIRSHIP_SPOTS` spots each, (y, screen << 8 | x), from 0x0813AE90 /
+    /// 0x0813AEF0[world * 3 + k] (y; screen | x).
+    pub airship_routes: Vec<[(u8, u16); AIRSHIP_SPOTS]>,
+}
+
+pub const AIRSHIP_SPOTS: usize = 6;
+pub const AIRSHIP_ROUTES: usize = 3;
+/// The anchor shown on an anchored airship (0x08031C74: OBJ tile 0x8C, palette 0, 8x8):
+/// `map/anchor.png`.
+pub fn map_anchor_path(dir: &Path) -> PathBuf {
+    dir.join("map").join("anchor.png")
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1235,7 +1247,7 @@ pub const MAP_PUFF_OBJECT: u32 = 0;
 pub const MAP_PUFF_ITEM: u32 = 1;
 pub const MAP_PUFF_SIZE: u32 = 32;
 
-const MAP_OBJECTS_MAGIC: &[u8; 8] = b"SMA4MO01";
+const MAP_OBJECTS_MAGIC: &[u8; 8] = b"SMA4MO02";
 
 impl MapObjectsAsset {
     fn stem(dir: &Path, world: u8) -> PathBuf {
@@ -1250,6 +1262,11 @@ impl MapObjectsAsset {
             out.extend_from_slice(&[o.slot, o.kind, o.y]);
             out.extend_from_slice(&o.x.to_le_bytes());
             out.push(o.item);
+        }
+        out.push(self.airship_routes.len() as u8);
+        for (y, x) in self.airship_routes.iter().flatten() {
+            out.push(*y);
+            out.extend_from_slice(&x.to_le_bytes());
         }
         write(&stem.with_extension("bin"), &out)?;
         self.sprites.write_png(&stem.with_extension("png"))
@@ -1271,7 +1288,20 @@ impl MapObjectsAsset {
             })
             .collect::<Option<_>>()
             .ok_or_else(bad)?;
-        Ok(Self { objects, sprites: Rgba::read_png(&stem.with_extension("png"))? })
+        let at = 9 + n * 6;
+        let routes = *d.get(at).ok_or_else(bad)? as usize;
+        let airship_routes = (0..routes)
+            .map(|r| {
+                let mut route = [(0, 0); AIRSHIP_SPOTS];
+                for (k, spot) in route.iter_mut().enumerate() {
+                    let b = d.get(at + 1 + (r * AIRSHIP_SPOTS + k) * 3..)?.get(..3)?;
+                    *spot = (b[0], u16::from_le_bytes([b[1], b[2]]));
+                }
+                Some(route)
+            })
+            .collect::<Option<_>>()
+            .ok_or_else(bad)?;
+        Ok(Self { objects, sprites: Rgba::read_png(&stem.with_extension("png"))?, airship_routes })
     }
 }
 
@@ -1956,6 +1986,7 @@ mod map_objects_tests {
         let a = MapObjectsAsset {
             objects: vec![MapObjectSpawn { slot: 2, kind: 3, y: 0x80, x: 0x1A0, item: 9 }],
             sprites: Rgba { width: 2, height: 1, pixels: vec![1, 2, 3, 255, 0, 0, 0, 0] },
+            airship_routes: vec![[(0xA0, 0x60), (0x20, 0x60), (0x20, 0xC0), (0xA0, 0x160), (0x20, 0x60), (0x20, 0xC0)]],
         };
         a.write(&dir, 0).unwrap();
         assert_eq!(MapObjectsAsset::read(&dir, 0).unwrap(), a);

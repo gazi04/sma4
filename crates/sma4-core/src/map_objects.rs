@@ -112,6 +112,14 @@ fn walker(kind: u8) -> bool {
     WALKERS.contains(&kind)
 }
 
+/// The airship waiting on the map (kind 2, behaviour 0x08030844).
+pub const AIRSHIP: u8 = 2;
+
+/// Drawn by 0x08031DDC: the walkers and the airship.
+fn drawn(kind: u8) -> bool {
+    walker(kind) || kind == AIRSHIP
+}
+
 impl MapObjects {
     /// A world's objects (`sma4_assets::MapObjectsAsset`).
     pub fn new(spawns: &[sma4_assets::MapObjectSpawn]) -> Self {
@@ -147,6 +155,15 @@ impl MapObjects {
     /// One frame on the panel or idle (0x080329F4): the walkers sway, then the timer moves on
     /// every 4 frames.
     pub fn step_idle(&mut self, frame: u32) {
+        self.sway();
+        if frame & 3 == 0 {
+            self.slots[0].count = self.slots[0].count.wrapping_add(1);
+        }
+    }
+
+    /// The walkers' sway positions (0x08031558 outside sub-state 0x0C); 0x080329F4 moves
+    /// the sway timer only in sub-states 0 and 0x0E.
+    pub fn sway(&mut self) {
         let t = self.timer();
         for (i, o) in self.slots.iter_mut().enumerate().rev() {
             if !walker(o.kind) {
@@ -159,8 +176,13 @@ impl MapObjects {
             let off = if o.kind == 5 { SWAY_5[idx] } else { SWAY[idx] };
             o.live_x = o.x.wrapping_add(off as i16 as u16);
         }
-        if frame & 3 == 0 {
-            self.slots[0].count = self.slots[0].count.wrapping_add(1);
+    }
+
+    /// 0x08030844 (map sub-state 0x0E): the airship faces Mario (0x03003D43 = 1 while he is
+    /// left of it).
+    pub fn face_airship(&mut self, mario_x: u16) {
+        for o in self.slots.iter_mut().filter(|o| o.kind == AIRSHIP) {
+            o.dir = (mario_x < o.live_x) as u8;
         }
     }
 
@@ -298,10 +320,13 @@ impl MapObjects {
 
     /// The walkers as drawn (0x08031DDC): frame 1 / 2 by the frame counter's bit 3 (bit 2
     /// while moving), flipped facing right (the art faces left).
-    pub fn sprites(&self, frame: u32, moving: bool) -> Vec<MapObjectSprite> {
+    /// `hidden`: a slot not drawn (one puffing away).
+    pub fn sprites(&self, frame: u32, moving: bool, hidden: Option<usize>) -> Vec<MapObjectSprite> {
         self.slots
             .iter()
-            .filter(|o| walker(o.kind))
+            .enumerate()
+            .filter(|&(i, o)| drawn(o.kind) && hidden != Some(i))
+            .map(|(_, o)| o)
             .map(|o| {
                 let mask = if moving && o.count != 0 { 4 } else { 8 };
                 MapObjectSprite {

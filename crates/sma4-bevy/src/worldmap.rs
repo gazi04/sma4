@@ -35,7 +35,7 @@ const Z_STARS: f32 = 41.6;
 /// World 9's sign (BG3, priority 1) and pipe numbers (OBJ priority 3): over the tiles,
 /// under the map objects and Mario.
 const Z_OVERLAY: f32 = 41.3;
-/// The puff of an item used on the map: OBJ priority 0.
+/// The puff of a map object leaving: OBJ priority 0.
 const Z_PUFF: f32 = 41.7;
 const Z_IRIS: f32 = 41.8;
 /// The item panel is BG0, the status bar's layer (priority 0: over the map's sprites).
@@ -67,8 +67,10 @@ struct MapArt {
     stars: Vec<Handle<Image>>,
     /// Map objects (Hammer Bros), [`sma4_assets::map_object_cell`].
     objects: Vec<Handle<Image>>,
-    /// The puffs (`sma4_assets::map_puff_path`), row by row.
+    /// The puff of one beaten in battle, [`WorldMap::puff`].
     puff: Vec<Handle<Image>>,
+    /// The anchor shown on an anchored airship (`sma4_assets::map_anchor_path`).
+    anchor: Option<Handle<Image>>,
     /// The spade panel by streak count, [count][frame] (`sma4_assets::map_spade_path`).
     spade: Vec<Vec<Handle<Image>>>,
     /// The metatile atlas on the CPU side, for the Warp Whistle's wave, and its picture.
@@ -85,6 +87,10 @@ struct MapObjectSprite(usize);
 
 #[derive(Component)]
 struct MapPuff;
+
+/// The anchor on an anchored airship.
+#[derive(Component)]
+struct MapAnchor;
 
 /// A world's overlay picture (World 9: the "WARP ZONE" sign and the pipes' numbers).
 #[derive(Component)]
@@ -304,23 +310,17 @@ fn build_world(
         })
         .unwrap_or_default();
     commands.entity(camera).with_children(|cam| {
-        // Only what the GBA screen shows: cells are cut at its edges.
+        // Every cell; `sync_map` places them by the view's scroll and cuts them at the GBA
+        // screen's edges.
         for r in 0..asset.rows {
             for c in 0..asset.cols {
-                let (x, y) = (origin.0 + c as i32 * 16, origin.1 + r as i32 * 16);
-                let (x0, x1) = (x.max(0), (x + 16).min(SCREEN_W as i32));
-                let (y0, y1) = (y.max(0), (y + 16).min(SCREEN_H as i32));
-                if x0 >= x1 || y0 >= y1 {
-                    continue;
-                }
-                let rect = Rect::new((x0 - x) as f32, (y0 - y) as f32, (x1 - x) as f32, (y1 - y) as f32);
-                let sprite = Sprite { rect: Some(rect), ..default() };
-                let t = at(x0, y0, x1 - x0, y1 - y0, Z_TILES);
-                cam.spawn((WorldEntity, MapTile(r * asset.cols + c), sprite, t, Visibility::Hidden));
+                let tile = MapTile(r * asset.cols + c);
+                cam.spawn((WorldEntity, tile, Sprite::default(), Transform::default(), Visibility::Hidden));
             }
         }
         cam.spawn((WorldEntity, MapMario, Sprite::default(), Transform::default(), Visibility::Hidden));
         cam.spawn((WorldEntity, MapPuff, Sprite::default(), Transform::default(), Visibility::Hidden));
+        cam.spawn((WorldEntity, MapAnchor, Sprite::default(), Transform::default(), Visibility::Hidden));
         cam.spawn((WorldEntity, Iris, Sprite::from_image(iris.clone()), at(0, 0, 240, 160, Z_IRIS), Visibility::Hidden));
         for i in 0..8 {
             cam.spawn((WorldEntity, MapStar(i), Sprite::default(), Transform::default(), Visibility::Hidden));
@@ -346,9 +346,25 @@ fn build_world(
             .with_game_over_keep(asset.game_over_keep)
             .with_origin(origin)
             .with_world(world)
-            .with_objects(objects_asset.as_ref().map(|a| a.objects.as_slice()).unwrap_or(&[]));
+            .with_objects(objects_asset.as_ref().map(|a| a.objects.as_slice()).unwrap_or(&[]))
+            .with_airship_routes(objects_asset.as_ref().map(|a| a.airship_routes.as_slice()).unwrap_or(&[]));
     let atlas = asset.atlas;
-    commands.insert_resource(MapArt { tiles, mario, spin, origin, iris, stars, objects, puff, spade, atlas, wave, panel, items });
+    commands.insert_resource(MapArt {
+        tiles,
+        mario,
+        spin,
+        origin,
+        iris,
+        stars,
+        objects,
+        puff,
+        anchor: sma4_assets::Rgba::read_png(&sma4_assets::map_anchor_path(dir)).ok().map(|a| images.add(sprite_image(a))),
+        spade,
+        atlas,
+        wave,
+        panel,
+        items,
+    });
     Some(map)
 }
 
@@ -369,7 +385,7 @@ fn sync_map(
     game: Res<GameRes>,
     art: Option<Res<MapArt>>,
     mut images: ResMut<Assets<Image>>,
-    mut tiles: Query<(&MapTile, &mut Sprite, &mut Visibility), (Without<MapMario>, Without<Iris>)>,
+    mut tiles: Query<(&MapTile, &mut Sprite, &mut Transform, &mut Visibility), (Without<MapMario>, Without<Iris>)>,
     mut mario: Query<(&mut Sprite, &mut Transform, &mut Visibility), (With<MapMario>, Without<Iris>)>,
     mut iris: Query<&mut Visibility, (With<Iris>, Without<MapTile>, Without<MapMario>)>,
     mut stars: Query<
@@ -383,6 +399,19 @@ fn sync_map(
     mut puff: Query<
         (&mut Sprite, &mut Transform, &mut Visibility),
         (With<MapPuff>, Without<MapTile>, Without<MapMario>, Without<Iris>, Without<MapStar>, Without<MapObjectSprite>),
+    >,
+    mut anchor: Query<
+        (&mut Sprite, &mut Transform, &mut Visibility),
+        (
+            With<MapAnchor>,
+            Without<MapOverlay>,
+            Without<MapPuff>,
+            Without<MapTile>,
+            Without<MapMario>,
+            Without<Iris>,
+            Without<MapStar>,
+            Without<MapObjectSprite>,
+        ),
     >,
     mut overlay: Query<
         &mut Visibility,
@@ -408,11 +437,20 @@ fn sync_map(
     // 0x08012458 halves the palette under the menu (BLDY); the dimming goes once the
     // panel's window has closed.
     let tint = if menu.is_some_and(|m| m.dimmed()) { Color::srgb(0.5, 0.5, 0.5) } else { Color::WHITE };
-    for (tile, mut sprite, mut v) in &mut tiles {
-        *v = vis(shown);
-        if shown {
+    // The view's scroll (0x03003750 beyond the extracted picture's).
+    let origin = (art.origin.0 - map.scroll_x, art.origin.1);
+    for (tile, mut sprite, mut t, mut v) in &mut tiles {
+        let (c, r) = ((tile.0 % map.cols) as i32, (tile.0 / map.cols) as i32);
+        // Only what the GBA screen shows: cells are cut at its edges.
+        let (x, y) = (origin.0 + c * 16, origin.1 + r * 16);
+        let (x0, x1) = (x.max(0), (x + 16).min(SCREEN_W as i32));
+        let (y0, y1) = (y.max(0), (y + 16).min(SCREEN_H as i32));
+        let inside = x0 < x1 && y0 < y1;
+        *v = vis(shown && inside);
+        if shown && inside {
+            sprite.rect = Some(Rect::new((x0 - x) as f32, (y0 - y) as f32, (x1 - x) as f32, (y1 - y) as f32));
+            *t = at(x0, y0, x1 - x0, y1 - y0, Z_TILES);
             sprite.color = tint;
-            let (c, r) = ((tile.0 % map.cols) as i32, (tile.0 / map.cols) as i32);
             let id = map.tile(c, r);
             // The spade panel shows the streak's suit (0x0800AFC4).
             let look = (game.0.spade_streak.count as usize).min(sma4_assets::MAP_SPADE_LOOKS as usize - 1);
@@ -427,7 +465,7 @@ fn sync_map(
     }
     // Mario: lower OBJ at (x, y - 25), the upper one 16 px above (0x0800C45C); the two
     // poses alternate on frame-counter bit 3.
-    let (sx, sy) = (map.x as i32 + art.origin.0, map.y as i32 - 0x10 + art.origin.1);
+    let (sx, sy) = (map.x as i32 + origin.0, map.y as i32 - 0x10 + origin.1);
     for (mut sprite, mut t, mut v) in &mut mario {
         match menu.map(|m| m.mario()) {
             None => {}
@@ -500,21 +538,42 @@ fn sync_map(
         sprite.color = tint;
         sprite.flip_x = d.flip;
         let size = sma4_assets::MAP_OBJECT_SIZE as i32;
-        *t = at(d.x + art.origin.0, d.y - 0x10 + art.origin.1, size, size, Z_OBJECTS);
+        *t = at(d.x + origin.0, d.y - 0x10 + origin.1, size, size, Z_OBJECTS);
         *v = Visibility::Inherited;
     }
-    // The puff of an item used (0x08005E10, over Mario or the rock), 32x32 from 8 px left
-    // of and above a cell's lower OBJ.
+    // The puffs, 32x32 from 8 px left of and above a cell's lower OBJ: a map object
+    // leaving (0x0800F61C, over Mario) or an item used (0x08005E10, over Mario or the rock).
     let n = sma4_assets::MAP_PUFF_FRAMES;
-    let drawn = game.0.item_puff.map(|(cell, y, x)| (sma4_assets::MAP_PUFF_ITEM * n + cell, y, x)).filter(|_| shown);
+    let drawn = map
+        .puff()
+        .map(|cell| (sma4_assets::MAP_PUFF_OBJECT * n + cell, map.y, map.x))
+        .or(game.0.item_puff.map(|(cell, y, x)| (sma4_assets::MAP_PUFF_ITEM * n + cell, y, x)))
+        .filter(|_| shown);
     for (mut sprite, mut t, mut v) in &mut puff {
         let image = drawn.and_then(|(cell, y, x)| Some((art.puff.get(cell as usize)?, y, x)));
         *v = vis(image.is_some());
         if let Some((image, y, x)) = image {
             sprite.image = image.clone();
             let size = sma4_assets::MAP_PUFF_SIZE as i32;
-            let (px, py) = (x as i32 + art.origin.0, y as i32 - 0x10 + art.origin.1);
+            let (px, py) = (x as i32 + origin.0, y as i32 - 0x10 + origin.1);
             *t = at(px - 8, py - 8, size, size, Z_PUFF);
+        }
+    }
+    // The anchor (0x08031C74): 10 px right of the airship, 7 px above it, shown while frame
+    // counter bits 4-5 are not both clear (not in sub-state 2, the flight).
+    let ship = map.objects.slots.iter().find(|o| o.kind == sma4_core::map_objects::AIRSHIP);
+    for (mut sprite, mut t, mut v) in &mut anchor {
+        let on = shown
+            && map.anchored
+            && map.frame & 0x30 != 0
+            && !matches!(map.phase, MapPhase::AirshipFlight(_))
+            && ship.is_some()
+            && art.anchor.is_some();
+        *v = vis(on);
+        if let (true, Some(o), Some(image)) = (on, ship, &art.anchor) {
+            sprite.image = image.clone();
+            let (x, y) = (o.live_x as i32 + origin.0 + 10, o.live_y as i32 - 0x10 + origin.1 - 7);
+            *t = at(x, y, 8, 8, Z_OBJECTS + 0.05);
         }
     }
     // The "WORLD n" panel covers BG3 while it shows (map sub-state 0).

@@ -110,7 +110,54 @@ pub enum MapPhase {
     Return(u8),
     /// Then the map objects' move (sub-state 0x0C); whether it has started.
     ObjectsMove(bool),
+    /// After a death in the airship, it flies to another spot (map sub-state 2, 0x08031134 ->
+    /// 0x08030978) before Mario goes back; the frame.
+    AirshipFlight(u8),
+    /// The map scrolling a screen half across (map sub-state 0x0E with 0x0300384F set,
+    /// 0x0800D5B4): the frame (1-71) and whether to the left.
+    Scroll(u8, bool),
+    /// Back from a won battle, the map object leaving in a puff: sub-state 7 (0x0800F3B8,
+    /// `LEAVE_WAIT` frames), then 8 (0x0800F8C8) until the puff is over. The frame since
+    /// the map came back, which is the game's frame counter 0x03003AE8 (0 on the map's
+    /// set-up frame, mGBA).
+    Leaving(u8),
 }
+
+/// The map's horizontal scroll (0x0800C45C, 0x0800D5B4). Standing with his sprite at screen
+/// x 0xD0 or more (0x20 or less going left), Mario starts it unless the view is at the
+/// world's end: 0x03003AFA (view x / 16 + 16) at 0x0813A4E3[world] on the right, 0x03003AFB
+/// (view x / 16) at 0 on the left. 0x03003CA5 then runs 4, 5, 6 for 7 frames, then the view
+/// moves 2 px a frame while 0x0300384F counts 0x80 down by 2 (128 px). Worlds 5 and 8
+/// (0x03002A69 = 4, 7) scroll another way (not ported). Recorded in mGBA (World 2).
+const SCROLL_END_COLS: [u8; 9] = [0x10, 0x20, 0x30, 0x30, 0x00, 0x30, 0x20, 0x00, 0x26];
+const SCROLL_WAIT: u8 = 7;
+const SCROLL_STEP: i32 = 2;
+const SCROLL_FRAMES: u8 = SCROLL_WAIT + 0x40;
+const SCROLL_RIGHT_X: i32 = 0xD0;
+const SCROLL_LEFT_X: i32 = 0x20;
+
+/// The airship's flight (0x08030978): 0x03003850 = 0x2C frames, then 32 steps on frames
+/// with the counter a multiple of 4, each 1/32 of the way (8.8 fixed point). Anchored, it
+/// stays and Mario's way back starts once the 0x2C frames are over. Recorded in mGBA (World
+/// 1, (0x80, 0xC0) -> (0xA0, 0x60): 1 px down and 3 px left a step, from frame 48 to 172).
+const FLIGHT_WAIT: u8 = 0x2C;
+const FLIGHT_STEPS: u8 = 0x20;
+
+/// The flight under way: where it is (8.8 fixed point), the step, the steps left, the spot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Flight {
+    slot: usize,
+    pos: (i32, i32),
+    step: (i32, i32),
+    left: u8,
+    to: (u8, u16),
+}
+
+/// Sub-state 7 after a level: 0x03003850 = 0x0E, -1 a frame.
+pub const LEAVE_WAIT: u8 = 0x0E;
+/// Sub-state 8: the puff's step 0x03003AF8 + 1 when the frame counter is a multiple of 4; at
+/// 5 the slot is emptied (and sub-state 9 follows).
+pub const PUFF_STEPS: u8 = 5;
 
 /// Sub-state 3: 0x20 frames, the distance split as the game-over flight.
 pub const RETURN_FRAMES: u8 = 0x20;
@@ -165,15 +212,29 @@ pub struct WorldMap {
     pub meeting: Option<(usize, u8)>,
     /// Where the way back to the checkpoint started.
     return_from: (u8, u16),
+    /// The map object beaten in battle, to leave in a puff when the map is back (+0x62) and
+    /// the puff's step (0x03003AF8).
+    leaving: Option<usize>,
+    puff_step: u8,
     /// Mario rides the cloud (map form 0x03003CB6 = 7): he may leave a spot not cleared
     /// yet in any direction, once (0x0801112C).
     pub cloud: bool,
     /// The P-Wing is on (map form 8): the next level's P-meter stays full.
     pub p_wing: bool,
-    /// The world (0x03002A69, 0-8).
+    /// The world (0x03002A69, 0-8) and how far the view has scrolled right of where the
+    /// extracted picture's origin has it (px).
     pub world: u8,
-    /// This world's anchor has been used (0x03002D4C bit).
+    pub scroll_x: i32,
+    /// The airship's routes (`sma4_assets::MapObjectsAsset::airship_routes`), the one this
+    /// world start picked (0x0300386F, 0x0802FBB8), its next spot (0x030037EF), this world's
+    /// anchor (0x03002D4C bit) and a flight armed by a death in it (0x080270B8: its counter
+    /// 0x03003D51[slot] = 0x20).
+    airship_routes: Vec<[(u8, u16); sma4_assets::AIRSHIP_SPOTS]>,
+    airship_route: usize,
+    airship_spot: usize,
     pub anchored: bool,
+    flight_armed: bool,
+    flight: Option<Flight>,
 }
 
 impl WorldMap {
@@ -217,10 +278,18 @@ impl WorldMap {
             frame: 0,
             meeting: None,
             return_from: start,
+            leaving: None,
+            puff_step: 0,
             cloud: false,
             p_wing: false,
             world: 0,
+            scroll_x: 0,
+            airship_routes: Vec::new(),
+            airship_route: 0,
+            airship_spot: 0,
             anchored: false,
+            flight_armed: false,
+            flight: None,
         };
         map.rebuild();
         map
@@ -236,6 +305,12 @@ impl WorldMap {
     /// The world number (0x03002A69: 0 = World 1).
     pub fn with_world(mut self, world: u8) -> Self {
         self.world = world;
+        self
+    }
+
+    /// The world's airship routes (`sma4_assets::MapObjectsAsset::airship_routes`).
+    pub fn with_airship_routes(mut self, routes: &[[(u8, u16); sma4_assets::AIRSHIP_SPOTS]]) -> Self {
+        self.airship_routes = routes.to_vec();
         self
     }
 
@@ -302,7 +377,25 @@ impl WorldMap {
         self.return_from = (self.y, self.x);
         // 0x0800D5B4: the objects on their cells, facing at random.
         self.objects.set_up(&self.rand);
-        self.phase = if arrival == Arrival::Walk { MapPhase::Idle } else { MapPhase::Intro(INTRO_FRAMES) };
+        // 0x0802FBB8 at a world start: the airship's route 0x0813A042[random & 0xF] (0, 1, 2
+        // in turn), its first spot.
+        if arrival == Arrival::World {
+            self.airship_route = (self.rand[0] & 0xF) as usize % 3;
+            self.airship_spot = 0;
+        }
+        // 0x080270B8: a life lost in a spot entered from the airship's cell sets it off.
+        self.flight_armed = arrival == Arrival::Panel
+            && self.objects.slots.iter().any(|o| o.kind == map_objects::AIRSHIP && (o.y, o.x) == (self.y, self.x));
+        self.flight = None;
+        self.phase = match arrival {
+            Arrival::Walk if self.leaving.is_some() => MapPhase::Leaving(0),
+            Arrival::Walk => MapPhase::Idle,
+            _ => MapPhase::Intro(INTRO_FRAMES),
+        };
+        if self.phase == MapPhase::Idle {
+            self.leaving = None;
+        }
+        self.puff_step = 0;
         self.world_intro = arrival == Arrival::World;
         self.intro_frame = 0;
         self.stars = None;
@@ -310,7 +403,85 @@ impl WorldMap {
 
     /// Mario's lower 16x16 map sprite on screen.
     pub fn sprite_pos(&self) -> (i32, i32) {
-        (self.x as i32 + self.sprite_origin.0, self.y as i32 + self.sprite_origin.1)
+        (self.x as i32 + self.sprite_origin.0 - self.scroll_x, self.y as i32 + self.sprite_origin.1)
+    }
+
+    /// The airship's next spot (0x08030978): from 0x030037EF on, up to six tries, a spot
+    /// other than where it is, not within 0x40 px (right and down) of 0x20 px above-left of
+    /// the checkpoint, and with no walker (kinds 3-6) on it.
+    fn airship_target(&mut self, slot: usize) -> Option<(u8, u16)> {
+        let route = *self.airship_routes.get(self.airship_route)?;
+        let o = self.objects.slots[slot];
+        for _ in 0..sma4_assets::AIRSHIP_SPOTS {
+            let (ty, tx) = route[self.airship_spot];
+            if (ty, tx) != (o.y, o.x) {
+                let (cy, cx) = self.checkpoint;
+                let near = cy.wrapping_sub(ty.wrapping_sub(0x20)) < 0x41
+                    && (cx as i32 - (tx as i32 - 0x20)).rem_euclid(0x10000) < 0x41;
+                let walker = self.objects.slots.iter().any(|w| (3..=6).contains(&w.kind) && (w.y, w.x) == (ty, tx));
+                if !near && !walker {
+                    return Some((ty, tx));
+                }
+            }
+            self.airship_spot = (self.airship_spot + 1) % sma4_assets::AIRSHIP_SPOTS;
+        }
+        None
+    }
+
+    /// One frame (`k`, from 1) of the airship's flight; true once Mario's way back starts.
+    fn step_flight(&mut self, k: u8) -> bool {
+        if k == 1 {
+            let Some(slot) = self.objects.slots.iter().position(|o| o.kind == map_objects::AIRSHIP) else { return true };
+            let Some(to) = self.airship_target(slot) else { return true };
+            let o = self.objects.slots[slot];
+            let step = ((to.0 as i32 - o.y as i32) * 8, (to.1 as i32 - o.x as i32) * 8);
+            self.flight = Some(Flight { slot, pos: ((o.y as i32) << 8, (o.x as i32) << 8), step, left: FLIGHT_STEPS, to });
+            return false;
+        }
+        if k <= FLIGHT_WAIT {
+            return false;
+        }
+        if self.anchored {
+            // Anchored: it stays, and the route starts over (0x030037EF = 0).
+            self.airship_spot = 0;
+            self.flight = None;
+            return true;
+        }
+        let Some(f) = &mut self.flight else { return true };
+        if k & 3 != 0 {
+            return false;
+        }
+        f.pos = (f.pos.0 + f.step.0, f.pos.1 + f.step.1);
+        f.left -= 1;
+        let o = &mut self.objects.slots[f.slot];
+        (o.live_y, o.live_x) = ((f.pos.0 >> 8) as u8, (f.pos.1 >> 8) as u16);
+        if f.left != 0 {
+            return false;
+        }
+        (o.y, o.x) = f.to;
+        (o.live_y, o.live_x) = f.to;
+        self.airship_spot = (self.airship_spot + 1) % sma4_assets::AIRSHIP_SPOTS;
+        self.flight = None;
+        true
+    }
+
+    /// 0x0800C45C: a scroll starts with Mario standing near the screen's edge (see
+    /// `SCROLL_END_COLS`).
+    fn scroll_start(&self) -> Option<bool> {
+        if matches!(self.world, 4 | 7) {
+            return None;
+        }
+        // The view's x as the ROM has it (the extracted origin is minus its x).
+        let view = self.scroll_x - self.sprite_origin.0;
+        let screen = self.sprite_pos().0 & 0xFF;
+        let end = SCROLL_END_COLS.get(self.world as usize).copied().unwrap_or(0) as i32;
+        if screen >= SCROLL_RIGHT_X && view / 16 + 16 != end {
+            Some(false)
+        } else if view / 16 != 0 && screen <= SCROLL_LEFT_X {
+            Some(true)
+        } else {
+            None
+        }
     }
 
     /// One frame of the intro (map sub-state 0 / 2).
@@ -346,9 +517,11 @@ impl WorldMap {
         (w > 0 && h > 0).then_some((MENU_WINDOW_X - w, MENU_WINDOW_Y - h - 1, 2 * w, 2 * h))
     }
 
-    /// Mario is drawn only once the stars have brought him in.
+    /// Mario is drawn only once the stars have brought him in, and not while a map object
+    /// puffs away (mGBA: his OBJs are gone in sub-state 8).
     pub fn mario_hidden(&self) -> bool {
         matches!(self.phase, MapPhase::Intro(_)) && self.world_intro && !self.stars.as_ref().is_some_and(|s| s.done)
+            || self.puff().is_some()
     }
 
     fn cell(&self, y: i32, x: i32) -> (i32, i32) {
@@ -422,7 +595,7 @@ impl WorldMap {
     /// level there becomes the checkpoint (0x080270B8).
     pub fn clear_here(&mut self) {
         if self.node_here().is_some_and(|n| n.tileset < CHECKPOINT_TILESETS && n.tileset != TOAD_HOUSE_TILESET) {
-            self.checkpoint = (self.y, self.x);
+            self.move_checkpoint();
         }
         let (c, r) = self.cell(self.y as i32, self.x as i32);
         if c < 0 || r < 1 || c as usize >= self.cols {
@@ -506,6 +679,8 @@ impl WorldMap {
                     MapPhase::Intro(t - 1)
                 } else if self.world_intro {
                     MapPhase::Idle
+                } else if std::mem::take(&mut self.flight_armed) {
+                    MapPhase::AirshipFlight(0)
                 } else {
                     MapPhase::Return(0)
                 };
@@ -530,6 +705,25 @@ impl WorldMap {
                 self.phase = if done { MapPhase::Idle } else { MapPhase::ObjectsMove(true) };
                 None
             }
+            MapPhase::Leaving(n) => {
+                let n = n.wrapping_add(1);
+                self.objects.sway();
+                if n > LEAVE_WAIT && n & 3 == 0 {
+                    self.puff_step += 1;
+                    if self.puff_step == PUFF_STEPS {
+                        // 0x0800F8C8: the slot is emptied, then sub-states 9 -> 0x13 (not
+                        // ported for any return: the map is idle at once, as after a clear).
+                        if let Some(slot) = self.leaving.take() {
+                            self.objects.remove(slot);
+                        }
+                        self.puff_step = 0;
+                        self.phase = MapPhase::Idle;
+                        return None;
+                    }
+                }
+                self.phase = MapPhase::Leaving(n);
+                None
+            }
             MapPhase::Entering(r) => {
                 let r = r - IRIS_STEP;
                 if r < 0 {
@@ -539,9 +733,32 @@ impl WorldMap {
                 self.phase = MapPhase::Entering(r);
                 None
             }
+            MapPhase::AirshipFlight(k) => {
+                let k = k + 1;
+                self.phase = if self.step_flight(k) { MapPhase::Return(0) } else { MapPhase::AirshipFlight(k) };
+                None
+            }
+            MapPhase::Scroll(k, left) => {
+                let k = k + 1;
+                self.objects.step_idle(self.frame);
+                if k > SCROLL_WAIT {
+                    self.scroll_x += if left { -SCROLL_STEP } else { SCROLL_STEP };
+                }
+                self.phase = if k == SCROLL_FRAMES { MapPhase::Idle } else { MapPhase::Scroll(k, left) };
+                None
+            }
             MapPhase::Idle => {
                 self.idle(held, pressed);
                 self.objects.step_idle(self.frame);
+                self.objects.face_airship(self.x);
+                if self.walk == 0
+                    && self.target.is_none()
+                    && self.phase == MapPhase::Idle
+                    && let Some(left) = self.scroll_start()
+                {
+                    self.phase = MapPhase::Scroll(0, left);
+                    return None;
+                }
                 // 0x08031DDC: Mario standing on a walker's junction starts its battle at
                 // once (map sub-state 0x16, no iris).
                 if self.walk == 0
@@ -557,19 +774,37 @@ impl WorldMap {
         }
     }
 
-    /// The battle with the map object Mario met was won (its chest opened): the object is
-    /// gone (0x0800F8C8) and, as for a cleared level, the spot is the checkpoint
-    /// (0x080270B8; recorded in mGBA).
+    /// The battle with the map object Mario met was won (its chest opened): as for a
+    /// cleared level, the spot is the checkpoint (0x080270B8; recorded in mGBA), and the
+    /// object leaves in a puff once the map is back (`MapPhase::Leaving`).
     pub fn battle_won(&mut self) {
         if let Some((slot, _)) = self.meeting.take() {
-            self.objects.remove(slot);
-            self.checkpoint = (self.y, self.x);
+            self.leaving = Some(slot);
+            self.move_checkpoint();
         }
+    }
+
+    /// The puff of the map object leaving (0x0800F61C), shown in sub-state 8: its
+    /// `sma4_assets::map_puff_path` cell (step 0x0813A799[step]: steps 0 and 1 look alike),
+    /// over Mario's cell.
+    pub fn puff(&self) -> Option<u32> {
+        match self.phase {
+            MapPhase::Leaving(n) if n > LEAVE_WAIT && self.leaving.is_some() => {
+                Some(self.puff_step.max(1) as u32 - 1)
+            }
+            _ => None,
+        }
+    }
+
+    /// 0x080270B8: the checkpoint moves to Mario's spot.
+    fn move_checkpoint(&mut self) {
+        self.checkpoint = (self.y, self.x);
     }
 
     /// The map objects as drawn.
     pub fn object_sprites(&self) -> Vec<map_objects::MapObjectSprite> {
-        self.objects.sprites(self.frame, matches!(self.phase, MapPhase::ObjectsMove(_)))
+        let hidden = self.puff().and(self.leaving);
+        self.objects.sprites(self.frame, matches!(self.phase, MapPhase::ObjectsMove(_)), hidden)
     }
 
     /// Map sub-state 0x0E (0x0801112C), with the cooldown update of 0x0800D5B4 before it.
@@ -668,6 +903,80 @@ pub(crate) mod tests {
             .with_game_over_keep(keep);
         m.show(Arrival::Walk);
         m
+    }
+
+    #[test]
+    fn after_a_death_in_it_the_airship_flies_on_unless_anchored() {
+        // Recorded in mGBA (World 1, route 0, the airship (slot 1, kind 2) at (0x80, 0xC0)
+        // and the death in a level entered from there): it waits 0x2C frames, then moves a
+        // step every 4 frames from frame 48 to 172, to (0xA0, 0x60); then Mario goes back.
+        // Anchored, the way back starts at frame 46.
+        let route = [(0xA0, 0x60), (0x20, 0x60), (0x20, 0xC0), (0xA0, 0x60), (0x20, 0x60), (0x20, 0xC0)];
+        let ship = sma4_assets::MapObjectSpawn { slot: 1, kind: map_objects::AIRSHIP, y: 0x80, x: 0xC0, item: 0 };
+        for anchored in [false, true] {
+            let mut m = world1().with_objects(&[ship]).with_airship_routes(&[route]);
+            m.anchored = anchored;
+            (m.y, m.x) = (0x80, 0xC0);
+            m.show(Arrival::Panel);
+            run(&mut m, &[(Buttons::empty(), INTRO_FRAMES as u32)]);
+            assert_eq!(m.phase, MapPhase::AirshipFlight(0));
+            let mut seen = vec![];
+            for k in 1..=200u32 {
+                run(&mut m, &[(Buttons::empty(), 1)]);
+                let o = m.objects.slots[1];
+                seen.push((k, o.live_y, o.live_x));
+                if !matches!(m.phase, MapPhase::AirshipFlight(_)) {
+                    break;
+                }
+            }
+            if anchored {
+                assert_eq!(seen.len(), 45);
+                assert_eq!((m.objects.slots[1].y, m.objects.slots[1].x), (0x80, 0xC0));
+                continue;
+            }
+            assert_eq!(seen[46], (47, 0x80, 0xC0));
+            assert_eq!(seen[47], (48, 0x81, 0xBD));
+            assert_eq!(seen[51], (52, 0x82, 0xBA));
+            assert_eq!(*seen.last().unwrap(), (172, 0xA0, 0x60));
+            assert_eq!((m.objects.slots[1].y, m.objects.slots[1].x), (0xA0, 0x60));
+            assert_eq!(m.phase, MapPhase::Return(0));
+        }
+    }
+
+    #[test]
+    fn standing_near_the_edge_scrolls_a_wide_map_128_px() {
+        // Recorded in mGBA (World 2, view x 0): Mario's sprite at screen x 0xD0 starts the
+        // scroll; 7 frames of 0x03003CA5, then 2 px a frame for 64 frames.
+        let grid = vec![0x45; 32 * 12];
+        let mut m = WorldMap::new(grid, (32, 12), (0xA0, 0x20), [0x03, 0x67, 0xBF, 0xE9], vec![], [17; 4])
+            .with_origin((0, -9))
+            .with_world(1);
+        m.show(Arrival::Walk);
+        m.x = 0xC0;
+        run(&mut m, &[(Buttons::empty(), 1)]);
+        assert_eq!(m.phase, MapPhase::Idle, "screen x 0xC0: no scroll");
+        m.x = 0xD0;
+        run(&mut m, &[(Buttons::empty(), 1)]);
+        assert_eq!(m.phase, MapPhase::Scroll(0, false));
+        let mut seen = vec![];
+        for _ in 0..71 {
+            run(&mut m, &[(Buttons::RIGHT, 1)]);
+            seen.push(m.scroll_x);
+        }
+        assert_eq!(&seen[..8], &[0, 0, 0, 0, 0, 0, 0, 2]);
+        assert_eq!((m.scroll_x, m.phase, m.x), (0x80, MapPhase::Idle, 0xD0), "no walking meanwhile");
+        // World 2's view stops at x 0x100 (0x0813A4E3[1] = 0x20 columns).
+        m.x = 0x150;
+        run(&mut m, &[(Buttons::empty(), 1)]);
+        run(&mut m, &[(Buttons::empty(), 71)]);
+        assert_eq!(m.scroll_x, 0x100);
+        m.x = 0x1D0;
+        run(&mut m, &[(Buttons::empty(), 1)]);
+        assert_eq!(m.phase, MapPhase::Idle, "at the end");
+        // Back left at screen x 0x20.
+        m.x = 0x100 + 0x20;
+        run(&mut m, &[(Buttons::empty(), 72)]);
+        assert_eq!(m.scroll_x, 0x80);
     }
 
     /// Runs a script like the probe's: (keys, frames), keys pressed on the first frame.
@@ -789,10 +1098,35 @@ pub(crate) mod tests {
         assert_eq!((node.level, node.enemies), (0x4E, 0x61));
         assert_eq!(m.meeting, Some((2, 9)));
         assert_eq!(m.phase, MapPhase::Idle, "no iris");
-        // Won: the Bro is gone and the junction is the checkpoint.
+        // Won: the junction is the checkpoint, and the Bro leaves in a puff once the map
+        // is back.
         m.battle_won();
-        assert_eq!(m.objects.slots[2].kind, 0);
         assert_eq!(m.checkpoint, (0x40, 0x40));
+        (m.y, m.x) = (0x40, 0x40);
+        m.show(Arrival::Walk);
+        assert_eq!(m.phase, MapPhase::Leaving(0));
+        // Recorded in mGBA (a won battle, map frame counter 0x03003AE8 from 0 at the set-up):
+        // sub-state 7 on frames 1-14 with the Bro and Mario drawn; sub-state 8 shows the puff
+        // from 15 (tiles 0x16 / 0x16 / 0x18 / 0x1A / 0x1C as 0x03003AF8 steps on multiples
+        // of 4), Mario and the Bro gone; at 32 the slot is empty (sub-state 9).
+        let shown = |m: &WorldMap| (m.puff(), m.mario_hidden(), m.object_sprites().len());
+        for n in 1..=31u8 {
+            // Input waits.
+            run(&mut m, &[(Buttons::RIGHT, 1)]);
+            assert_eq!((m.y, m.x), (0x40, 0x40));
+            let want = match n {
+                1..=14 => (None, false, 1),
+                15..=19 => (Some(0), true, 0),
+                20..=23 => (Some(1), true, 0),
+                24..=27 => (Some(2), true, 0),
+                _ => (Some(3), true, 0),
+            };
+            assert_eq!(shown(&m), want, "frame {n}");
+            assert_eq!(m.objects.slots[2].kind, map_objects::HAMMER_BRO);
+        }
+        run(&mut m, &[(Buttons::empty(), 1)]);
+        assert_eq!(m.objects.slots[2].kind, 0);
+        assert_eq!((m.phase, shown(&m)), (MapPhase::Idle, (None, false, 0)));
     }
 
     #[test]
